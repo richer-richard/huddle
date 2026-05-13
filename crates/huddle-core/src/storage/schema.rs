@@ -79,4 +79,7 @@ pub const MIGRATIONS: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS idx_room_attachments_room ON room_attachments(room_id);",
     // Tolerated by the migration runner if the column already exists.
     "ALTER TABLE room_attachments ADD COLUMN megolm_session_id TEXT;",
+    // Phase 5: contact verification — user marks a member's fingerprint
+    // as verified after comparing it out-of-band. Default 0 (unverified).
+    "ALTER TABLE room_members ADD COLUMN verified INTEGER NOT NULL DEFAULT 0;",
 ];

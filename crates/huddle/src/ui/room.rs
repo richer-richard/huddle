@@ -103,6 +103,11 @@ fn render_header(f: &mut Frame, area: Rect, app: &TuiApp) {
     };
 
     let me = app.handle.fingerprint().to_string();
+    let verified: std::collections::HashSet<String> = app
+        .handle
+        .verified_fingerprints(&r.room_id)
+        .into_iter()
+        .collect();
     let mut member_spans: Vec<Span> = vec![Span::styled(
         format!("{} members: ", r.members.len().max(1)),
         Style::default().fg(Color::DarkGray),
@@ -126,6 +131,12 @@ fn render_header(f: &mut Frame, area: Rect, app: &TuiApp) {
                 Style::default().fg(Color::White)
             },
         ));
+        if verified.contains(fp) {
+            member_spans.push(Span::styled(
+                "✓",
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            ));
+        }
     }
 
     let lines = vec![Line::from({

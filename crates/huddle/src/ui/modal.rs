@@ -3,7 +3,7 @@ use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
 
 use crate::app::{
     AcceptRotationState, AttachPickerState, DialPeerState, JoinRoomState, RotateRoomState,
-    StartField, StartRoomState,
+    StartField, StartRoomState, VerifyState,
 };
 use crate::ui::centered_rect;
 
@@ -343,6 +343,65 @@ pub fn render_accept_rotation(f: &mut Frame, s: &AcceptRotationState) {
         ]),
     ];
     f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+pub fn render_verify(f: &mut Frame, s: &VerifyState) {
+    let area = centered_rect(72, 16, f.area());
+    f.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .padding(Padding::uniform(1))
+        .title(Span::styled(
+            " verify members ",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        ));
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(vec![
+        Span::styled("  your fingerprint: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            s.our_fingerprint.clone(),
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    lines.push(Line::from(Span::styled(
+        "  compare each peer's fingerprint with them out-of-band",
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines.push(Line::from(Span::styled(
+        "  (read aloud, call, etc.) before marking verified.",
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines.push(Line::from(""));
+    for (i, (fp, verified)) in s.members.iter().enumerate() {
+        let marker = if i == s.selected { "› " } else { "  " };
+        let check = if *verified { "[✓] " } else { "[ ] " };
+        let check_style = if *verified {
+            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        let name_style = if i == s.selected {
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {}", marker), Style::default().fg(Color::Yellow)),
+            Span::styled(check, check_style),
+            Span::styled(fp.clone(), name_style),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled(" j/k", Style::default().fg(Color::Yellow)),
+        Span::styled(" navigate  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Enter/Space", Style::default().fg(Color::Yellow)),
+        Span::styled(" toggle verified  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Esc", Style::default().fg(Color::Yellow)),
+        Span::styled(" close", Style::default().fg(Color::DarkGray)),
+    ]));
+    f.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: false }), area);
 }
 
 pub fn render_attach_picker(f: &mut Frame, s: &AttachPickerState) {

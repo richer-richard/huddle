@@ -73,6 +73,11 @@ pub enum Action {
     AcceptRotationTypeChar(char),
     AcceptRotationBackspace,
     AcceptRotationConfirm,
+    // Verify modal
+    OpenVerify,
+    VerifyNext,
+    VerifyPrev,
+    VerifyToggle,
 }
 
 pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
@@ -151,6 +156,13 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
             KeyCode::Char(c) => Action::AcceptRotationTypeChar(c),
             _ => Action::Nothing,
         },
+        Modal::Verify(_) => match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => Action::CloseModal,
+            KeyCode::Char('j') | KeyCode::Down => Action::VerifyNext,
+            KeyCode::Char('k') | KeyCode::Up => Action::VerifyPrev,
+            KeyCode::Enter | KeyCode::Char(' ') => Action::VerifyToggle,
+            _ => Action::Nothing,
+        },
         Modal::Info(_) => match key.code {
             _ => Action::CloseModal,
         },
@@ -207,6 +219,7 @@ fn map_in_room(key: KeyEvent, app: &TuiApp) -> Action {
             KeyCode::Char('p') => Action::TabPrev,
             KeyCode::Char('a') if !input_active => Action::OpenAttachmentPicker,
             KeyCode::Char('r') if !input_active => Action::OpenRotateRoom,
+            KeyCode::Char('v') if !input_active => Action::OpenVerify,
             _ => Action::Nothing,
         };
     }

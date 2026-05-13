@@ -43,6 +43,8 @@ pub enum Modal {
     /// Someone else rotated our room's key; ask the user for the new
     /// passphrase so we can continue receiving messages.
     AcceptRotation(AcceptRotationState),
+    /// Verify member fingerprints (^V).
+    Verify(VerifyState),
     QuitConfirm,
     Help,
     Error(String),
@@ -61,6 +63,15 @@ pub struct AcceptRotationState {
     pub rotator_fingerprint: String,
     pub new_salt: Vec<u8>,
     pub passphrase: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct VerifyState {
+    pub room_id: String,
+    pub our_fingerprint: String,
+    /// (fingerprint, currently-verified)
+    pub members: Vec<(String, bool)>,
+    pub selected: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -1244,6 +1255,69 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             match app.handle.accept_rotation(&room_id, &new_salt, &pp).await {
                 Ok(()) => app.set_status("accepted rotation — new key in use"),
                 Err(e) => app.modal = Modal::Error(format!("accept rotation failed: {e}")),
+            }
+            Ok(false)
+        }
+        Action::OpenVerify => {
+            let room_id = match app.active_room() {
+                Some(r) => r.room_id.clone(),
+                None => return Ok(false),
+            };
+            let our_fp = app.handle.fingerprint().to_string();
+            let verified_set: std::collections::HashSet<String> =
+                app.handle.verified_fingerprints(&room_id).into_iter().collect();
+            let members: Vec<(String, bool)> = app
+                .active_room()
+                .map(|r| {
+                    r.members
+                        .iter()
+                        .filter(|fp| **fp != our_fp)
+                        .map(|fp| (fp.clone(), verified_set.contains(fp)))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if members.is_empty() {
+                app.set_status("no other members to verify yet");
+                return Ok(false);
+            }
+            app.modal = Modal::Verify(VerifyState {
+                room_id,
+                our_fingerprint: our_fp,
+                members,
+                selected: 0,
+            });
+            Ok(false)
+        }
+        Action::VerifyNext => {
+            if let Modal::Verify(s) = &mut app.modal {
+                if s.selected + 1 < s.members.len() {
+                    s.selected += 1;
+                }
+            }
+            Ok(false)
+        }
+        Action::VerifyPrev => {
+            if let Modal::Verify(s) = &mut app.modal {
+                if s.selected > 0 {
+                    s.selected -= 1;
+                }
+            }
+            Ok(false)
+        }
+        Action::VerifyToggle => {
+            let (room_id, fp, new_state) = match &mut app.modal {
+                Modal::Verify(s) => {
+                    let m = match s.members.get_mut(s.selected) {
+                        Some(x) => x,
+                        None => return Ok(false),
+                    };
+                    m.1 = !m.1;
+                    (s.room_id.clone(), m.0.clone(), m.1)
+                }
+                _ => return Ok(false),
+            };
+            if let Err(e) = app.handle.set_member_verified(&room_id, &fp, new_state) {
+                app.modal = Modal::Error(format!("verify failed: {e}"));
             }
             Ok(false)
         }

@@ -908,6 +908,7 @@ impl AppHandle {
                             peer_id: String::new(), // unknown at this layer
                             fingerprint: sender_fingerprint.clone(),
                             last_seen: Some(now_unix()),
+                            verified: false,
                         },
                     );
                     room.info.encrypted && wrapped_session_key.is_some()
@@ -1306,6 +1307,39 @@ impl AppHandle {
 
     pub fn list_room_attachments(&self, room_id: &str) -> Result<Vec<StoredAttachment>> {
         repo::list_room_attachments(&self.db, room_id)
+    }
+
+    /// Mark a peer's fingerprint as verified in the given room. Used by
+    /// the `^V` verification modal after the user has compared the
+    /// fingerprint out-of-band.
+    pub fn set_member_verified(
+        &self,
+        room_id: &str,
+        fingerprint: &str,
+        verified: bool,
+    ) -> Result<()> {
+        // Make sure there's a member row to flip — peer_id is unknown
+        // at this layer when the user verifies an out-of-band identity,
+        // so we use the fingerprint as the canonical identity key with
+        // an empty peer_id placeholder if none exists.
+        let members = repo::list_room_members(&self.db, room_id).unwrap_or_default();
+        if !members.iter().any(|m| m.fingerprint == fingerprint) {
+            repo::upsert_room_member(
+                &self.db,
+                &StoredRoomMember {
+                    room_id: room_id.to_string(),
+                    peer_id: String::new(),
+                    fingerprint: fingerprint.to_string(),
+                    last_seen: Some(now_unix()),
+                    verified,
+                },
+            )?;
+        }
+        repo::set_member_verified(&self.db, room_id, fingerprint, verified)
+    }
+
+    pub fn verified_fingerprints(&self, room_id: &str) -> Vec<String> {
+        repo::list_verified_fingerprints(&self.db, room_id).unwrap_or_default()
     }
 
     // -------------------------------------------------------------------

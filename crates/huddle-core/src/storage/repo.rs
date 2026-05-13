@@ -144,12 +144,14 @@ pub struct StoredRoomMember {
     pub peer_id: String,
     pub fingerprint: String,
     pub last_seen: Option<i64>,
+    pub verified: bool,
 }
 
 pub fn upsert_room_member(db: &Db, member: &StoredRoomMember) -> Result<()> {
     let conn = db.lock().unwrap();
     conn.execute(
-        "INSERT INTO room_members (room_id, peer_id, fingerprint, last_seen) VALUES (?1, ?2, ?3, ?4)
+        "INSERT INTO room_members (room_id, peer_id, fingerprint, last_seen, verified)
+         VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(room_id, peer_id) DO UPDATE SET
             fingerprint = excluded.fingerprint,
             last_seen = excluded.last_seen",
@@ -157,7 +159,8 @@ pub fn upsert_room_member(db: &Db, member: &StoredRoomMember) -> Result<()> {
             member.room_id,
             member.peer_id,
             member.fingerprint,
-            member.last_seen
+            member.last_seen,
+            member.verified as i64,
         ],
     )?;
     Ok(())
@@ -166,7 +169,7 @@ pub fn upsert_room_member(db: &Db, member: &StoredRoomMember) -> Result<()> {
 pub fn list_room_members(db: &Db, room_id: &str) -> Result<Vec<StoredRoomMember>> {
     let conn = db.lock().unwrap();
     let mut stmt = conn.prepare(
-        "SELECT room_id, peer_id, fingerprint, last_seen FROM room_members WHERE room_id = ?1",
+        "SELECT room_id, peer_id, fingerprint, last_seen, verified FROM room_members WHERE room_id = ?1",
     )?;
     let rows = stmt.query_map(params![room_id], |row| {
         Ok(StoredRoomMember {
@@ -174,6 +177,7 @@ pub fn list_room_members(db: &Db, room_id: &str) -> Result<Vec<StoredRoomMember>
             peer_id: row.get(1)?,
             fingerprint: row.get(2)?,
             last_seen: row.get(3)?,
+            verified: row.get::<_, i64>(4).unwrap_or(0) != 0,
         })
     })?;
     Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -186,6 +190,31 @@ pub fn remove_room_member(db: &Db, room_id: &str, peer_id: &str) -> Result<()> {
         params![room_id, peer_id],
     )?;
     Ok(())
+}
+
+/// Mark a member as verified-by-fingerprint. Matches by fingerprint
+/// rather than peer_id so a re-join (new peer_id) keeps verification.
+pub fn set_member_verified(
+    db: &Db,
+    room_id: &str,
+    fingerprint: &str,
+    verified: bool,
+) -> Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "UPDATE room_members SET verified = ?1 WHERE room_id = ?2 AND fingerprint = ?3",
+        params![verified as i64, room_id, fingerprint],
+    )?;
+    Ok(())
+}
+
+pub fn list_verified_fingerprints(db: &Db, room_id: &str) -> Result<Vec<String>> {
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT fingerprint FROM room_members WHERE room_id = ?1 AND verified = 1",
+    )?;
+    let rows = stmt.query_map(params![room_id], |row| row.get::<_, String>(0))?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
 }
 
 // =========================================================================
@@ -635,12 +664,37 @@ mod tests {
                 peer_id: "peer-x".into(),
                 fingerprint: "fp-x".into(),
                 last_seen: Some(500),
+                verified: false,
             },
         )
         .unwrap();
         let members = list_room_members(&db, &room.id).unwrap();
         assert_eq!(members.len(), 1);
         assert_eq!(members[0].fingerprint, "fp-x");
+        assert!(!members[0].verified);
+    }
+
+    #[test]
+    fn set_and_query_verified() {
+        let db = open_db_in_memory().unwrap();
+        let room = make_room("r");
+        insert_room(&db, &room).unwrap();
+        upsert_room_member(
+            &db,
+            &StoredRoomMember {
+                room_id: room.id.clone(),
+                peer_id: "p1".into(),
+                fingerprint: "fp-1".into(),
+                last_seen: None,
+                verified: false,
+            },
+        )
+        .unwrap();
+        set_member_verified(&db, &room.id, "fp-1", true).unwrap();
+        let verified = list_verified_fingerprints(&db, &room.id).unwrap();
+        assert_eq!(verified, vec!["fp-1".to_string()]);
+        let m = list_room_members(&db, &room.id).unwrap();
+        assert!(m[0].verified);
     }
 
     #[test]
