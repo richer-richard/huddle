@@ -19,6 +19,7 @@ pub fn render(f: &mut Frame, app: &TuiApp) {
         Modal::StartRoom(s) => modal::render_start_room(f, s),
         Modal::JoinRoom(j) => modal::render_join_room(f, j),
         Modal::DialPeer(d) => modal::render_dial_peer(f, d),
+        Modal::AttachPicker(s) => modal::render_attach_picker(f, s),
         Modal::QuitConfirm => modal::render_quit_confirm(f),
         Modal::Help => modal::render_help(f),
         Modal::Error(msg) => modal::render_error(f, msg),

@@ -60,6 +60,11 @@ pub enum Action {
     CancelFocusedCard,
     SaveAgainFocusedCard,
     OpenAttachmentPicker,
+    // Attach picker modal
+    AttachPickerUp,
+    AttachPickerDown,
+    AttachPickerAscend,
+    AttachPickerDescendOrPick,
 }
 
 pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
@@ -114,6 +119,14 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
             KeyCode::Enter => Action::DialPeerConfirm,
             KeyCode::Backspace => Action::DialPeerBackspace,
             KeyCode::Char(c) => Action::DialPeerTypeChar(c),
+            _ => Action::Nothing,
+        },
+        Modal::AttachPicker(_) => match key.code {
+            KeyCode::Esc => Action::CloseModal,
+            KeyCode::Char('j') | KeyCode::Down => Action::AttachPickerDown,
+            KeyCode::Char('k') | KeyCode::Up => Action::AttachPickerUp,
+            KeyCode::Char('h') | KeyCode::Backspace | KeyCode::Left => Action::AttachPickerAscend,
+            KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => Action::AttachPickerDescendOrPick,
             _ => Action::Nothing,
         },
         Modal::Info(_) => match key.code {

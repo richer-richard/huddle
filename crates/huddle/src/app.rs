@@ -35,10 +35,94 @@ pub enum Modal {
     StartRoom(StartRoomState),
     JoinRoom(JoinRoomState),
     DialPeer(DialPeerState),
+    AttachPicker(AttachPickerState),
     QuitConfirm,
     Help,
     Error(String),
     Info(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct AttachEntry {
+    pub name: String,
+    pub is_dir: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct AttachPickerState {
+    pub cwd: std::path::PathBuf,
+    pub entries: Vec<AttachEntry>,
+    pub selected: usize,
+    pub error: Option<String>,
+}
+
+impl AttachPickerState {
+    pub fn new() -> Self {
+        let start = dirs::download_dir()
+            .or_else(dirs::home_dir)
+            .unwrap_or_else(|| std::path::PathBuf::from("/"));
+        let mut s = Self {
+            cwd: start,
+            entries: Vec::new(),
+            selected: 0,
+            error: None,
+        };
+        s.reload();
+        s
+    }
+
+    pub fn reload(&mut self) {
+        self.error = None;
+        self.entries.clear();
+        self.selected = 0;
+        match std::fs::read_dir(&self.cwd) {
+            Ok(rd) => {
+                let mut tmp: Vec<AttachEntry> = Vec::new();
+                for entry in rd.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name.starts_with('.') {
+                        continue;
+                    }
+                    let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                    tmp.push(AttachEntry { name, is_dir });
+                }
+                tmp.sort_by(|a, b| match (a.is_dir, b.is_dir) {
+                    (true, false) => std::cmp::Ordering::Less,
+                    (false, true) => std::cmp::Ordering::Greater,
+                    _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+                });
+                self.entries = tmp;
+            }
+            Err(e) => {
+                self.error = Some(format!("cannot read {}: {}", self.cwd.display(), e));
+            }
+        }
+    }
+
+    pub fn descend(&mut self) {
+        if let Some(e) = self.entries.get(self.selected) {
+            if e.is_dir {
+                self.cwd.push(&e.name);
+                self.reload();
+            }
+        }
+    }
+
+    pub fn ascend(&mut self) {
+        if let Some(parent) = self.cwd.parent() {
+            self.cwd = parent.to_path_buf();
+            self.reload();
+        }
+    }
+
+    pub fn selected_path(&self) -> Option<std::path::PathBuf> {
+        let e = self.entries.get(self.selected)?;
+        if e.is_dir {
+            None
+        } else {
+            Some(self.cwd.join(&e.name))
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1006,8 +1090,66 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             Ok(false)
         }
         Action::OpenAttachmentPicker => {
-            // Implemented in Task #37 — for now, just show a hint.
-            app.set_status("attachment picker coming in next task");
+            if app.active_room().is_none() {
+                app.set_status("attach is only available inside a room");
+                return Ok(false);
+            }
+            app.modal = Modal::AttachPicker(AttachPickerState::new());
+            Ok(false)
+        }
+        Action::AttachPickerUp => {
+            if let Modal::AttachPicker(s) = &mut app.modal {
+                if s.selected > 0 {
+                    s.selected -= 1;
+                }
+            }
+            Ok(false)
+        }
+        Action::AttachPickerDown => {
+            if let Modal::AttachPicker(s) = &mut app.modal {
+                if s.selected + 1 < s.entries.len() {
+                    s.selected += 1;
+                }
+            }
+            Ok(false)
+        }
+        Action::AttachPickerAscend => {
+            if let Modal::AttachPicker(s) = &mut app.modal {
+                s.ascend();
+            }
+            Ok(false)
+        }
+        Action::AttachPickerDescendOrPick => {
+            let pick: Option<std::path::PathBuf> = match &mut app.modal {
+                Modal::AttachPicker(s) => {
+                    if let Some(e) = s.entries.get(s.selected) {
+                        if e.is_dir {
+                            s.descend();
+                            None
+                        } else {
+                            s.selected_path()
+                        }
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+            if let Some(path) = pick {
+                let room_id = match app.active_room() {
+                    Some(r) => r.room_id.clone(),
+                    None => return Ok(false),
+                };
+                app.modal = Modal::None;
+                match app.handle.send_file(&room_id, &path).await {
+                    Ok(file_id) => {
+                        app.set_status(format!("sending {} ({})", path.display(), &file_id[..12]));
+                    }
+                    Err(e) => {
+                        app.modal = Modal::Error(format!("send failed: {e}"));
+                    }
+                }
+            }
             Ok(false)
         }
     }

@@ -1,7 +1,7 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
 
-use crate::app::{DialPeerState, JoinRoomState, StartField, StartRoomState};
+use crate::app::{AttachPickerState, DialPeerState, JoinRoomState, StartField, StartRoomState};
 use crate::ui::centered_rect;
 
 pub fn render_start_room(f: &mut Frame, s: &StartRoomState) {
@@ -254,6 +254,93 @@ pub fn render_dial_peer(f: &mut Frame, s: &DialPeerState) {
     ];
 
     let para = Paragraph::new(lines).wrap(Wrap { trim: false }).block(block);
+    f.render_widget(para, area);
+}
+
+pub fn render_attach_picker(f: &mut Frame, s: &AttachPickerState) {
+    let area = centered_rect(80, 22, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(Span::styled(
+            " attach a file ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .padding(Padding::uniform(1));
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(vec![
+        Span::styled("  in ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("{}", s.cwd.display()),
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    lines.push(Line::from(""));
+
+    if let Some(err) = &s.error {
+        lines.push(Line::from(Span::styled(
+            format!("  ! {}", err),
+            Style::default().fg(Color::Red),
+        )));
+    }
+
+    // Reserve about 14 visible rows for entries.
+    let visible = 14usize;
+    let offset = if s.selected >= visible {
+        s.selected.saturating_sub(visible - 1)
+    } else {
+        0
+    };
+    let take = visible.min(s.entries.len().saturating_sub(offset));
+    if s.entries.is_empty() && s.error.is_none() {
+        lines.push(Line::from(Span::styled(
+            "  (empty directory)",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    for (i, entry) in s.entries.iter().enumerate().skip(offset).take(take) {
+        let is_focused = i == s.selected;
+        let marker = if is_focused { "› " } else { "  " };
+        let icon = if entry.is_dir { "[dir] " } else { "      " };
+        let suffix = if entry.is_dir { "/" } else { "" };
+        let style = if is_focused {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else if entry.is_dir {
+            Style::default().fg(Color::Blue)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {}", marker), Style::default().fg(Color::Yellow)),
+            Span::styled(icon, Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{}{}", entry.name, suffix), style),
+        ]));
+    }
+    // Pad to visible rows to keep layout stable.
+    while lines.len() < visible + 4 {
+        lines.push(Line::from(""));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled(" j/k", Style::default().fg(Color::Yellow)),
+        Span::styled(" navigate  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Enter", Style::default().fg(Color::Yellow)),
+        Span::styled(" descend/pick  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("h/Backspace", Style::default().fg(Color::Yellow)),
+        Span::styled(" up  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Esc", Style::default().fg(Color::Yellow)),
+        Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
+    ]));
+
+    let para = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
     f.render_widget(para, area);
 }
 
