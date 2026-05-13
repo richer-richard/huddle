@@ -1,15 +1,49 @@
-pub mod chat_view;
-pub mod layout;
-pub mod peer_list;
-pub mod status;
+pub mod lobby;
+pub mod modal;
+pub mod room;
 
 use ratatui::prelude::*;
 
-use crate::app::TuiApp;
+use crate::app::{Modal, Screen, TuiApp};
 
-pub fn render_ui(f: &mut Frame, app: &TuiApp) {
-    let [left, center, right] = layout::three_pane_layout(f.area());
-    peer_list::render_peer_list(f, left, app);
-    chat_view::render_chat_view(f, center, app);
-    status::render_status(f, right, app);
+pub fn render(f: &mut Frame, app: &TuiApp) {
+    match app.screen {
+        Screen::Lobby => lobby::render_lobby(f, f.area(), app),
+        Screen::InRoom => room::render_room_screen(f, f.area(), app),
+    }
+
+    match &app.modal {
+        Modal::None => {}
+        Modal::StartRoom(s) => modal::render_start_room(f, s),
+        Modal::JoinRoom(j) => modal::render_join_room(f, j),
+        Modal::QuitConfirm => modal::render_quit_confirm(f),
+        Modal::Help => modal::render_help(f),
+        Modal::Error(msg) => modal::render_error(f, msg),
+    }
+}
+
+/// Compute a centered rect with given absolute width/height.
+pub fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length((area.height.saturating_sub(height)) / 2),
+            Constraint::Length(height),
+            Constraint::Min(0),
+        ])
+        .split(area);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length((area.width.saturating_sub(width)) / 2),
+            Constraint::Length(width),
+            Constraint::Min(0),
+        ])
+        .split(popup_layout[1])[1]
+}
+
+/// Truncate a fingerprint to its first group (4 hex chars).
+pub fn short_fp(fp: &str) -> String {
+    fp.split('-').next().unwrap_or(fp).to_string()
 }
