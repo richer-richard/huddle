@@ -88,4 +88,8 @@ pub enum AppEvent {
         rotator_fingerprint: String,
         new_salt: Vec<u8>,
     },
+    /// Someone in a room started typing. The UI re-reads typing peers
+    /// from `AppHandle::typers_in_room` on each render; the event is
+    /// just a nudge.
+    TypingChanged { room_id: String },
 }

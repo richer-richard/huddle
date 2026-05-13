@@ -197,6 +197,9 @@ pub struct JoinRoomState {
     pub passphrase: String,
 }
 
+/// Minimum gap between successive Typing broadcasts per room.
+const TYPING_DEBOUNCE: Duration = Duration::from_millis(800);
+
 /// A room we're currently in (a tab in the in-room view).
 pub struct OpenRoom {
     pub room_id: String,
@@ -212,6 +215,9 @@ pub struct OpenRoom {
     /// Number of lines skipped from the top of the wrapped message
     /// buffer. Bounded by `last_max_scroll` at render time.
     pub scroll: u16,
+    /// Last time we broadcast a Typing pulse for this room; used to
+    /// debounce ChatTypeChar so we don't spam gossipsub.
+    pub last_typing_sent: Option<Instant>,
     /// When true, render anchors to the bottom regardless of `scroll` —
     /// new messages stay visible. Any ScrollUp / PgUp / Home disables it.
     pub follow_mode: bool,
@@ -371,6 +377,7 @@ impl TuiApp {
                             attachments,
                             input: String::new(),
                             input_active: true,
+                            last_typing_sent: None,
                             scroll: 0,
                             follow_mode: true,
                             last_max_scroll: Cell::new(0),
@@ -516,6 +523,10 @@ impl TuiApp {
             AppEvent::FileFailed { file_id: _, reason } => {
                 self.set_status(format!("transfer failed: {}", reason));
             }
+            AppEvent::TypingChanged { .. } => {
+                // The UI re-reads typers per-frame via handle.typers_in_room;
+                // nothing else to do here.
+            }
             AppEvent::RotationRequested {
                 room_id,
                 rotator_fingerprint,
@@ -572,6 +583,7 @@ fn open_existing_room_tab(app: &mut TuiApp, room_id: &str) {
         attachments,
         input: String::new(),
         input_active: true,
+        last_typing_sent: None,
         scroll: 0,
         follow_mode: true,
         last_max_scroll: Cell::new(0),
@@ -1024,10 +1036,23 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             Ok(false)
         }
         Action::ChatTypeChar(c) => {
-            if let Some(r) = app.active_room_mut() {
-                if r.input_active {
-                    r.input.push(c);
+            let (room_id, should_pulse) = {
+                let r = match app.active_room_mut() {
+                    Some(r) if r.input_active => r,
+                    _ => return Ok(false),
+                };
+                r.input.push(c);
+                let pulse = match r.last_typing_sent {
+                    Some(t) if t.elapsed() < TYPING_DEBOUNCE => false,
+                    _ => true,
+                };
+                if pulse {
+                    r.last_typing_sent = Some(Instant::now());
                 }
+                (r.room_id.clone(), pulse)
+            };
+            if should_pulse {
+                app.handle.broadcast_typing(&room_id).await;
             }
             Ok(false)
         }

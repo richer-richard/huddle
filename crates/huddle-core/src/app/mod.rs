@@ -87,7 +87,12 @@ struct ActiveRoom {
     passphrase_key: Option<[u8; KEY_LEN]>,
     /// Fingerprints of members currently known to be in the room.
     members: HashSet<String>,
+    /// Ephemeral typing indicators: fingerprint → unix expiry. Pruned
+    /// on read; never persisted.
+    typers: HashMap<String, i64>,
 }
+
+const TYPING_TTL_SECS: i64 = 3;
 
 /// TTL for a discovered room before it's considered stale (re-announcements
 /// happen every 15 seconds; after 45s of silence we drop it).
@@ -330,6 +335,7 @@ impl AppHandle {
                 crypto,
                 passphrase_key,
                 members,
+                typers: HashMap::new(),
             },
         );
 
@@ -429,6 +435,7 @@ impl AppHandle {
                 crypto,
                 passphrase_key,
                 members,
+                typers: HashMap::new(),
             },
         );
         // No longer "restorable" now that we've rejoined.
@@ -495,6 +502,7 @@ impl AppHandle {
                     crypto: None,
                     passphrase_key: None,
                     members,
+                    typers: HashMap::new(),
                 },
             );
             self.network.subscribe_room(info.id.clone()).await;
@@ -1032,6 +1040,20 @@ impl AppHandle {
                     sent_at,
                 });
             }
+            RoomMessage::Typing { sender_fingerprint } => {
+                if sender_fingerprint == our_fp {
+                    return;
+                }
+                let expiry = now_unix() + TYPING_TTL_SECS;
+                let mut rooms = self.active_rooms.lock().unwrap();
+                if let Some(room) = rooms.get_mut(room_id) {
+                    room.typers.insert(sender_fingerprint, expiry);
+                }
+                drop(rooms);
+                let _ = self.app_event_tx.send(AppEvent::TypingChanged {
+                    room_id: room_id.to_string(),
+                });
+            }
             RoomMessage::RotateRoomKey {
                 rotator_fingerprint,
                 new_salt,
@@ -1340,6 +1362,37 @@ impl AppHandle {
 
     pub fn verified_fingerprints(&self, room_id: &str) -> Vec<String> {
         repo::list_verified_fingerprints(&self.db, room_id).unwrap_or_default()
+    }
+
+    /// Broadcast a "I'm typing" pulse to the given room. Caller is
+    /// responsible for debouncing (don't fire more than every ~500ms).
+    pub async fn broadcast_typing(&self, room_id: &str) {
+        if !self.active_rooms.lock().unwrap().contains_key(room_id) {
+            return;
+        }
+        let msg = RoomMessage::Typing {
+            sender_fingerprint: self.identity.fingerprint().to_string(),
+        };
+        if let Ok(bytes) = serde_json::to_vec(&msg) {
+            self.network
+                .publish_room_message(room_id.to_string(), bytes)
+                .await;
+        }
+    }
+
+    /// Returns the fingerprints of peers currently typing in `room_id`,
+    /// pruning entries past their TTL.
+    pub fn typers_in_room(&self, room_id: &str) -> Vec<String> {
+        let now = now_unix();
+        let mut rooms = self.active_rooms.lock().unwrap();
+        let room = match rooms.get_mut(room_id) {
+            Some(r) => r,
+            None => return Vec::new(),
+        };
+        room.typers.retain(|_, exp| *exp > now);
+        let mut v: Vec<String> = room.typers.keys().cloned().collect();
+        v.sort();
+        v
     }
 
     // -------------------------------------------------------------------

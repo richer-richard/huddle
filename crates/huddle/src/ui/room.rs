@@ -11,7 +11,7 @@ pub fn render_room_screen(f: &mut Frame, area: Rect, app: &TuiApp) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),       // tabs
-            Constraint::Length(3),       // header
+            Constraint::Length(4),       // header (room name + optional typing)
             Constraint::Min(3),          // messages
             Constraint::Length(input_h), // input (grows with content)
             Constraint::Length(2),       // hints
@@ -139,14 +139,33 @@ fn render_header(f: &mut Frame, area: Rect, app: &TuiApp) {
         }
     }
 
-    let lines = vec![Line::from({
-        let mut spans = vec![
-            Span::styled(format!("#{} ", r.name), Style::default().fg(Color::Cyan).bold()),
-            Span::styled(format!("{}  ", kind), kind_style),
-        ];
-        spans.extend(member_spans);
-        spans
-    })];
+    let mut header_line_spans = vec![
+        Span::styled(format!("#{} ", r.name), Style::default().fg(Color::Cyan).bold()),
+        Span::styled(format!("{}  ", kind), kind_style),
+    ];
+    header_line_spans.extend(member_spans);
+
+    let typers = app.handle.typers_in_room(&r.room_id);
+    let mut lines: Vec<Line> = vec![Line::from(header_line_spans)];
+    if !typers.is_empty() {
+        let me = app.handle.fingerprint().to_string();
+        let names: Vec<String> = typers
+            .iter()
+            .filter(|fp| *fp != &me)
+            .map(|fp| short_fp(fp))
+            .collect();
+        if !names.is_empty() {
+            let txt = if names.len() == 1 {
+                format!("{} is typing…", names[0])
+            } else {
+                format!("{} are typing…", names.join(", "))
+            };
+            lines.push(Line::from(Span::styled(
+                format!("  {}", txt),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    }
 
     let para = Paragraph::new(lines).block(
         Block::default()

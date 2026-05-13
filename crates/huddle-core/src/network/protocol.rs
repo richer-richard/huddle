@@ -76,6 +76,10 @@ pub enum RoomMessage {
         /// Argon2id salt for the new passphrase-derived key.
         new_salt: Vec<u8>,
     },
+    /// Ephemeral "I'm typing" signal. TTL on the receive side is 3s.
+    Typing {
+        sender_fingerprint: String,
+    },
     /// Announce a file the sender is about to push. The receiver creates
     /// an attachment row (status=offered) and waits for chunks. For
     /// encrypted rooms `encrypted_meta` carries the Megolm-wrapped file
@@ -164,6 +168,9 @@ mod tests {
             RoomMessage::RotateRoomKey {
                 rotator_fingerprint: "fp".into(),
                 new_salt: vec![1u8; 16],
+            },
+            RoomMessage::Typing {
+                sender_fingerprint: "fp".into(),
             },
         ];
         for m in msgs {
