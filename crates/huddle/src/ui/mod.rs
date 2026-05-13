@@ -1,3 +1,4 @@
+pub mod file_card;
 pub mod lobby;
 pub mod modal;
 pub mod picker;

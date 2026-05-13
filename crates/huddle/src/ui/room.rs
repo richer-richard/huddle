@@ -2,6 +2,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Padding, Paragraph, Tabs, Wrap};
 
 use crate::app::TuiApp;
+use crate::ui::file_card;
 use crate::ui::short_fp;
 
 pub fn render_room_screen(f: &mut Frame, area: Rect, app: &TuiApp) {
@@ -21,7 +22,7 @@ pub fn render_room_screen(f: &mut Frame, area: Rect, app: &TuiApp) {
     render_header(f, chunks[1], app);
     render_messages(f, chunks[2], app);
     render_input(f, chunks[3], app);
-    render_hints(f, chunks[4]);
+    render_hints(f, chunks[4], app);
 }
 
 /// Compute the desired height for the input box, accounting for the
@@ -161,41 +162,64 @@ fn render_messages(f: &mut Frame, area: Rect, app: &TuiApp) {
     let inner_w = area.width.saturating_sub(4) as usize;
     let body_w = inner_w.saturating_sub(MSG_PREFIX_WIDTH).max(8);
 
-    let mut lines: Vec<Line> = Vec::new();
+    // Build a unified, chronologically-sorted timeline of text messages
+    // and file cards so they interleave naturally in the chat history.
+    enum Row<'a> {
+        Text(&'a huddle_core::storage::repo::StoredRoomMessage),
+        Card(&'a huddle_core::storage::repo::StoredAttachment, bool),
+    }
+    let mut timeline: Vec<(i64, Row)> = Vec::new();
     for m in &r.messages {
-        let is_me = m.sender_fingerprint == me || m.direction == "out";
-        let label = if is_me {
-            "you".to_string()
-        } else {
-            short_fp(&m.sender_fingerprint)
-        };
-        let label_style = if is_me {
-            Style::default().fg(Color::Yellow).bold()
-        } else {
-            Style::default().fg(Color::Cyan).bold()
-        };
-        let time = format_time(m.sent_at);
+        timeline.push((m.sent_at, Row::Text(m)));
+    }
+    for (i, a) in r.attachments.iter().enumerate() {
+        let focused = r.card_focus && i == r.focused_card_idx;
+        timeline.push((a.created_at, Row::Card(a, focused)));
+    }
+    timeline.sort_by_key(|(ts, _)| *ts);
 
-        let chunks = wrap_body(&m.body, body_w);
-        for (i, chunk) in chunks.iter().enumerate() {
-            if i == 0 {
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        format!("  {}  ", time),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                    Span::styled(format!("{:<6}", label), label_style),
-                    Span::styled("  ", Style::default()),
-                    Span::styled(chunk.clone(), Style::default().fg(Color::White)),
-                ]));
-            } else {
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        " ".repeat(MSG_PREFIX_WIDTH),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                    Span::styled(chunk.clone(), Style::default().fg(Color::White)),
-                ]));
+    let mut lines: Vec<Line> = Vec::new();
+    for (_, row) in timeline {
+        match row {
+            Row::Text(m) => {
+                let is_me = m.sender_fingerprint == me || m.direction == "out";
+                let label = if is_me {
+                    "you".to_string()
+                } else {
+                    short_fp(&m.sender_fingerprint)
+                };
+                let label_style = if is_me {
+                    Style::default().fg(Color::Yellow).bold()
+                } else {
+                    Style::default().fg(Color::Cyan).bold()
+                };
+                let time = format_time(m.sent_at);
+                let chunks = wrap_body(&m.body, body_w);
+                for (i, chunk) in chunks.iter().enumerate() {
+                    if i == 0 {
+                        lines.push(Line::from(vec![
+                            Span::styled(
+                                format!("  {}  ", time),
+                                Style::default().fg(Color::DarkGray),
+                            ),
+                            Span::styled(format!("{:<6}", label), label_style),
+                            Span::styled("  ", Style::default()),
+                            Span::styled(chunk.clone(), Style::default().fg(Color::White)),
+                        ]));
+                    } else {
+                        lines.push(Line::from(vec![
+                            Span::styled(
+                                " ".repeat(MSG_PREFIX_WIDTH),
+                                Style::default().fg(Color::DarkGray),
+                            ),
+                            Span::styled(chunk.clone(), Style::default().fg(Color::White)),
+                        ]));
+                    }
+                }
+            }
+            Row::Card(a, focused) => {
+                let card = file_card::render_card_lines(a, inner_w, focused);
+                lines.extend(card);
             }
         }
     }
@@ -309,21 +333,40 @@ fn render_input(f: &mut Frame, area: Rect, app: &TuiApp) {
     f.render_widget(widget, area);
 }
 
-fn render_hints(f: &mut Frame, area: Rect) {
-    let hints = Line::from(vec![
-        Span::styled("  ^Tab", Style::default().fg(Color::Yellow)),
-        Span::styled(" next tab   ", Style::default().fg(Color::DarkGray)),
-        Span::styled("/", Style::default().fg(Color::Yellow)),
-        Span::styled(" type   ", Style::default().fg(Color::DarkGray)),
-        Span::styled("Esc", Style::default().fg(Color::Yellow)),
-        Span::styled(" back   ", Style::default().fg(Color::DarkGray)),
-        Span::styled("^L", Style::default().fg(Color::Yellow)),
-        Span::styled(" leave   ", Style::default().fg(Color::DarkGray)),
-        Span::styled("^B", Style::default().fg(Color::Yellow)),
-        Span::styled(" lobby   ", Style::default().fg(Color::DarkGray)),
-        Span::styled("?", Style::default().fg(Color::Yellow)),
-        Span::styled(" help", Style::default().fg(Color::DarkGray)),
-    ]);
+fn render_hints(f: &mut Frame, area: Rect, app: &TuiApp) {
+    let card_focus = app.active_room().map(|r| r.card_focus).unwrap_or(false);
+    let hints = if card_focus {
+        Line::from(vec![
+            Span::styled("  card mode  ", Style::default().fg(Color::Cyan).bold()),
+            Span::styled("j/k", Style::default().fg(Color::Yellow)),
+            Span::styled(" next/prev   ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Enter", Style::default().fg(Color::Yellow)),
+            Span::styled(" save   ", Style::default().fg(Color::DarkGray)),
+            Span::styled("o", Style::default().fg(Color::Yellow)),
+            Span::styled(" open   ", Style::default().fg(Color::DarkGray)),
+            Span::styled("c", Style::default().fg(Color::Yellow)),
+            Span::styled(" cancel   ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Esc/f", Style::default().fg(Color::Yellow)),
+            Span::styled(" exit", Style::default().fg(Color::DarkGray)),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("  ^Tab", Style::default().fg(Color::Yellow)),
+            Span::styled(" next tab  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("/", Style::default().fg(Color::Yellow)),
+            Span::styled(" type  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("f", Style::default().fg(Color::Yellow)),
+            Span::styled(" files  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("^A", Style::default().fg(Color::Yellow)),
+            Span::styled(" attach  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("^L", Style::default().fg(Color::Yellow)),
+            Span::styled(" leave  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("^B", Style::default().fg(Color::Yellow)),
+            Span::styled(" lobby  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("?", Style::default().fg(Color::Yellow)),
+            Span::styled(" help", Style::default().fg(Color::DarkGray)),
+        ])
+    };
     let para = Paragraph::new(hints).block(
         Block::default()
             .borders(Borders::TOP)

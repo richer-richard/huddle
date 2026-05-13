@@ -14,7 +14,7 @@ use ratatui::Terminal;
 use huddle_core::app::events::{AppEvent, DiscoveredRoom};
 use huddle_core::app::{AppHandle, KnownPeerStatus};
 use huddle_core::network::NetworkMode;
-use huddle_core::storage::repo::StoredRoomMessage;
+use huddle_core::storage::repo::{StoredAttachment, StoredRoomMessage};
 
 use crate::input::{self, Action};
 
@@ -88,6 +88,9 @@ pub struct OpenRoom {
     pub encrypted: bool,
     pub members: Vec<String>,
     pub messages: Vec<StoredRoomMessage>,
+    /// Attachments currently in this room, in chronological order.
+    /// Refreshed from the AppHandle on render and on file events.
+    pub attachments: Vec<StoredAttachment>,
     pub input: String,
     pub input_active: bool,
     /// Number of lines skipped from the top of the wrapped message
@@ -100,6 +103,11 @@ pub struct OpenRoom {
     /// Updated by `render_messages` so action handlers can clamp / detect
     /// "we just hit the bottom" without re-running the wrap.
     pub last_max_scroll: Cell<u16>,
+    /// When true and input is blurred, j/k navigate file cards instead
+    /// of scrolling. Enter activates the focused card.
+    pub card_focus: bool,
+    /// Index into the visible cards (filtered from `attachments`).
+    pub focused_card_idx: usize,
     pub unread: bool,
 }
 
@@ -208,6 +216,21 @@ impl TuiApp {
         }
     }
 
+    /// Refresh attachments for every open room from the AppHandle. Called
+    /// on tick so card state stays in sync with chunks arriving.
+    pub fn refresh_attachments(&mut self) {
+        let handle = self.handle.clone();
+        for room in &mut self.open_rooms {
+            room.attachments = handle.list_room_attachments(&room.room_id).unwrap_or_default();
+            if room.attachments.is_empty() {
+                room.focused_card_idx = 0;
+                room.card_focus = false;
+            } else if room.focused_card_idx >= room.attachments.len() {
+                room.focused_card_idx = room.attachments.len() - 1;
+            }
+        }
+    }
+
     pub fn handle_app_event(&mut self, ev: AppEvent) {
         match ev {
             AppEvent::RoomDiscovered(_) | AppEvent::RoomLost { .. } => {
@@ -219,17 +242,24 @@ impl TuiApp {
                 let messages = self.handle.room_messages(&room_id, 200).unwrap_or_default();
                 if !self.open_rooms.iter().any(|r| r.room_id == room_id) {
                     if let Some(info) = info {
+                        let attachments = self
+                            .handle
+                            .list_room_attachments(&room_id)
+                            .unwrap_or_default();
                         self.open_rooms.push(OpenRoom {
                             room_id: room_id.clone(),
                             name: info.name,
                             encrypted: info.encrypted,
                             members,
                             messages,
+                            attachments,
                             input: String::new(),
                             input_active: true,
                             scroll: 0,
                             follow_mode: true,
                             last_max_scroll: Cell::new(0),
+                            card_focus: false,
+                            focused_card_idx: 0,
                             unread: false,
                         });
                         self.active_tab = self.open_rooms.len() - 1;
@@ -404,17 +434,21 @@ fn open_existing_room_tab(app: &mut TuiApp, room_id: &str) {
     };
     let members = app.handle.room_members(room_id);
     let messages = app.handle.room_messages(room_id, 200).unwrap_or_default();
+    let attachments = app.handle.list_room_attachments(room_id).unwrap_or_default();
     app.open_rooms.push(OpenRoom {
         room_id: room_id.to_string(),
         name: info.name,
         encrypted: info.encrypted,
         members,
         messages,
+        attachments,
         input: String::new(),
         input_active: true,
         scroll: 0,
         follow_mode: true,
         last_max_scroll: Cell::new(0),
+        card_focus: false,
+        focused_card_idx: 0,
         unread: false,
     });
     app.active_tab = app.open_rooms.len() - 1;
@@ -491,6 +525,7 @@ async fn main_loop(
         // Refresh discovered rooms every second (covers TTL pruning).
         if last_refresh.elapsed() > Duration::from_secs(1) {
             app.refresh_discovered();
+            app.refresh_attachments();
             last_refresh = std::time::Instant::now();
         }
 
@@ -877,5 +912,113 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             }
             Ok(false)
         }
+        Action::ToggleCardFocus => {
+            if let Some(r) = app.active_room_mut() {
+                if r.attachments.is_empty() {
+                    return Ok(false);
+                }
+                r.card_focus = !r.card_focus;
+                if r.card_focus {
+                    r.input_active = false;
+                    if r.focused_card_idx >= r.attachments.len() {
+                        r.focused_card_idx = 0;
+                    }
+                }
+            }
+            Ok(false)
+        }
+        Action::CardNext => {
+            if let Some(r) = app.active_room_mut() {
+                if !r.attachments.is_empty() {
+                    r.focused_card_idx = (r.focused_card_idx + 1) % r.attachments.len();
+                }
+            }
+            Ok(false)
+        }
+        Action::CardPrev => {
+            if let Some(r) = app.active_room_mut() {
+                if !r.attachments.is_empty() {
+                    r.focused_card_idx = if r.focused_card_idx == 0 {
+                        r.attachments.len() - 1
+                    } else {
+                        r.focused_card_idx - 1
+                    };
+                }
+            }
+            Ok(false)
+        }
+        Action::ActivateFocusedCard => {
+            let (room_id, file_id, status, encrypted) = match focused_card_info(app) {
+                Some(t) => t,
+                None => return Ok(false),
+            };
+            use huddle_core::storage::repo::AttachmentStatus;
+            match status {
+                AttachmentStatus::Offered | AttachmentStatus::Downloading => {
+                    // Auto-pulled by gossipsub; just status nudge.
+                    app.set_status("waiting for chunks…");
+                }
+                AttachmentStatus::Ready | AttachmentStatus::Saved => {
+                    match app.handle.save_to_downloads(&room_id, &file_id).await {
+                        Ok(path) => app.set_status(format!("saved to {}", path.display())),
+                        Err(e) => app.modal = Modal::Error(format!("save failed: {e}")),
+                    }
+                }
+                AttachmentStatus::Failed => {
+                    app.set_status("retry not yet implemented — ask the sender to resend");
+                }
+                AttachmentStatus::Cancelled => {
+                    app.set_status("transfer was cancelled");
+                }
+            }
+            let _ = encrypted;
+            Ok(false)
+        }
+        Action::OpenFocusedCard => {
+            let (room_id, file_id, _, _) = match focused_card_info(app) {
+                Some(t) => t,
+                None => return Ok(false),
+            };
+            if let Err(e) = app.handle.open_saved(&room_id, &file_id) {
+                app.modal = Modal::Error(format!("open failed: {e}"));
+            }
+            Ok(false)
+        }
+        Action::CancelFocusedCard => {
+            let (room_id, file_id, _, _) = match focused_card_info(app) {
+                Some(t) => t,
+                None => return Ok(false),
+            };
+            if let Err(e) = app.handle.cancel_transfer(&room_id, &file_id).await {
+                app.modal = Modal::Error(format!("cancel failed: {e}"));
+            }
+            Ok(false)
+        }
+        Action::SaveAgainFocusedCard => {
+            let (room_id, file_id, _, _) = match focused_card_info(app) {
+                Some(t) => t,
+                None => return Ok(false),
+            };
+            match app.handle.save_to_downloads(&room_id, &file_id).await {
+                Ok(path) => app.set_status(format!("saved to {}", path.display())),
+                Err(e) => app.modal = Modal::Error(format!("save failed: {e}")),
+            }
+            Ok(false)
+        }
+        Action::OpenAttachmentPicker => {
+            // Implemented in Task #37 — for now, just show a hint.
+            app.set_status("attachment picker coming in next task");
+            Ok(false)
+        }
     }
+}
+
+/// Extract (room_id, file_id, status, encrypted) for the active room's
+/// focused card. Returns None when no card is focused / available.
+fn focused_card_info(
+    app: &TuiApp,
+) -> Option<(String, String, huddle_core::storage::repo::AttachmentStatus, bool)> {
+    let r = app.active_room()?;
+    let a = r.attachments.get(r.focused_card_idx)?;
+    Some((r.room_id.clone(), a.file_id.clone(), a.status, a.encrypted))
 }

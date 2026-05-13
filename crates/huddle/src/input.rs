@@ -51,6 +51,15 @@ pub enum Action {
     ChatBackspace,
     ChatSend,
     ChatInsertNewline,
+    // File cards
+    ToggleCardFocus,
+    CardNext,
+    CardPrev,
+    ActivateFocusedCard,
+    OpenFocusedCard,
+    CancelFocusedCard,
+    SaveAgainFocusedCard,
+    OpenAttachmentPicker,
 }
 
 pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
@@ -149,6 +158,8 @@ fn map_lobby(key: KeyEvent, app: &TuiApp) -> Action {
 fn map_in_room(key: KeyEvent, app: &TuiApp) -> Action {
     let input_active = app.active_room().map(|r| r.input_active).unwrap_or(false);
 
+    let card_focus = app.active_room().map(|r| r.card_focus).unwrap_or(false);
+
     // Ctrl chords first (apply regardless of input focus).
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         return match key.code {
@@ -159,6 +170,7 @@ fn map_in_room(key: KeyEvent, app: &TuiApp) -> Action {
             KeyCode::Char('b') => Action::BackToLobby,
             KeyCode::Char('n') => Action::TabNext,
             KeyCode::Char('p') => Action::TabPrev,
+            KeyCode::Char('a') if !input_active => Action::OpenAttachmentPicker,
             _ => Action::Nothing,
         };
     }
@@ -195,11 +207,26 @@ fn map_in_room(key: KeyEvent, app: &TuiApp) -> Action {
             KeyCode::Char(c) => Action::ChatTypeChar(c),
             _ => Action::Nothing,
         }
+    } else if card_focus {
+        // Card-focus keystrokes when input is blurred and the user has
+        // entered card navigation mode (via `f`). Esc / `f` exit.
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('f') => Action::ToggleCardFocus,
+            KeyCode::Char('j') | KeyCode::Down => Action::CardNext,
+            KeyCode::Char('k') | KeyCode::Up => Action::CardPrev,
+            KeyCode::Enter => Action::ActivateFocusedCard,
+            KeyCode::Char('o') => Action::OpenFocusedCard,
+            KeyCode::Char('c') => Action::CancelFocusedCard,
+            KeyCode::Char('s') => Action::SaveAgainFocusedCard,
+            KeyCode::Char('r') => Action::ActivateFocusedCard,
+            _ => Action::Nothing,
+        }
     } else {
         match key.code {
             KeyCode::Char('q') => Action::OpenQuitConfirm,
             KeyCode::Char('/') => Action::FocusInput,
             KeyCode::Char('?') => Action::OpenHelp,
+            KeyCode::Char('f') => Action::ToggleCardFocus,
             KeyCode::Char('j') | KeyCode::Down => Action::ScrollDown,
             KeyCode::Char('k') | KeyCode::Up => Action::ScrollUp,
             KeyCode::PageDown => Action::PageDown,
