@@ -9,7 +9,7 @@ use futures::StreamExt;
 use libp2p::{
     identify, mdns, noise, ping, request_response, tcp, yamux, PeerId, Swarm, SwarmBuilder,
 };
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::identity::Identity;
@@ -114,13 +114,13 @@ impl NetworkHandle {
 struct NetworkTask {
     swarm: Swarm<HuddleBehavior>,
     cmd_rx: mpsc::Receiver<NetworkCommand>,
-    event_tx: broadcast::Sender<NetworkEvent>,
+    event_tx: mpsc::Sender<NetworkEvent>,
     discovered_peers: HashSet<PeerId>,
 }
 
 pub fn start_network(
     identity: &Identity,
-    event_tx: broadcast::Sender<NetworkEvent>,
+    event_tx: mpsc::Sender<NetworkEvent>,
 ) -> crate::error::Result<NetworkHandle> {
     let keypair = identity.keypair().clone();
     let local_peer_id = identity.peer_id();
@@ -202,7 +202,7 @@ impl NetworkTask {
         match event {
             libp2p::swarm::SwarmEvent::NewListenAddr { address, .. } => {
                 info!(%address, "listening");
-                let _ = self.event_tx.send(NetworkEvent::ListeningOn { address });
+                let _ = self.event_tx.try_send(NetworkEvent::ListeningOn { address });
             }
             libp2p::swarm::SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                 debug!(%peer_id, "connection established");
@@ -228,7 +228,7 @@ impl NetworkTask {
                     if self.discovered_peers.insert(peer_id) {
                         info!(%peer_id, %addr, "mDNS discovered peer");
                         self.swarm.add_peer_address(peer_id, addr);
-                        let _ = self.event_tx.send(NetworkEvent::PeerDiscovered { peer_id });
+                        let _ = self.event_tx.try_send(NetworkEvent::PeerDiscovered { peer_id });
                     }
                 }
             }
@@ -236,7 +236,7 @@ impl NetworkTask {
                 for (peer_id, _) in peers {
                     if self.discovered_peers.remove(&peer_id) {
                         info!(%peer_id, "mDNS peer expired");
-                        let _ = self.event_tx.send(NetworkEvent::PeerExpired { peer_id });
+                        let _ = self.event_tx.try_send(NetworkEvent::PeerExpired { peer_id });
                     }
                 }
             }
@@ -252,7 +252,7 @@ impl NetworkTask {
                         sender_fingerprint,
                         prekey_bundle,
                     } => {
-                        let _ = self.event_tx.send(NetworkEvent::HandshakeReceived {
+                        let _ = self.event_tx.try_send(NetworkEvent::HandshakeReceived {
                             peer_id: peer,
                             sender_fingerprint,
                             prekey_bundle,
@@ -263,7 +263,7 @@ impl NetworkTask {
                         ciphertext,
                         msg_type,
                     } => {
-                        let _ = self.event_tx.send(NetworkEvent::EncryptedMessageReceived {
+                        let _ = self.event_tx.try_send(NetworkEvent::EncryptedMessageReceived {
                             peer_id: peer,
                             ciphertext,
                             msg_type,
@@ -276,14 +276,14 @@ impl NetworkTask {
                         sender_fingerprint,
                         prekey_bundle,
                     } => {
-                        let _ = self.event_tx.send(NetworkEvent::HandshakeCompleted {
+                        let _ = self.event_tx.try_send(NetworkEvent::HandshakeCompleted {
                             peer_id: peer,
                             sender_fingerprint,
                             prekey_bundle,
                         });
                     }
                     HuddleResponse::Ack { message_id } => {
-                        let _ = self.event_tx.send(NetworkEvent::AckReceived {
+                        let _ = self.event_tx.try_send(NetworkEvent::AckReceived {
                             peer_id: peer,
                             message_id,
                         });
