@@ -70,18 +70,26 @@ async fn main() -> Result<()> {
     // Master passphrase: derives the SQLCipher DB key + Megolm persist
     // subkey. `--no-master-passphrase` falls back to an unencrypted DB
     // (Phase 1 behavior).
-    let master_key = if cli.no_master_passphrase {
-        None
+    //
+    // First-launch detection happens BEFORE we create the salt — once
+    // the salt exists on disk, the file's there even if no DB is.
+    let (master_key, signup_name) = if cli.no_master_passphrase {
+        (None, None)
     } else {
-        let salt = keychain::load_or_create_salt().map_err(|e| anyhow!(e))?;
         let salt_path = keychain::keychain_salt_path();
-        let is_new = !salt_path.metadata().map(|m| m.len() > 0).unwrap_or(false);
-        let passphrase = app::prompt_master_passphrase(is_new)?;
-        if passphrase.is_empty() {
+        let is_new = !salt_path.exists();
+        let prompt = app::prompt_master_passphrase(is_new)?;
+        if prompt.passphrase.is_empty() {
             return Ok(());
         }
-        let key = keychain::derive_master_key(&passphrase, &salt).map_err(|e| anyhow!(e))?;
-        Some(key)
+        // Only persist the salt once the user has committed a
+        // passphrase — otherwise pressing Esc on first launch leaves
+        // a salt file behind and a future launch would think the DB
+        // already existed.
+        let salt = keychain::load_or_create_salt().map_err(|e| anyhow!(e))?;
+        let key =
+            keychain::derive_master_key(&prompt.passphrase, &salt).map_err(|e| anyhow!(e))?;
+        (Some(key), prompt.username)
     };
 
     let handle = huddle_core::app::AppHandle::start_with_options(
@@ -91,7 +99,10 @@ async fn main() -> Result<()> {
     )
     .await
     .map_err(|e| anyhow!(e))?;
-    if let Some(name) = cli.name.as_deref() {
+
+    // CLI --name wins over the prompt-supplied username.
+    let name_to_set = cli.name.clone().or(signup_name);
+    if let Some(name) = name_to_set {
         let trimmed = name.trim();
         if !trimmed.is_empty() {
             handle

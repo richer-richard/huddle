@@ -645,11 +645,26 @@ pub async fn run_tui(handle: AppHandle) -> Result<()> {
     result
 }
 
-/// Prompt the user for their master passphrase before bringing up the
-/// AppHandle. Returns the (raw) passphrase string; an empty string means
-/// the user wants to abort. When `is_new` is true the prompt asks for
-/// confirmation (typed twice).
-pub fn prompt_master_passphrase(is_new: bool) -> Result<String> {
+/// What `prompt_master_passphrase` hands back. An empty `passphrase`
+/// means the user pressed Esc / Ctrl-C — caller should exit cleanly.
+pub struct AuthPrompt {
+    pub passphrase: String,
+    /// Only populated on first-launch (sign-up) flow.
+    pub username: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthField {
+    Username,
+    Passphrase,
+    Confirm,
+}
+
+/// Prompt for the master passphrase before bringing up `AppHandle`.
+/// First-launch (`is_new=true`) collects username + passphrase + confirm;
+/// returning users only enter their passphrase. Tab cycles between
+/// fields; Enter advances or submits.
+pub fn prompt_master_passphrase(is_new: bool) -> Result<AuthPrompt> {
     use crossterm::event::{KeyCode, KeyModifiers};
     use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
 
@@ -659,15 +674,21 @@ pub fn prompt_master_passphrase(is_new: bool) -> Result<String> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut first = String::new();
+    let mut username = String::new();
+    let mut passphrase = String::new();
     let mut confirm = String::new();
-    let mut on_confirm = false;
+    let mut field = if is_new {
+        AuthField::Username
+    } else {
+        AuthField::Passphrase
+    };
     let mut error: Option<String> = None;
-    let mut outcome: Option<String> = None;
+    let mut outcome: Option<AuthPrompt> = None;
 
     while outcome.is_none() {
         terminal.draw(|f| {
-            let area = crate::ui::centered_rect(60, 14, f.area());
+            let height: u16 = if is_new { 18 } else { 12 };
+            let area = crate::ui::centered_rect(64, height, f.area());
             f.render_widget(Clear, area);
             let block = Block::default()
                 .borders(Borders::ALL)
@@ -675,39 +696,86 @@ pub fn prompt_master_passphrase(is_new: bool) -> Result<String> {
                 .padding(Padding::uniform(1))
                 .title(Span::styled(
                     if is_new {
-                        " set a master passphrase "
+                        " welcome to huddle — sign up "
                     } else {
                         " unlock huddle "
                     },
                     Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
                 ));
+
             let masked = |s: &str| -> String { s.chars().map(|_| '•').collect() };
+            let label_style = |is_focused: bool| {
+                if is_focused {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                }
+            };
+            let value_style = Style::default().fg(Color::White);
+            let cursor = Span::styled("_", Style::default().fg(Color::DarkGray));
+
             let mut lines: Vec<Line> = Vec::new();
             lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                if is_new {
-                    "  set a passphrase to encrypt your local database."
-                } else {
-                    "  enter your passphrase to unlock the database."
-                },
-                Style::default().fg(Color::DarkGray),
-            )));
-            lines.push(Line::from(Span::styled(
-                "  forget it and your data becomes unrecoverable.",
-                Style::default().fg(Color::DarkGray),
-            )));
-            lines.push(Line::from(""));
-            lines.push(Line::from(vec![
-                Span::styled(
-                    if is_new && on_confirm { "  confirm: " } else { "  passphrase: " },
-                    Style::default().fg(Color::Yellow),
-                ),
-                Span::styled(
-                    masked(if on_confirm { &confirm } else { &first }),
-                    Style::default().fg(Color::White),
-                ),
-                Span::styled("_", Style::default().fg(Color::DarkGray)),
-            ]));
+            if is_new {
+                lines.push(Line::from(Span::styled(
+                    "  pick a username (display name in chat — you can change it later)",
+                    Style::default().fg(Color::DarkGray),
+                )));
+                lines.push(Line::from(Span::styled(
+                    "  and a passphrase that encrypts your local database.",
+                    Style::default().fg(Color::DarkGray),
+                )));
+                lines.push(Line::from(Span::styled(
+                    "  forget the passphrase and your data is unrecoverable.",
+                    Style::default().fg(Color::DarkGray),
+                )));
+                lines.push(Line::from(""));
+
+                let u_focused = field == AuthField::Username;
+                lines.push(Line::from(vec![
+                    Span::styled("  username:    ", label_style(u_focused)),
+                    Span::styled(username.clone(), value_style),
+                    if u_focused {
+                        cursor.clone()
+                    } else {
+                        Span::raw("")
+                    },
+                ]));
+                let p_focused = field == AuthField::Passphrase;
+                lines.push(Line::from(vec![
+                    Span::styled("  passphrase:  ", label_style(p_focused)),
+                    Span::styled(masked(&passphrase), value_style),
+                    if p_focused {
+                        cursor.clone()
+                    } else {
+                        Span::raw("")
+                    },
+                ]));
+                let c_focused = field == AuthField::Confirm;
+                lines.push(Line::from(vec![
+                    Span::styled("  confirm:     ", label_style(c_focused)),
+                    Span::styled(masked(&confirm), value_style),
+                    if c_focused {
+                        cursor.clone()
+                    } else {
+                        Span::raw("")
+                    },
+                ]));
+            } else {
+                lines.push(Line::from(Span::styled(
+                    "  enter your passphrase to unlock the database.",
+                    Style::default().fg(Color::DarkGray),
+                )));
+                lines.push(Line::from(""));
+                lines.push(Line::from(vec![
+                    Span::styled("  passphrase: ", label_style(true)),
+                    Span::styled(masked(&passphrase), value_style),
+                    cursor.clone(),
+                ]));
+            }
+
             if let Some(err) = &error {
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
@@ -716,16 +784,20 @@ pub fn prompt_master_passphrase(is_new: bool) -> Result<String> {
                 )));
             }
             lines.push(Line::from(""));
+            let hint_label = if is_new {
+                if field == AuthField::Confirm {
+                    " sign up   "
+                } else {
+                    " next field   "
+                }
+            } else {
+                " unlock   "
+            };
             lines.push(Line::from(vec![
                 Span::styled(" Enter", Style::default().fg(Color::Yellow)),
-                Span::styled(
-                    if is_new && !on_confirm {
-                        " continue   "
-                    } else {
-                        " unlock   "
-                    },
-                    Style::default().fg(Color::DarkGray),
-                ),
+                Span::styled(hint_label, Style::default().fg(Color::DarkGray)),
+                Span::styled("Tab", Style::default().fg(Color::Yellow)),
+                Span::styled(" cycle fields   ", Style::default().fg(Color::DarkGray)),
                 Span::styled("Esc", Style::default().fg(Color::Yellow)),
                 Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
             ]));
@@ -735,50 +807,84 @@ pub fn prompt_master_passphrase(is_new: bool) -> Result<String> {
         if event::poll(Duration::from_millis(200))? {
             if let Event::Key(key) = event::read()? {
                 if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && matches!(key.code, crossterm::event::KeyCode::Char('c'))
+                    && matches!(key.code, KeyCode::Char('c'))
                 {
-                    outcome = Some(String::new());
+                    outcome = Some(AuthPrompt {
+                        passphrase: String::new(),
+                        username: None,
+                    });
                     break;
                 }
                 match key.code {
                     KeyCode::Esc => {
-                        outcome = Some(String::new());
+                        outcome = Some(AuthPrompt {
+                            passphrase: String::new(),
+                            username: None,
+                        });
                     }
-                    KeyCode::Backspace => {
-                        if on_confirm {
-                            confirm.pop();
-                        } else {
-                            first.pop();
+                    KeyCode::Tab if is_new => {
+                        field = match field {
+                            AuthField::Username => AuthField::Passphrase,
+                            AuthField::Passphrase => AuthField::Confirm,
+                            AuthField::Confirm => AuthField::Username,
+                        };
+                    }
+                    KeyCode::Backspace => match field {
+                        AuthField::Username => {
+                            username.pop();
                         }
-                    }
+                        AuthField::Passphrase => {
+                            passphrase.pop();
+                        }
+                        AuthField::Confirm => {
+                            confirm.pop();
+                        }
+                    },
                     KeyCode::Enter => {
                         if is_new {
-                            if !on_confirm {
-                                if first.is_empty() {
-                                    error = Some("passphrase is empty".into());
-                                } else {
-                                    on_confirm = true;
-                                    error = None;
+                            match field {
+                                AuthField::Username => {
+                                    if username.trim().is_empty() {
+                                        error = Some("username can't be empty".into());
+                                    } else {
+                                        error = None;
+                                        field = AuthField::Passphrase;
+                                    }
                                 }
-                            } else if confirm != first {
-                                error = Some("doesn't match — try again".into());
-                                confirm.clear();
-                            } else {
-                                outcome = Some(first.clone());
+                                AuthField::Passphrase => {
+                                    if passphrase.is_empty() {
+                                        error = Some("passphrase can't be empty".into());
+                                    } else {
+                                        error = None;
+                                        field = AuthField::Confirm;
+                                    }
+                                }
+                                AuthField::Confirm => {
+                                    if confirm != passphrase {
+                                        error = Some("passphrases don't match — try again".into());
+                                        confirm.clear();
+                                    } else {
+                                        outcome = Some(AuthPrompt {
+                                            passphrase: passphrase.clone(),
+                                            username: Some(username.trim().to_string()),
+                                        });
+                                    }
+                                }
                             }
-                        } else if first.is_empty() {
-                            error = Some("passphrase is empty".into());
+                        } else if passphrase.is_empty() {
+                            error = Some("passphrase can't be empty".into());
                         } else {
-                            outcome = Some(first.clone());
+                            outcome = Some(AuthPrompt {
+                                passphrase: passphrase.clone(),
+                                username: None,
+                            });
                         }
                     }
-                    KeyCode::Char(c) => {
-                        if on_confirm {
-                            confirm.push(c);
-                        } else {
-                            first.push(c);
-                        }
-                    }
+                    KeyCode::Char(c) => match field {
+                        AuthField::Username => username.push(c),
+                        AuthField::Passphrase => passphrase.push(c),
+                        AuthField::Confirm => confirm.push(c),
+                    },
                     _ => {}
                 }
             }
@@ -787,7 +893,10 @@ pub fn prompt_master_passphrase(is_new: bool) -> Result<String> {
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    Ok(outcome.unwrap_or_default())
+    Ok(outcome.unwrap_or(AuthPrompt {
+        passphrase: String::new(),
+        username: None,
+    }))
 }
 
 /// Show the welcome card before bringing up `AppHandle`. Returns `Ok(true)`
