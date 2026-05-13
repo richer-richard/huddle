@@ -10,6 +10,8 @@
 //! completed transfer's bytes match the announced file_id before
 //! exposing the file to the caller.
 
+pub mod encryption;
+
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
