@@ -80,6 +80,8 @@ pub enum Action {
     VerifyToggle,
     // Mute
     ToggleMute,
+    // QR identity
+    OpenQrIdentity,
     // Search
     OpenSearch,
     SearchTypeChar(char),
@@ -184,6 +186,9 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
         Modal::Info(_) => match key.code {
             _ => Action::CloseModal,
         },
+        Modal::QrIdentity => match key.code {
+            _ => Action::CloseModal,
+        },
         Modal::None => map_normal(key, app),
     }
 }
@@ -201,6 +206,7 @@ fn map_lobby(key: KeyEvent, app: &TuiApp) -> Action {
         KeyCode::Char('s') => Action::OpenStartRoom,
         KeyCode::Char('?') => Action::OpenHelp,
         KeyCode::Char('d') => Action::OpenDialPeer,
+        KeyCode::Char('i') => Action::OpenQrIdentity,
         KeyCode::Tab => Action::LobbyFocusToggle,
         KeyCode::Char('j') | KeyCode::Down => Action::LobbyNavigateDown,
         KeyCode::Char('k') | KeyCode::Up => Action::LobbyNavigateUp,

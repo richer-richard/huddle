@@ -47,6 +47,8 @@ pub enum Modal {
     Verify(VerifyState),
     /// Search room history (^F).
     Search(SearchState),
+    /// QR code of our identity, scannable for fingerprint comparison.
+    QrIdentity,
     QuitConfirm,
     Help,
     Error(String),
@@ -1304,6 +1306,10 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
                 Ok(()) => app.set_status("accepted rotation — new key in use"),
                 Err(e) => app.modal = Modal::Error(format!("accept rotation failed: {e}")),
             }
+            Ok(false)
+        }
+        Action::OpenQrIdentity => {
+            app.modal = Modal::QrIdentity;
             Ok(false)
         }
         Action::ToggleMute => {

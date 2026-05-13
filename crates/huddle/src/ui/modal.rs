@@ -345,6 +345,108 @@ pub fn render_accept_rotation(f: &mut Frame, s: &AcceptRotationState) {
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
+pub fn render_qr_identity(f: &mut Frame, app: &crate::app::TuiApp) {
+    let fingerprint = app.handle.fingerprint().to_string();
+    let rendered = render_fingerprint_qr(&fingerprint);
+
+    let height = (rendered.len() as u16) + 8;
+    let width = rendered
+        .iter()
+        .map(|l| l.chars().count())
+        .max()
+        .unwrap_or(20) as u16
+        + 6;
+    let area = centered_rect(width.max(40), height.max(12), f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .padding(Padding::uniform(1))
+        .title(Span::styled(
+            " your identity ",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        ));
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(Span::styled(
+        "  fingerprint:",
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!("  {}", fingerprint),
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+    for row in rendered {
+        lines.push(Line::from(Span::styled(
+            format!("  {}", row),
+            Style::default().fg(Color::White),
+        )));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled(" Esc", Style::default().fg(Color::Yellow)),
+        Span::styled(" close", Style::default().fg(Color::DarkGray)),
+    ]));
+    f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+/// Render a fingerprint as a QR code using two-row Unicode half-blocks.
+/// Returns one terminal row per pair of QR modules.
+fn render_fingerprint_qr(fingerprint: &str) -> Vec<String> {
+    let code = match qrcode::QrCode::new(fingerprint.as_bytes()) {
+        Ok(c) => c,
+        Err(_) => return vec!["(could not render QR)".into()],
+    };
+    let colors = code.to_colors();
+    let width = code.width();
+    let height = colors.len() / width;
+    let mut rows = Vec::new();
+    let on = |x: usize, y: usize| -> bool {
+        if y >= height || x >= width {
+            return false;
+        }
+        colors[y * width + x] == qrcode::Color::Dark
+    };
+    // Pad with a one-module quiet zone.
+    let pad_w = width + 2;
+    let pad_h = height + 2;
+    let dark_in_padded = |x: usize, y: usize| -> bool {
+        if x == 0 || x == pad_w - 1 || y == 0 || y == pad_h - 1 {
+            false
+        } else {
+            on(x - 1, y - 1)
+        }
+    };
+    let mut y = 0;
+    while y < pad_h {
+        let mut row = String::new();
+        for x in 0..pad_w {
+            let top = dark_in_padded(x, y);
+            let bottom = if y + 1 < pad_h {
+                dark_in_padded(x, y + 1)
+            } else {
+                false
+            };
+            let ch = match (top, bottom) {
+                (true, true) => '█',
+                (true, false) => '▀',
+                (false, true) => '▄',
+                (false, false) => ' ',
+            };
+            // Double-wide so the QR is square-ish in cells with ~2:1 aspect.
+            row.push(ch);
+            row.push(ch);
+        }
+        rows.push(row);
+        y += 2;
+    }
+    rows
+}
+
 pub fn render_search(f: &mut Frame, s: &SearchState) {
     let area = centered_rect(80, 20, f.area());
     f.render_widget(Clear, area);
