@@ -1,260 +1,223 @@
-# Huddle Roadmap: Phases 2-5
+# Huddle Roadmap
 
-This document describes the evolution of Huddle from a same-LAN chat
-tool into a cross-network, production-grade decentralized messenger.
+Phase 1 (current) ships a LAN-only TUI chat client built around
+**rooms**: anyone can start one, others on the network see and join
+it, and rooms can be public or encrypted. Mesh-based gossipsub
+broadcasts; rooms survive their original creator leaving. Megolm
+group sessions for encryption, with session keys wrapped by an
+Argon2id-derived passphrase key.
 
-Phase 1 (current) establishes the foundation: mDNS discovery, E2EE via
-vodozemac Olm sessions, SQLite persistence, and a ratatui TUI. All
-subsequent phases build on `huddle-core`'s `AppHandle` abstraction.
+What's documented here is what comes next, in priority order.
 
 ---
 
-## Phase 2 - Going Beyond Local LAN
+## Phase 2 — Media attachments (images, audio, video, files)
 
-### The Bootstrap Problem
+The fundamental challenge: terminals can't render videos and can only
+sometimes render images. So the design is **transfer-first**, with
+optional inline preview when the terminal supports it.
 
-"Decentralized chat across the internet without servers" is
-theoretically possible but practically requires SOME bootstrap
-infrastructure. The options:
+### Wire protocol
 
-**a) Hardcoded IPFS/libp2p public bootstrap nodes (recommended first)**
-- Use Protocol Labs' public bootstrap nodes for Kademlia DHT peer
-  discovery. Free, well-maintained, globally distributed.
-- Trade-off: depends on Protocol Labs' infrastructure. If their
-  bootstrap nodes go down, new peer discovery fails (existing
-  connections continue).
-- Implementation: add bootstrap node addresses to `config.rs`, dial
-  them on startup.
+A new gossipsub message type sent over the existing per-room topic:
 
-**b) User-deployed bootstrap node on a VPS (~$5/mo)**
-- Run a minimal `huddle-relay` binary on a VPS that participates in
-  the DHT and acts as a relay for NAT traversal.
-- Trade-off: costs money, requires ops, but gives full control.
-- Good as a secondary option or for private deployments.
+```rust
+RoomMessage::FileOffer {
+    sender_fingerprint: String,
+    file_id: String,        // SHA-256 hash of the content
+    name: String,
+    size_bytes: u64,
+    mime: Option<String>,
+    // For encrypted rooms: the file key (32 bytes) is wrapped with
+    // the same Megolm session as text messages.
+    encrypted_meta: Option<EncryptedFileMeta>,
+}
 
-**c) Tor hidden services per identity**
-- Each Huddle identity runs a Tor hidden service. Discovery via
-  out-of-band sharing of .onion addresses.
-- Trade-off: no bootstrap deploy needed, strong privacy, but depends
-  on Tor directory authorities and has high latency (~2-5s per message).
-
-**d) Reference implementations**
-- **Briar:** Tor-based. Each device runs a hidden service. Discovery
-  is QR code + contact exchange only. No DHT.
-- **Berty:** libp2p + IPFS. Uses public IPFS bootstrap + custom
-  rendezvous nodes. Closest to our architecture.
-- **I2P:** Reseed servers bootstrap the network. Fully encrypted
-  overlay. High complexity.
-
-### Implementation Plan
-
-**Kademlia DHT in `huddle-core`:**
-- Modify: `crates/huddle-core/src/network/behavior.rs`
-  - Add `kademlia: libp2p::kad::Behaviour` to `HuddleBehavior`
-  - Add `HuddleBehaviorEvent::Kademlia(kad::Event)` variant
-- Modify: `crates/huddle-core/src/network/mod.rs`
-  - Handle Kademlia events (routing table updates, query results)
-  - Bootstrap on startup: dial bootstrap nodes, run `kad.bootstrap()`
-  - Register our PeerId in the DHT for discoverability
-- Modify: `crates/huddle-core/src/config.rs`
-  - Add `bootstrap_nodes: Vec<Multiaddr>` to config
-  - Default to IPFS public bootstrap list
-- New: `crates/huddle-core/src/network/discovery.rs`
-  - Unified discovery abstraction: mDNS (LAN) + Kademlia (WAN)
-  - Emit the same `PeerDiscovered` events regardless of source
-
-**NAT Traversal:**
-- Add libp2p `dcutr` (Direct Connection Upgrade through Relay) behavior
-- Requires at least one relay peer reachable from both clients
-- Add `relay: libp2p::relay::Behaviour` to `HuddleBehavior`
-- AutoNAT for detecting NAT status
-
-**Tauri Desktop Shell:**
-- Modify: `crates/huddle-tauri/src/main.rs`
-  - Tauri command handlers wrapping `AppHandle` methods
-  - `#[tauri::command] async fn send_message(...)` etc.
-- New: `crates/huddle-tauri/ui/` (React + TypeScript)
-  - Same three-pane layout as TUI but desktop-grade
-  - Real-time updates via Tauri events (AppEvent -> frontend)
-- The Tauri shell is largely glue: `AppHandle` does all the work.
-
-**Command surface for Tauri:**
-```
-tauri::command send_message(peer_id: String, body: String)
-tauri::command initiate_session(peer_id: String)
-tauri::command get_messages(peer_id: String, limit: i64) -> Vec<Message>
-tauri::command list_peers() -> Vec<Peer>
-tauri::command get_identity() -> Identity { fingerprint, peer_id }
-tauri::event app_event -> AppEvent (streamed to frontend)
+RoomMessage::FileChunk {
+    sender_fingerprint: String,
+    file_id: String,
+    chunk_index: u32,
+    total_chunks: u32,
+    // 64 KiB chunks
+    data: Vec<u8>,   // base64 in JSON
+}
 ```
 
-### Cross-Network Testing
+Chunked over gossipsub. For Phase 2 we'll use a 1 MiB hard limit per
+file to stay within gossipsub's reasonable message budget; larger
+files defer to Phase 3 (dedicated libp2p streams via the
+`request-response` protocol or raw streams).
 
-Without a VPS, you can test Kademlia locally by running 3+ nodes
-on different ports with `--listen /ip4/127.0.0.1/tcp/<port>`.
-True cross-network testing requires at least one node with a public IP
-or a relay node on a VPS.
+### Files to add
 
----
+- `crates/huddle-core/src/files/mod.rs` — `FileManager`: track
+  outbound + inbound transfers, reassemble chunks, persist to disk
+- `crates/huddle-core/src/files/encryption.rs` — wrap a file key with
+  the room's Megolm session before sharing; encrypt the file with
+  ChaCha20-Poly1305 (separate from message encryption to keep the
+  Megolm ratchet from advancing on every chunk)
+- `crates/huddle-core/src/storage/repo.rs` — new `room_attachments`
+  table: (id, room_id, message_id, name, mime, size, local_path,
+  status [pending/complete/failed])
+- `crates/huddle-tui/src/ui/attach_modal.rs` — file picker modal
+  triggered by `^A` in a room
+- `crates/huddle-tui/src/ui/room.rs` — render file references as
+  `[file  filename.ext  4.2 MB  ████░░  47%]` with `^O` to open the
+  focused message's attachment via the system default opener
+  (`open` on macOS, `xdg-open` on Linux)
 
-## Phase 3 - Robustness
+### Storage
 
-**Connection Retry with Exponential Backoff:**
-- Modify: `crates/huddle-core/src/network/mod.rs`
-  - On `ConnectionClosed`, schedule retry with backoff (1s, 2s, 4s, ...)
-  - Cap at 60s. Reset backoff on successful connection.
+Files are saved to `<data_dir>/files/<room_id>/<file_id>__<name>` —
+keeping the original name (after sanitization) for `open` to pick
+the right app.
 
-**Message Resend on Reconnect:**
-- New: `crates/huddle-core/src/storage/outbox.rs`
-  - `outbox` table: messages sent but not yet ACK'd
-  - On reconnect, resend all unACK'd messages for that peer
-- Modify: `crates/huddle-core/src/storage/schema.rs`
-  - Add outbox migration
+### Optional inline preview (later)
 
-**Protocol Versioning:**
-- Modify: `crates/huddle-core/src/network/protocol.rs`
-  - Add `version: u8` field to `HuddleRequest` envelope
-  - Protocol negotiation via libp2p identify (check agent_version)
-  - Graceful handling of version mismatches
+The `ratatui-image` crate detects Kitty/Sixel/iTerm2 graphics
+protocols and renders inline. Defer until file transfer is solid.
+Audio/video stay external — `open` does the right thing.
 
-**Wire Format Optimization:**
-- Replace `serde_json` with `bincode` or `prost` (protobuf) in
-  `HuddleCodec`
-- Keep JSON as a debug fallback behind a feature flag
-- Significant bandwidth reduction for encrypted message payloads
+### Effort
 
-**Pre-key Replenishment:**
-- Modify: `crates/huddle-core/src/session/mod.rs`
-  - Track one-time key count. When below threshold (e.g., 5 remaining),
-    generate a new batch and persist.
-  - vodozemac one-time keys are finite; without replenishment, new
-    sessions fail after keys are exhausted.
+~800-1000 lines split across core + TUI. About 4-5 commits.
 
 ---
 
-## Phase 4 - Offline & At-Rest Security
+## Phase 3 — Member rotation / removal
 
-**Store-and-Forward via Volunteer Relays:**
-- New: `crates/huddle-core/src/relay/mod.rs`
-  - Peers can opt in to store encrypted messages for offline peers
-  - DHT slot keyed by SHA-256(recipient_fingerprint), 7-day TTL
-  - When peer comes online, queries their own DHT slot
-  - Messages are already E2EE, so relays see only ciphertext
-- Modify: `crates/huddle-core/src/network/mod.rs`
-  - On send failure (peer offline), store in relay DHT
-  - On startup, check own DHT slot for pending messages
+Right now anyone with a passphrase keeps the Megolm session key
+forever. There's no way to "kick" someone or to ensure past members
+can't decrypt new messages.
 
-**SQLCipher with User Passphrase:**
-- Replace `rusqlite` with `rusqlite` + SQLCipher feature
-- Modify: `crates/huddle-core/src/storage/mod.rs`
-  - Passphrase prompt on launch (passed in from frontend)
-  - Derive encryption key via Argon2id (from passphrase + salt)
-  - `PRAGMA key = 'derived-key';` on database open
-- Migration path: one-time export from unencrypted DB, reimport into
-  encrypted DB. Or keep both and prompt user to migrate.
+### Approach
 
-**Vodozemac Serialization Key Rotation:**
-- Modify: `crates/huddle-core/src/session/store.rs`
-  - Replace hardcoded `SERIALIZATION_KEY` with key derived from
-    user passphrase (same Argon2id derivation as SQLCipher key,
-    different salt)
-  - On first encrypted launch, re-serialize all existing sessions
-    with the new key
+When the room creator (or, in mesh mode, any current member)
+initiates a rotation:
 
----
+1. All current members generate fresh outbound Megolm sessions
+2. New session keys are wrapped with a NEW passphrase (or rotated
+   key) and broadcast
+3. Old sessions are retained only for decrypting historic messages
 
-## Phase 5 - Groups & UX
+### Files
 
-**Group Chat via MLS (RFC 9420):**
-- Dependency: `openmls` crate
-- New: `crates/huddle-core/src/group/mod.rs`
-  - Group state management (members, epoch, tree)
-  - Welcome message handling for new members
-  - Commit/Proposal flow for membership changes
-- New: `crates/huddle-core/src/group/store.rs`
-  - `groups` table: group_id, name, mls_state, created_at
-  - `group_members` table: group_id, peer_id, role
-  - `group_messages` table: same schema as messages but with group_id
-- Modify: `crates/huddle-core/src/network/protocol.rs`
-  - New message types: `GroupMessage`, `GroupWelcome`, `GroupCommit`
+- `crates/huddle-core/src/room/rotation.rs` — orchestrate rotation
+  events
+- `crates/huddle-core/src/network/protocol.rs` — new `RotateRoomKey`
+  RoomMessage variant
+- `crates/huddle-tui/src/ui/modal.rs` — rotation confirmation modal,
+  triggered by a new key binding (`^R` in a room)
 
-**Alternative considered: Sender Keys**
-- Simpler than MLS. WhatsApp used this pre-MLS.
-- Each sender has one ratchet; all group members decrypt with it.
-- O(N) key distribution per sender (vs O(log N) for MLS tree).
-- O(N^2) total bandwidth for N senders.
-- Easier to implement but doesn't scale past ~50 members.
-- MLS (via openmls) is the better long-term choice.
+### Effort
 
-**QR Code Identity Exchange:**
-- New: `crates/huddle-core/src/identity/qr.rs`
-  - Encode fingerprint + connection info as QR payload
-  - Decode scanned QR to add peer manually
-- Integrate with camera access (Tauri: via plugin, TUI: skip)
-
-**Contact Verification UX:**
-- New: `crates/huddle-tui/src/ui/verify.rs`
-  - Side-by-side fingerprint display
-  - Numeric safety-number comparison (Signal-style)
-  - "Verified" badge after comparison
-- Modify: `crates/huddle-core/src/storage/repo.rs`
-  - Add `verified: bool` to peers table
-
-**Media Attachments:**
-- Modify: `crates/huddle-core/src/network/protocol.rs`
-  - New message type: `FileChunk { file_id, chunk_index, total, data }`
-  - Chunked transfer over the existing protocol
-- New: `crates/huddle-core/src/media/mod.rs`
-  - File chunking, reassembly, progress tracking
-  - Store metadata in `files` table
-
-**Typing Indicators:**
-- Best-effort ephemeral messages (not persisted)
-- New protocol message: `TypingStatus { is_typing: bool }`
-- Send on keystroke, cancel after 5s of inactivity
-
-**Delivery and Read Receipts:**
-- Extend `HuddleResponse::Ack` with receipt types
-- New: `DeliveryReceipt`, `ReadReceipt` message types
-- Update `messages` table with `read_at` column
+~300 lines. One commit.
 
 ---
 
-## How to Resume
+## Phase 4 — At-rest security & key derivation
 
-### Phase 2
-- **Start with:** `crates/huddle-core/src/network/behavior.rs` (add
-  Kademlia behavior) and `crates/huddle-core/src/config.rs` (add
-  bootstrap config)
-- **Tests to add:** multi-node DHT bootstrap test, NAT traversal test
-  with relay
-- **Verify:** `cargo test --workspace`, then test with 3 nodes on
-  different ports
-- **Cross-network testing:** requires at least one publicly reachable
-  node or a VPS with `huddle-relay`
+- Replace `rusqlite` with SQLCipher (feature-flagged in `rusqlite`)
+- On launch, prompt for a master passphrase (or use a config flag for
+  testing)
+- Derive the DB encryption key via Argon2id (same library, different
+  salt from room passphrases)
+- Use the same derived material to replace the hardcoded
+  `SESSION_PERSIST_KEY` in `crypto/megolm.rs`
 
-### Phase 3
-- **Start with:** `crates/huddle-core/src/network/mod.rs` (add retry
-  logic) and `crates/huddle-core/src/storage/outbox.rs` (new)
-- **Tests to add:** retry on disconnect, outbox resend, protocol
-  version negotiation
-- **Verify:** kill and restart a node mid-conversation; messages
-  should resume
+### Files
 
-### Phase 4
-- **Start with:** `crates/huddle-core/src/storage/mod.rs` (SQLCipher
-  migration) and `crates/huddle-core/src/session/store.rs` (key
-  rotation)
-- **Tests to add:** encrypted DB round-trip, passphrase change,
-  store-and-forward relay test
-- **Verify:** database file is encrypted on disk (`file huddle.db`
-  should not show "SQLite"), serialized sessions survive key rotation
+- `crates/huddle-core/src/storage/mod.rs` — `open_db` accepts a
+  master key
+- `crates/huddle-core/src/storage/keychain.rs` — derive + cache the
+  master key
+- `crates/huddle-tui/src/ui/master_passphrase.rs` — startup modal
+  for entering the master passphrase
 
-### Phase 5
-- **Start with:** `crates/huddle-core/src/group/mod.rs` (new module)
-  and the `openmls` crate integration
-- **Tests to add:** group creation, member add/remove, group message
-  delivery, MLS epoch advancement
-- **Verify:** 3+ node group chat works, member removal prevents
-  further decryption
-- **Setup:** at least 3 nodes for meaningful group testing
+### Migration
+
+Drop & recreate the DB if the user can't provide their old
+passphrase — Phase 1 data is ephemeral anyway.
+
+### Effort
+
+~400 lines. One commit.
+
+---
+
+## Phase 5 — Contact verification
+
+The "are you really 8a13-a3e0?" UX:
+
+- New `^V` modal in a room with side-by-side fingerprint comparison
+- After verification, mark the peer as verified in the SQLite
+  `room_members` table
+- Show a small "verified" badge next to verified members in the
+  member list
+
+Real safety relies on out-of-band verification (read fingerprints
+aloud, scan a QR code in person, compare hashes via a different
+channel). We just provide the UX; the user does the verification.
+
+### Files
+
+- `crates/huddle-core/src/storage/repo.rs` — `verified BOOL` column
+  on `room_members`
+- `crates/huddle-tui/src/ui/modal.rs` — `render_verify_modal`
+- `crates/huddle-tui/src/input.rs` — `^V` binding in room view
+
+### Effort
+
+~250 lines. One commit.
+
+---
+
+## Phase 6 — Quality-of-life
+
+Smaller items, grouped:
+
+- **Typing indicators** — ephemeral `RoomMessage::Typing` broadcast,
+  TTL 3s, shown in the member list area
+- **Message search** — `^F` modal that searches `room_messages` for
+  the current room
+- **Mute / notifications** — per-room toggle, terminal bell on
+  mention (`@my-fingerprint` substring) when muted
+- **QR-code identity exchange** — `qrcode` crate + ANSI block chars,
+  render your fingerprint as a QR for phone-to-laptop verification
+- **Display names** — let users pick a display name per identity;
+  share via `MemberAnnounce`
+- **Room history scroll-to-top** — `g/G` bindings vim-style
+
+### Effort
+
+~600 lines total. Independent items, can be picked one at a time.
+
+---
+
+## Explicitly out of scope (for the foreseeable future)
+
+- **Cross-network discovery** — no DHT, no Tor, no I2P, no
+  centralized bootstrap. Same-LAN is the design.
+- **Group calls / voice** — terminal doesn't help much here.
+- **Federated/server mode** — there is no server.
+- **Mobile / web frontends** — `huddle-core` could in principle be
+  used elsewhere but it's not a goal.
+
+---
+
+## How to resume
+
+Each phase is self-contained. To pick one up:
+
+1. Read this section + the spec section for that phase
+2. Start with the listed files-to-add
+3. Add tests next to each new module (the existing tests in
+   `crypto/`, `storage/`, and `app/` are the model)
+4. Verify with `cargo test --workspace` + the integration test in
+   `crates/huddle-core/tests/integration.rs`
+5. Manually test on two machines per `MANUAL_TESTING.md`
+
+The architectural boundary is `huddle-core::app::AppHandle` — every
+new feature should expose itself as a method on `AppHandle` plus an
+`AppEvent` variant. The TUI consumes these and is the one place
+where UX choices live.

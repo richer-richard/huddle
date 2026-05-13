@@ -1,16 +1,19 @@
 # Huddle
 
-Decentralized, end-to-end encrypted chat for your local network.
+Decentralized, terminal-native chat rooms for your local network.
 
-Two laptops on the same Wi-Fi discover each other automatically via mDNS
-and exchange messages encrypted with vodozemac (the Matrix Olm
-implementation). No servers, no accounts, no internet required.
+Open the TUI, browse rooms that other people on the same Wi-Fi are
+hosting, or start one yourself. Rooms can be public (cleartext over
+gossipsub) or encrypted (per-sender Megolm group sessions, session keys
+wrapped with an Argon2id-derived passphrase key).
+
+No servers, no accounts, no cloud, no internet required.
 
 > **This is a learning project, not production-secure chat.**
-> The serialization encryption key is hardcoded, the SQLite database is
-> unencrypted, and the protocol has not been audited. Do not use this
-> for real secrets. See `plan.md` for the roadmap toward production
-> security (Phases 3-5).
+> The vodozemac session serialization key is hardcoded, the SQLite
+> database is unencrypted, and the protocol has not been audited.
+> Do not use this for real secrets. See `plan.md` for the roadmap
+> toward production security.
 
 ## Build
 
@@ -18,87 +21,160 @@ Requires Rust 1.75+ (edition 2021).
 
 ```bash
 cargo build --release
-```
-
-The binary is at `target/release/huddle-tui`.
-
-## Run
-
-Start on two machines connected to the same Wi-Fi network:
-
-```bash
-# Machine A
-./target/release/huddle-tui
-
-# Machine B
 ./target/release/huddle-tui
 ```
 
-Each instance generates a cryptographic identity on first run and
-displays a fingerprint (e.g., `a3b1-c2d4-e5f6-7890-1234-abcd`).
+## How it works
 
-Both nodes will discover each other via mDNS within a few seconds.
+1. **Launch** — your Ed25519 identity loads (or generates) from disk
+   silently. The lobby appears. mDNS starts listening for room
+   announcements on the LAN.
+2. **Browse** — other huddles on the network broadcast their rooms via
+   gossipsub on a global `huddle-rooms-v1` topic. You see them in the
+   lobby with name, public/encrypted, member count, and host fingerprint.
+3. **Start a room** — press `s`. Pick a name, choose public or
+   encrypted (and a passphrase if encrypted). The lobby switches to
+   the in-room view.
+4. **Join a room** — navigate with `j/k`, press `Enter`. If it's
+   encrypted, enter the passphrase. You'll be added to that room's
+   gossipsub topic and start receiving messages.
+5. **Chat** — type to send. Multiple rooms appear as tabs along the
+   top; `^Tab` cycles, `1..9` jumps directly.
+6. **Leave** — `^L` leaves the current room (broadcasts a leave
+   notice); `^B` goes back to the lobby without leaving (useful for
+   browsing while in a room).
 
-## Usage
+## Lobby
 
-| Key        | Action                        |
-|------------|-------------------------------|
-| Tab        | Cycle focus between panes     |
-| j/k or arrows | Navigate within focused pane |
-| Enter      | Select peer / send message    |
-| /          | Focus chat input              |
-| Esc        | Blur input                    |
-| q          | Quit (when input not active)  |
-| Ctrl-C     | Quit (always)                 |
+```
++--------------------------------------------------------+
+|   huddle                                               |
+|   decentralized rooms                                  |
+|                                                        |
+|   you  745e-fe8a-ca21-8954-b0b4-016b                   |
+|        listening on /ip4/10.3.64.113/tcp/56825         |
++--------------------------------------------------------+
+|   rooms (3)                                            |
+|                                                        |
+|  >  lunch-talk        public      3 members   8a13     |
+|     team-1on1         encrypted   2 members   c4f1     |
+|     design-review     public      5 members   745e     |
+|                                                        |
++--------------------------------------------------------+
+|  [s] start  [j/Enter] join  [r] refresh  [?] help  [q] |
++--------------------------------------------------------+
+```
 
-1. Select a peer from the left pane (Enter)
-2. An encrypted session is established automatically
-3. Type your message and press Enter to send
-4. Messages appear in real-time on the other machine
+## In a room
+
+```
++--------------------------------------------------------+
+| [1] lunch-talk  [2] secret-room E*                     |
++--------------------------------------------------------+
+| #lunch-talk  public  3 members: 8a13 c4f1 you*         |
++--------------------------------------------------------+
+|                                                        |
+|  10:42  8a13    hey did you get the doc?               |
+|  10:43  you     yeah just opening it now               |
+|  10:43  c4f1    nice                                   |
+|                                                        |
++--------------------------------------------------------+
+| > _                                                    |
++--------------------------------------------------------+
+| ^Tab next   / type   Esc back   ^L leave   ?  help     |
++--------------------------------------------------------+
+```
+
+## Key bindings
+
+### Lobby
+| Key      | Action                          |
+|----------|---------------------------------|
+| `s`      | Start a new room                |
+| `j/Enter`| Join the selected room          |
+| `j/k` or arrows | Navigate rooms list      |
+| `r`      | Refresh discovered rooms        |
+| `?`      | Help                            |
+| `q`      | Quit                            |
+
+### In a room
+| Key       | Action                                |
+|-----------|---------------------------------------|
+| `/`       | Focus input (start typing)            |
+| `Enter`   | Send the typed message                |
+| `Esc`     | Blur input (or, if blurred, go to lobby) |
+| `^Tab`/`^N` | Next tab                            |
+| `^P`      | Previous tab                          |
+| `1`..`9`  | Jump to tab N                         |
+| `^L`      | Leave the current room                |
+| `^B`      | Back to lobby (without leaving)       |
+| `?`       | Help                                  |
+| `q`       | Quit (in-room, when input not focused)|
+| `Ctrl-C`  | Quit (always — confirms first)        |
 
 ## Architecture
 
 ```
 huddle/
-  huddle-core    Library: networking, crypto, storage
-  huddle-tui     Terminal UI (ratatui)
-  huddle-tauri   Desktop UI scaffold (Phase 2)
+  huddle-core    library: rooms, crypto, network, storage
+  huddle-tui     terminal UI (the only frontend)
+  huddle-tauri   stub (kept for future desktop shell)
 ```
 
-- **Networking:** libp2p with mDNS discovery, TCP+Noise+Yamux transport
-- **Encryption:** vodozemac Olm sessions (Double Ratchet)
-- **Identity:** Ed25519 keypairs (ed25519-dalek)
-- **Storage:** SQLite via rusqlite
+**Networking** — libp2p with TCP+Noise+Yamux transport, mDNS for LAN
+discovery, gossipsub for both global room advertisement and per-room
+message broadcast. Mesh topology — every member of a room receives
+every message; there's no "host" with special powers, and rooms
+survive the original creator leaving (as long as someone else is in
+them).
 
-## Current Limitations
+**Encryption (encrypted rooms)** — vodozemac Megolm group sessions, one
+outbound session per peer. When you join a room, you send your session
+key to everyone, encrypted with ChaCha20-Poly1305 under a key derived
+from the passphrase via Argon2id. New joiners ask for keys via a
+`SessionKeyRequest` broadcast; existing members re-broadcast their
+session keys in response.
 
-- Same-LAN only (no internet/cross-network discovery)
-- Two-peer chat only (no groups)
-- No offline message delivery
-- Serialization encryption key is hardcoded (not user-derived)
-- SQLite database is unencrypted on disk
-- No message delivery guarantees beyond basic ACK
-- mDNS may not work on some corporate/restricted networks
+**Identity** — Ed25519 keypair stored under your platform's data
+directory. Fingerprint format: six groups of four hex chars
+(`a3b1-c2d4-e5f6-7890-1234-abcd`).
+
+**Storage** — SQLite (rusqlite, bundled). Schema: `identity`, `rooms`,
+`room_members`, `room_megolm_sessions`, `room_messages`. Messages
+persist across launches keyed by room ID.
+
+## Current limitations
+
+- LAN only — mDNS discovery doesn't cross routers. No internet relay,
+  no Tor, no DHT. By design for this phase.
+- No file/image/audio/video attachments yet.
+- No contact verification UI (no safety-number flow).
+- No member removal — anyone with the passphrase keeps the key
+  forever. Removal requires rotation (not implemented).
+- Vodozemac session pickling key is hardcoded.
+- SQLite is unencrypted at rest.
+- Plain rooms are visible to anyone in the room (transport-encrypted
+  by libp2p Noise, but plaintext to room members).
+- mDNS may not work on some corporate/restricted networks.
 
 ## Testing
 
 ```bash
-# Unit + integration tests
 cargo test --workspace
-
-# Manual two-machine test
-see MANUAL_TESTING.md
 ```
+
+Includes two-node integration tests for unencrypted and encrypted room
+message exchange. See `MANUAL_TESTING.md` for the two-machine
+checklist.
 
 ## Roadmap
 
-See `plan.md` for Phases 2-5: cross-network discovery (Kademlia/DHT),
-Tauri desktop UI, robustness improvements, at-rest encryption, group
-chat (MLS), and more.
+See `plan.md` for: media attachments, contact verification, member
+rotation/removal, key replenishment, SQLCipher at-rest encryption, and
+more.
 
-## Data Directory
+## Data directory
 
-Identity keys and the database are stored in:
 - **macOS:** `~/Library/Application Support/huddle/`
 - **Linux:** `~/.local/share/huddle/`
 - **Windows:** `%APPDATA%\huddle\`
