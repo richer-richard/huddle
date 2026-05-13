@@ -25,7 +25,20 @@ pub fn open_db_in_memory() -> Result<Db> {
 
 fn run_migrations(conn: &Connection) -> Result<()> {
     for migration in schema::MIGRATIONS {
-        conn.execute_batch(migration)?;
+        if let Err(e) = conn.execute_batch(migration) {
+            let msg = e.to_string().to_lowercase();
+            // Tolerate idempotent additive migrations on existing DBs
+            // (ALTER TABLE ... ADD COLUMN runs every launch but errors
+            // on the second run; CREATE INDEX IF NOT EXISTS already
+            // handles itself).
+            if msg.contains("duplicate column")
+                || msg.contains("already exists")
+                || msg.contains("duplicate column name")
+            {
+                continue;
+            }
+            return Err(e.into());
+        }
     }
     Ok(())
 }

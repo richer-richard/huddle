@@ -334,6 +334,42 @@ impl TuiApp {
             AppEvent::Error { description } => {
                 self.modal = Modal::Error(description);
             }
+            AppEvent::FileOffered {
+                room_id,
+                file_id: _,
+                name,
+                size_bytes,
+                sender_fingerprint: _,
+            } => {
+                let active_id = self
+                    .open_rooms
+                    .get(self.active_tab)
+                    .map(|r| r.room_id.clone());
+                let on_active = self.screen == Screen::InRoom && active_id.as_deref() == Some(&room_id);
+                if let Some(r) = self.open_rooms.iter_mut().find(|r| r.room_id == room_id) {
+                    if !on_active {
+                        r.unread = true;
+                    }
+                }
+                self.set_status(format!(
+                    "file offered: {} ({} KB)",
+                    name,
+                    size_bytes / 1024
+                ));
+            }
+            AppEvent::FileProgress { .. } => {
+                // Progress is read on render from the attachments list;
+                // no state change here.
+            }
+            AppEvent::FileReady { file_id: _ } => {
+                self.set_status("file ready — press Enter to save");
+            }
+            AppEvent::FileSaved { file_id: _, path } => {
+                self.set_status(format!("saved to {}", path));
+            }
+            AppEvent::FileFailed { file_id: _, reason } => {
+                self.set_status(format!("transfer failed: {}", reason));
+            }
         }
     }
 

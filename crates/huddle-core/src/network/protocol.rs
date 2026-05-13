@@ -8,6 +8,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::files::encryption::EncryptedFileMeta;
+
 pub const ROOMS_TOPIC: &str = "huddle-rooms-v1";
 pub const ROOM_TOPIC_PREFIX: &str = "huddle-room-";
 
@@ -64,6 +66,30 @@ pub enum RoomMessage {
     MemberLeave {
         sender_fingerprint: String,
     },
+    /// Announce a file the sender is about to push. The receiver creates
+    /// an attachment row (status=offered) and waits for chunks. For
+    /// encrypted rooms `encrypted_meta` carries the Megolm-wrapped file
+    /// key + ChaCha20 nonce.
+    FileOffer {
+        sender_fingerprint: String,
+        file_id: String,
+        name: String,
+        size_bytes: u64,
+        mime: Option<String>,
+        chunk_count: u32,
+        encrypted_meta: Option<EncryptedFileMeta>,
+    },
+    /// One chunk of an in-flight file. Receivers reassemble by index
+    /// and verify the final SHA-256 against `file_id`.
+    FileChunk {
+        sender_fingerprint: String,
+        file_id: String,
+        chunk_index: u32,
+        total_chunks: u32,
+        /// base64 of raw chunk bytes (plaintext bytes for unencrypted
+        /// rooms, ChaCha20-Poly1305 ciphertext for encrypted).
+        data_b64: String,
+    },
 }
 
 #[cfg(test)]
@@ -108,6 +134,22 @@ mod tests {
             },
             RoomMessage::MemberLeave {
                 sender_fingerprint: "fp".into(),
+            },
+            RoomMessage::FileOffer {
+                sender_fingerprint: "fp".into(),
+                file_id: "fid".into(),
+                name: "f.bin".into(),
+                size_bytes: 1024,
+                mime: Some("application/octet-stream".into()),
+                chunk_count: 2,
+                encrypted_meta: None,
+            },
+            RoomMessage::FileChunk {
+                sender_fingerprint: "fp".into(),
+                file_id: "fid".into(),
+                chunk_index: 0,
+                total_chunks: 2,
+                data_b64: "AAA=".into(),
             },
         ];
         for m in msgs {

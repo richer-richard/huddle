@@ -72,8 +72,11 @@ pub const MIGRATIONS: &[&str] = &[
         encrypted INTEGER NOT NULL DEFAULT 0,
         wrapped_key TEXT,
         nonce TEXT,
+        megolm_session_id TEXT,
         created_at INTEGER NOT NULL,
         UNIQUE(room_id, file_id)
     );",
     "CREATE INDEX IF NOT EXISTS idx_room_attachments_room ON room_attachments(room_id);",
+    // Tolerated by the migration runner if the column already exists.
+    "ALTER TABLE room_attachments ADD COLUMN megolm_session_id TEXT;",
 ];

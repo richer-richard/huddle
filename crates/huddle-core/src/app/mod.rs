@@ -1,9 +1,12 @@
 pub mod events;
 
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine;
 use libp2p::{Multiaddr, PeerId};
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
@@ -12,11 +15,16 @@ use crate::config;
 use crate::crypto::passphrase::{self, KEY_LEN, SALT_LEN};
 use crate::crypto::RoomCrypto;
 use crate::error::{HuddleError, Result};
+use crate::files::encryption::{self as file_encryption, EncryptedFileMeta};
+use crate::files::FileManager;
 use crate::identity::Identity;
 use crate::network::events::NetworkEvent;
 use crate::network::protocol::{RoomAnnouncement, RoomMessage};
 use crate::network::{self, NetworkHandle, NetworkMode};
-use crate::storage::repo::{self, derive_room_id, KnownPeer, StoredRoom, StoredRoomMember};
+use crate::storage::repo::{
+    self, derive_room_id, AttachmentStatus, KnownPeer, StoredAttachment, StoredRoom,
+    StoredRoomMember,
+};
 use crate::storage::{self, Db};
 
 pub use self::events::{AppEvent, DiscoveredRoom};
@@ -100,6 +108,8 @@ pub struct AppHandle {
     /// Peer addresses we've dialed in this process; tracks "is the
     /// connection currently up" for known peers shown in the lobby.
     connected_dial_addrs: Arc<Mutex<HashMap<String, PeerId>>>,
+    /// File chunking + cache + downloads.
+    file_manager: Arc<FileManager>,
     db: Db,
     app_event_tx: broadcast::Sender<AppEvent>,
 }
@@ -136,6 +146,7 @@ impl AppHandle {
         let discovered_rooms = Arc::new(Mutex::new(HashMap::new()));
         let restorable_rooms = Arc::new(Mutex::new(HashMap::new()));
         let connected_dial_addrs = Arc::new(Mutex::new(HashMap::new()));
+        let file_manager = Arc::new(FileManager::new(&config::data_dir())?);
 
         let handle = Self {
             identity,
@@ -145,6 +156,7 @@ impl AppHandle {
             discovered_rooms,
             restorable_rooms,
             connected_dial_addrs,
+            file_manager,
             db,
             app_event_tx,
         };
@@ -1038,8 +1050,427 @@ impl AppHandle {
                     });
                 }
             }
+            RoomMessage::FileOffer {
+                sender_fingerprint,
+                file_id,
+                name,
+                size_bytes,
+                mime,
+                chunk_count,
+                encrypted_meta,
+            } => {
+                if sender_fingerprint == our_fp {
+                    return; // ignore our own broadcast
+                }
+                self.handle_file_offer(
+                    room_id,
+                    sender_fingerprint,
+                    file_id,
+                    name,
+                    size_bytes,
+                    mime,
+                    chunk_count,
+                    encrypted_meta,
+                );
+            }
+            RoomMessage::FileChunk {
+                sender_fingerprint,
+                file_id,
+                chunk_index,
+                total_chunks,
+                data_b64,
+            } => {
+                if sender_fingerprint == our_fp {
+                    return;
+                }
+                self.handle_file_chunk(
+                    room_id,
+                    sender_fingerprint,
+                    file_id,
+                    chunk_index,
+                    total_chunks,
+                    data_b64,
+                );
+            }
         }
     }
+
+    // -------------------------------------------------------------------
+    // File transfer — public API
+    // -------------------------------------------------------------------
+
+    /// Send a local file to a room. Reads the file, optionally encrypts
+    /// it for encrypted rooms, chunks it, broadcasts a FileOffer then
+    /// each FileChunk. Returns the file_id once all chunks are queued.
+    pub async fn send_file(&self, room_id: &str, path: &Path) -> Result<String> {
+        let bytes = std::fs::read(path)?;
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "untitled".into());
+        let mime = crate::files::guess_mime(&name);
+        let original_path = path.to_path_buf();
+
+        let (room_encrypted, mut maybe_session_id, encrypted_meta_opt, wire_bytes) = {
+            let mut rooms = self.active_rooms.lock().unwrap();
+            let room = rooms
+                .get_mut(room_id)
+                .ok_or_else(|| HuddleError::Other(format!("not in room {room_id}")))?;
+            if room.info.encrypted {
+                let crypto = room
+                    .crypto
+                    .as_mut()
+                    .ok_or_else(|| HuddleError::Session("missing room crypto".into()))?;
+                let (ciphertext, meta) = file_encryption::encrypt_file(&bytes, crypto)?;
+                (true, Some(meta.megolm_session_id.clone()), Some(meta), ciphertext)
+            } else {
+                (false, None, None, bytes)
+            }
+        };
+        let _ = &mut maybe_session_id; // silence unused warning when non-encrypted
+
+        let plan =
+            self.file_manager
+                .prepare_outgoing_from_bytes(&name, mime.clone(), wire_bytes)?;
+        let file_id = plan.file_id.clone();
+        let total = plan.chunks.len() as u32;
+        let our_fp = self.identity.fingerprint().to_string();
+
+        let attachment = StoredAttachment {
+            id: 0,
+            room_id: room_id.to_string(),
+            message_id: None,
+            sender_fingerprint: our_fp.clone(),
+            file_id: file_id.clone(),
+            name: name.clone(),
+            mime: mime.clone(),
+            size_bytes: plan.size_bytes as i64,
+            status: AttachmentStatus::Ready,
+            cache_path: Some(self.file_manager.cache_path(&file_id).to_string_lossy().into()),
+            saved_path: Some(original_path.to_string_lossy().into()),
+            error: None,
+            encrypted: room_encrypted,
+            wrapped_key: encrypted_meta_opt.as_ref().map(|m| m.wrapped_key_b64.clone()),
+            nonce: encrypted_meta_opt.as_ref().map(|m| m.nonce_b64.clone()),
+            megolm_session_id: encrypted_meta_opt
+                .as_ref()
+                .map(|m| m.megolm_session_id.clone()),
+            created_at: now_unix(),
+        };
+        repo::upsert_attachment(&self.db, &attachment)?;
+        let _ = self.app_event_tx.send(AppEvent::FileOffered {
+            room_id: room_id.to_string(),
+            file_id: file_id.clone(),
+            name: name.clone(),
+            size_bytes: plan.size_bytes,
+            sender_fingerprint: our_fp.clone(),
+        });
+
+        // Publish the offer.
+        let offer = RoomMessage::FileOffer {
+            sender_fingerprint: our_fp.clone(),
+            file_id: file_id.clone(),
+            name,
+            size_bytes: plan.size_bytes,
+            mime,
+            chunk_count: total,
+            encrypted_meta: encrypted_meta_opt,
+        };
+        if let Ok(bytes) = serde_json::to_vec(&offer) {
+            self.network
+                .publish_room_message(room_id.to_string(), bytes)
+                .await;
+        }
+
+        // Stream chunks. Brief pacing so gossipsub doesn't see a thundering
+        // herd from a single peer.
+        let net = self.network.clone();
+        let room = room_id.to_string();
+        let our = our_fp.clone();
+        let fid = file_id.clone();
+        let chunks = plan.chunks.clone();
+        tokio::spawn(async move {
+            for (i, data) in chunks.iter().enumerate() {
+                let msg = RoomMessage::FileChunk {
+                    sender_fingerprint: our.clone(),
+                    file_id: fid.clone(),
+                    chunk_index: i as u32,
+                    total_chunks: total,
+                    data_b64: B64.encode(data),
+                };
+                if let Ok(bytes) = serde_json::to_vec(&msg) {
+                    net.publish_room_message(room.clone(), bytes).await;
+                }
+                tokio::time::sleep(Duration::from_millis(40)).await;
+            }
+        });
+
+        Ok(file_id)
+    }
+
+    /// Save a completed/ready attachment to the user's Downloads folder.
+    /// Decrypts encrypted attachments on the way out.
+    pub async fn save_to_downloads(&self, room_id: &str, file_id: &str) -> Result<PathBuf> {
+        let attachment = repo::get_attachment(&self.db, room_id, file_id)?
+            .ok_or_else(|| HuddleError::Other("attachment not found".into()))?;
+        if !matches!(
+            attachment.status,
+            AttachmentStatus::Ready | AttachmentStatus::Saved
+        ) {
+            return Err(HuddleError::Other(format!(
+                "attachment is not ready (status={})",
+                attachment.status.as_str()
+            )));
+        }
+        let cached = self.file_manager.read_cache(file_id)?;
+        let plaintext = if attachment.encrypted {
+            let meta = EncryptedFileMeta {
+                megolm_session_id: attachment
+                    .megolm_session_id
+                    .clone()
+                    .ok_or_else(|| HuddleError::Other("missing megolm_session_id".into()))?,
+                wrapped_key_b64: attachment
+                    .wrapped_key
+                    .clone()
+                    .ok_or_else(|| HuddleError::Other("missing wrapped_key".into()))?,
+                nonce_b64: attachment
+                    .nonce
+                    .clone()
+                    .ok_or_else(|| HuddleError::Other("missing nonce".into()))?,
+            };
+            // For our own sent files we don't have an inbound session
+            // keyed by ourselves; the file_manager cache for the sender
+            // already holds the ciphertext. To open our own attachment
+            // we just open the original saved_path via open_saved (which
+            // doesn't decrypt — the bytes already exist on disk).
+            if attachment.sender_fingerprint == self.identity.fingerprint() {
+                return Err(HuddleError::Other(
+                    "this attachment is your own — use [o] open to open the source file".into(),
+                ));
+            }
+            self.decrypt_attachment(room_id, &attachment.sender_fingerprint, &cached, &meta)?
+        } else {
+            cached
+        };
+        let saved = self.file_manager.write_to_downloads(&attachment.name, &plaintext)?;
+        repo::update_attachment_paths(
+            &self.db,
+            room_id,
+            file_id,
+            None,
+            Some(&saved.to_string_lossy()),
+        )?;
+        repo::update_attachment_status(&self.db, room_id, file_id, AttachmentStatus::Saved, None)?;
+        let _ = self.app_event_tx.send(AppEvent::FileSaved {
+            file_id: file_id.into(),
+            path: saved.to_string_lossy().into(),
+        });
+        Ok(saved)
+    }
+
+    /// Drop any in-flight chunks and remove the attachment row.
+    pub async fn cancel_transfer(&self, room_id: &str, file_id: &str) -> Result<()> {
+        self.file_manager.cancel_incoming(file_id);
+        repo::update_attachment_status(
+            &self.db,
+            room_id,
+            file_id,
+            AttachmentStatus::Cancelled,
+            None,
+        )?;
+        Ok(())
+    }
+
+    /// Launch the system's default opener on a saved file.
+    pub fn open_saved(&self, room_id: &str, file_id: &str) -> Result<()> {
+        let attachment = repo::get_attachment(&self.db, room_id, file_id)?
+            .ok_or_else(|| HuddleError::Other("attachment not found".into()))?;
+        let path = attachment
+            .saved_path
+            .ok_or_else(|| HuddleError::Other("not saved yet — press Enter to save first".into()))?;
+        open_with_system(&path)
+    }
+
+    pub fn list_room_attachments(&self, room_id: &str) -> Result<Vec<StoredAttachment>> {
+        repo::list_room_attachments(&self.db, room_id)
+    }
+
+    // -------------------------------------------------------------------
+    // File transfer — internal handlers
+    // -------------------------------------------------------------------
+
+    #[allow(clippy::too_many_arguments)]
+    fn handle_file_offer(
+        &self,
+        room_id: &str,
+        sender_fingerprint: String,
+        file_id: String,
+        name: String,
+        size_bytes: u64,
+        mime: Option<String>,
+        _chunk_count: u32,
+        encrypted_meta: Option<EncryptedFileMeta>,
+    ) {
+        let encrypted = encrypted_meta.is_some();
+        let attachment = StoredAttachment {
+            id: 0,
+            room_id: room_id.to_string(),
+            message_id: None,
+            sender_fingerprint: sender_fingerprint.clone(),
+            file_id: file_id.clone(),
+            name: name.clone(),
+            mime,
+            size_bytes: size_bytes as i64,
+            status: AttachmentStatus::Offered,
+            cache_path: None,
+            saved_path: None,
+            error: None,
+            encrypted,
+            wrapped_key: encrypted_meta.as_ref().map(|m| m.wrapped_key_b64.clone()),
+            nonce: encrypted_meta.as_ref().map(|m| m.nonce_b64.clone()),
+            megolm_session_id: encrypted_meta.as_ref().map(|m| m.megolm_session_id.clone()),
+            created_at: now_unix(),
+        };
+        if let Err(e) = repo::upsert_attachment(&self.db, &attachment) {
+            warn!(%e, "upsert attachment");
+            return;
+        }
+        let _ = self.app_event_tx.send(AppEvent::FileOffered {
+            room_id: room_id.to_string(),
+            file_id,
+            name,
+            size_bytes,
+            sender_fingerprint,
+        });
+    }
+
+    fn handle_file_chunk(
+        &self,
+        room_id: &str,
+        _sender_fingerprint: String,
+        file_id: String,
+        chunk_index: u32,
+        total_chunks: u32,
+        data_b64: String,
+    ) {
+        let data = match B64.decode(&data_b64) {
+            Ok(d) => d,
+            Err(e) => {
+                warn!(%e, "bad chunk base64");
+                return;
+            }
+        };
+        // Pull the announced size from our stored offer.
+        let expected_size = repo::get_attachment(&self.db, room_id, &file_id)
+            .ok()
+            .flatten()
+            .map(|a| a.size_bytes as u64)
+            .unwrap_or(crate::files::MAX_FILE_SIZE);
+
+        let result = self.file_manager.accept_chunk(
+            &file_id,
+            chunk_index,
+            total_chunks,
+            data,
+            expected_size,
+        );
+        match result {
+            Ok(None) => {
+                // Move offered → downloading on first chunk.
+                let _ = repo::update_attachment_status(
+                    &self.db,
+                    room_id,
+                    &file_id,
+                    AttachmentStatus::Downloading,
+                    None,
+                );
+                // Best-effort progress event — we know we've processed
+                // (chunk_index+1)/total_chunks chunks.
+                let bytes_so_far = self
+                    .file_manager
+                    .progress(&file_id)
+                    .map(|(b, _)| b)
+                    .unwrap_or(0);
+                let _ = self.app_event_tx.send(AppEvent::FileProgress {
+                    file_id: file_id.clone(),
+                    bytes_received: bytes_so_far,
+                    total_bytes: expected_size,
+                });
+            }
+            Ok(Some(completed)) => {
+                let _ = repo::update_attachment_paths(
+                    &self.db,
+                    room_id,
+                    &file_id,
+                    Some(&completed.cache_path.to_string_lossy()),
+                    None,
+                );
+                let _ = repo::update_attachment_status(
+                    &self.db,
+                    room_id,
+                    &file_id,
+                    AttachmentStatus::Ready,
+                    None,
+                );
+                let _ = self.app_event_tx.send(AppEvent::FileReady {
+                    file_id: file_id.clone(),
+                });
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                warn!(%msg, "chunk processing failed");
+                let _ = repo::update_attachment_status(
+                    &self.db,
+                    room_id,
+                    &file_id,
+                    AttachmentStatus::Failed,
+                    Some(&msg),
+                );
+                let _ = self.app_event_tx.send(AppEvent::FileFailed {
+                    file_id: file_id.clone(),
+                    reason: msg,
+                });
+            }
+        }
+    }
+
+    fn decrypt_attachment(
+        &self,
+        room_id: &str,
+        sender_fingerprint: &str,
+        ciphertext: &[u8],
+        meta: &EncryptedFileMeta,
+    ) -> Result<Vec<u8>> {
+        let mut rooms = self.active_rooms.lock().unwrap();
+        let room = rooms
+            .get_mut(room_id)
+            .ok_or_else(|| HuddleError::Other("not in room".into()))?;
+        let crypto = room
+            .crypto
+            .as_mut()
+            .ok_or_else(|| HuddleError::Session("missing room crypto".into()))?;
+        file_encryption::decrypt_file(ciphertext, meta, crypto, sender_fingerprint)
+    }
+}
+
+/// Use the platform's default opener on `path`.
+fn open_with_system(path: &str) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    let cmd = "open";
+    #[cfg(target_os = "linux")]
+    let cmd = "xdg-open";
+    #[cfg(target_os = "windows")]
+    let cmd = "cmd";
+    #[cfg(target_os = "windows")]
+    let args = vec!["/C", "start", "", path];
+    #[cfg(not(target_os = "windows"))]
+    let args = vec![path];
+
+    std::process::Command::new(cmd)
+        .args(args)
+        .spawn()
+        .map_err(|e| HuddleError::Other(format!("spawn opener: {e}")))?;
+    Ok(())
 }
 
 // Module-level salt cache: room_id -> salt. Populated when we receive

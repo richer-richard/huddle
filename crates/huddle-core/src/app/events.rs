@@ -60,4 +60,25 @@ pub enum AppEvent {
     DialFailed { address: String, error: String },
     /// Non-fatal error.
     Error { description: String },
+    /// Someone (us or a peer) offered a file in a room.
+    FileOffered {
+        room_id: String,
+        file_id: String,
+        name: String,
+        size_bytes: u64,
+        sender_fingerprint: String,
+    },
+    /// A chunk of an incoming transfer arrived. `total_bytes` is the
+    /// announced size from the offer.
+    FileProgress {
+        file_id: String,
+        bytes_received: u64,
+        total_bytes: u64,
+    },
+    /// All chunks of a transfer received and SHA-256 verified.
+    FileReady { file_id: String },
+    /// User saved a ready file to Downloads.
+    FileSaved { file_id: String, path: String },
+    /// A transfer failed (hash mismatch, decrypt error, IO error).
+    FileFailed { file_id: String, reason: String },
 }

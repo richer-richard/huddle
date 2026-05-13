@@ -407,6 +407,7 @@ pub struct StoredAttachment {
     pub encrypted: bool,
     pub wrapped_key: Option<String>,
     pub nonce: Option<String>,
+    pub megolm_session_id: Option<String>,
     pub created_at: i64,
 }
 
@@ -417,8 +418,8 @@ pub fn upsert_attachment(db: &Db, a: &StoredAttachment) -> Result<()> {
         "INSERT INTO room_attachments
             (room_id, message_id, sender_fingerprint, file_id, name, mime,
              size_bytes, status, cache_path, saved_path, error,
-             encrypted, wrapped_key, nonce, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+             encrypted, wrapped_key, nonce, megolm_session_id, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
          ON CONFLICT(room_id, file_id) DO UPDATE SET
             name = excluded.name,
             mime = excluded.mime,
@@ -434,7 +435,8 @@ pub fn upsert_attachment(db: &Db, a: &StoredAttachment) -> Result<()> {
             saved_path = COALESCE(excluded.saved_path, room_attachments.saved_path),
             error      = excluded.error,
             wrapped_key = COALESCE(excluded.wrapped_key, room_attachments.wrapped_key),
-            nonce       = COALESCE(excluded.nonce, room_attachments.nonce)",
+            nonce       = COALESCE(excluded.nonce, room_attachments.nonce),
+            megolm_session_id = COALESCE(excluded.megolm_session_id, room_attachments.megolm_session_id)",
         params![
             a.room_id,
             a.message_id,
@@ -450,6 +452,7 @@ pub fn upsert_attachment(db: &Db, a: &StoredAttachment) -> Result<()> {
             a.encrypted as i64,
             a.wrapped_key,
             a.nonce,
+            a.megolm_session_id,
             a.created_at,
         ],
     )?;
@@ -475,7 +478,8 @@ fn row_to_attachment(row: &rusqlite::Row) -> rusqlite::Result<StoredAttachment> 
         encrypted: row.get::<_, i64>(12)? != 0,
         wrapped_key: row.get(13)?,
         nonce: row.get(14)?,
-        created_at: row.get(15)?,
+        megolm_session_id: row.get(15)?,
+        created_at: row.get(16)?,
     })
 }
 
@@ -484,7 +488,7 @@ pub fn get_attachment(db: &Db, room_id: &str, file_id: &str) -> Result<Option<St
     let mut stmt = conn.prepare(
         "SELECT id, room_id, message_id, sender_fingerprint, file_id, name, mime,
                 size_bytes, status, cache_path, saved_path, error,
-                encrypted, wrapped_key, nonce, created_at
+                encrypted, wrapped_key, nonce, megolm_session_id, created_at
          FROM room_attachments WHERE room_id = ?1 AND file_id = ?2",
     )?;
     let mut rows = stmt.query_map(params![room_id, file_id], row_to_attachment)?;
@@ -499,7 +503,7 @@ pub fn list_room_attachments(db: &Db, room_id: &str) -> Result<Vec<StoredAttachm
     let mut stmt = conn.prepare(
         "SELECT id, room_id, message_id, sender_fingerprint, file_id, name, mime,
                 size_bytes, status, cache_path, saved_path, error,
-                encrypted, wrapped_key, nonce, created_at
+                encrypted, wrapped_key, nonce, megolm_session_id, created_at
          FROM room_attachments WHERE room_id = ?1 ORDER BY created_at ASC",
     )?;
     let rows = stmt.query_map(params![room_id], row_to_attachment)?;
@@ -677,6 +681,7 @@ mod tests {
             encrypted: false,
             wrapped_key: None,
             nonce: None,
+            megolm_session_id: None,
             created_at: 100,
         }
     }
