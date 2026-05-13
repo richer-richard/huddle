@@ -81,4 +81,11 @@ pub enum AppEvent {
     FileSaved { file_id: String, path: String },
     /// A transfer failed (hash mismatch, decrypt error, IO error).
     FileFailed { file_id: String, reason: String },
+    /// A peer initiated a key rotation in a room we're in. The UI
+    /// surfaces a modal asking the user to enter the new passphrase.
+    RotationRequested {
+        room_id: String,
+        rotator_fingerprint: String,
+        new_salt: Vec<u8>,
+    },
 }

@@ -1,7 +1,10 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
 
-use crate::app::{AttachPickerState, DialPeerState, JoinRoomState, StartField, StartRoomState};
+use crate::app::{
+    AcceptRotationState, AttachPickerState, DialPeerState, JoinRoomState, RotateRoomState,
+    StartField, StartRoomState,
+};
 use crate::ui::centered_rect;
 
 pub fn render_start_room(f: &mut Frame, s: &StartRoomState) {
@@ -255,6 +258,91 @@ pub fn render_dial_peer(f: &mut Frame, s: &DialPeerState) {
 
     let para = Paragraph::new(lines).wrap(Wrap { trim: false }).block(block);
     f.render_widget(para, area);
+}
+
+pub fn render_rotate_room(f: &mut Frame, s: &RotateRoomState) {
+    let area = centered_rect(60, 10, f.area());
+    f.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Magenta))
+        .padding(Padding::uniform(1))
+        .title(Span::styled(
+            " rotate room key ",
+            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+        ));
+    let masked: String = s.passphrase.chars().map(|_| '•').collect();
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "  enter a NEW passphrase. share it with the others",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(Span::styled(
+            "  out-of-band (chat, voice). they'll get a prompt.",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" new passphrase: ", Style::default().fg(Color::Yellow)),
+            Span::styled(masked, Style::default().fg(Color::White)),
+            Span::styled("_", Style::default().fg(Color::DarkGray)),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" Enter", Style::default().fg(Color::Yellow)),
+            Span::styled(" confirm  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Esc", Style::default().fg(Color::Yellow)),
+            Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
+        ]),
+    ];
+    f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+pub fn render_accept_rotation(f: &mut Frame, s: &AcceptRotationState) {
+    let area = centered_rect(64, 11, f.area());
+    f.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Magenta))
+        .padding(Padding::uniform(1))
+        .title(Span::styled(
+            " key rotation requested ",
+            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+        ));
+    let masked: String = s.passphrase.chars().map(|_| '•').collect();
+    let lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(
+                &s.rotator_fingerprint[..s.rotator_fingerprint.len().min(9)],
+                Style::default().fg(Color::Cyan),
+            ),
+            Span::styled(
+                " rotated this room's key.",
+                Style::default().fg(Color::White),
+            ),
+        ]),
+        Line::from(Span::styled(
+            "  enter the new passphrase to keep receiving messages.",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" new passphrase: ", Style::default().fg(Color::Yellow)),
+            Span::styled(masked, Style::default().fg(Color::White)),
+            Span::styled("_", Style::default().fg(Color::DarkGray)),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" Enter", Style::default().fg(Color::Yellow)),
+            Span::styled(" accept  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Esc", Style::default().fg(Color::Yellow)),
+            Span::styled(" ignore (you'll stop seeing messages)", Style::default().fg(Color::DarkGray)),
+        ]),
+    ];
+    f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 pub fn render_attach_picker(f: &mut Frame, s: &AttachPickerState) {

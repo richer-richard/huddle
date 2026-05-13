@@ -66,6 +66,16 @@ pub enum RoomMessage {
     MemberLeave {
         sender_fingerprint: String,
     },
+    /// "I'm rotating the room key — derive a new passphrase key from
+    /// `new_salt` + the new passphrase you'll be told out-of-band, then
+    /// wait for my MemberAnnounce." Phase 3 v1: simplistic — only the
+    /// rotator's outbound changes; receivers must opt in by entering
+    /// the new passphrase to decrypt new wrapped session keys.
+    RotateRoomKey {
+        rotator_fingerprint: String,
+        /// Argon2id salt for the new passphrase-derived key.
+        new_salt: Vec<u8>,
+    },
     /// Announce a file the sender is about to push. The receiver creates
     /// an attachment row (status=offered) and waits for chunks. For
     /// encrypted rooms `encrypted_meta` carries the Megolm-wrapped file
@@ -150,6 +160,10 @@ mod tests {
                 chunk_index: 0,
                 total_chunks: 2,
                 data_b64: "AAA=".into(),
+            },
+            RoomMessage::RotateRoomKey {
+                rotator_fingerprint: "fp".into(),
+                new_salt: vec![1u8; 16],
             },
         ];
         for m in msgs {

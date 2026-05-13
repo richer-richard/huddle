@@ -1031,6 +1031,19 @@ impl AppHandle {
                     sent_at,
                 });
             }
+            RoomMessage::RotateRoomKey {
+                rotator_fingerprint,
+                new_salt,
+            } => {
+                if rotator_fingerprint == our_fp {
+                    return;
+                }
+                let _ = self.app_event_tx.send(AppEvent::RotationRequested {
+                    room_id: room_id.to_string(),
+                    rotator_fingerprint,
+                    new_salt,
+                });
+            }
             RoomMessage::MemberLeave { sender_fingerprint } => {
                 if sender_fingerprint == our_fp {
                     return;
@@ -1293,6 +1306,97 @@ impl AppHandle {
 
     pub fn list_room_attachments(&self, room_id: &str) -> Result<Vec<StoredAttachment>> {
         repo::list_room_attachments(&self.db, room_id)
+    }
+
+    // -------------------------------------------------------------------
+    // Room key rotation
+    // -------------------------------------------------------------------
+
+    /// Rotate this room's outbound Megolm session under a fresh
+    /// passphrase. Broadcasts `RotateRoomKey` (so other members know to
+    /// expect a new passphrase) and a fresh `MemberAnnounce` with the
+    /// new wrapped session key. Old inbound sessions stay in storage
+    /// for decrypting historic messages.
+    pub async fn rotate_room(&self, room_id: &str, new_passphrase: &str) -> Result<()> {
+        if new_passphrase.is_empty() {
+            return Err(HuddleError::Other("new passphrase is empty".into()));
+        }
+        let new_salt = passphrase::random_salt();
+        let new_key = passphrase::derive_key(new_passphrase, &new_salt)?;
+
+        let info = {
+            let mut rooms = self.active_rooms.lock().unwrap();
+            let room = rooms
+                .get_mut(room_id)
+                .ok_or_else(|| HuddleError::Other(format!("not in room {room_id}")))?;
+            if !room.info.encrypted {
+                return Err(HuddleError::Other(
+                    "rotation only applies to encrypted rooms".into(),
+                ));
+            }
+            // Generate a fresh outbound Megolm session for this member.
+            let new_crypto = RoomCrypto::new_for_room(
+                self.db.clone(),
+                room_id.to_string(),
+                self.identity.fingerprint().to_string(),
+            )?;
+            room.crypto = Some(new_crypto);
+            room.passphrase_key = Some(new_key);
+            room.info.passphrase_salt = Some(new_salt.to_vec());
+            room.info.clone()
+        };
+
+        // Persist the new salt on the stored row.
+        repo::insert_room(&self.db, &info)?;
+
+        // Broadcast the rotation signal.
+        let rot = RoomMessage::RotateRoomKey {
+            rotator_fingerprint: self.identity.fingerprint().to_string(),
+            new_salt: new_salt.to_vec(),
+        };
+        if let Ok(bytes) = serde_json::to_vec(&rot) {
+            self.network
+                .publish_room_message(room_id.to_string(), bytes)
+                .await;
+        }
+
+        // Re-announce ourselves with the new wrapped session key.
+        if let Err(e) = self.broadcast_member_announce(room_id).await {
+            warn!(%e, "rotate: broadcast announce failed");
+        }
+        Ok(())
+    }
+
+    /// Used by the TUI when another member rotates a room we're in.
+    /// Derives the new key, updates our local state, and re-announces
+    /// so the rotator can share their fresh outbound session with us.
+    pub async fn accept_rotation(
+        &self,
+        room_id: &str,
+        new_salt: &[u8],
+        new_passphrase: &str,
+    ) -> Result<()> {
+        let new_key = passphrase::derive_key(new_passphrase, new_salt)?;
+        let info = {
+            let mut rooms = self.active_rooms.lock().unwrap();
+            let room = rooms
+                .get_mut(room_id)
+                .ok_or_else(|| HuddleError::Other(format!("not in room {room_id}")))?;
+            room.passphrase_key = Some(new_key);
+            room.info.passphrase_salt = Some(new_salt.to_vec());
+            room.info.clone()
+        };
+        repo::insert_room(&self.db, &info)?;
+        // Ask the rotator (and anyone) to re-share their session key.
+        let req = RoomMessage::SessionKeyRequest {
+            requester_fingerprint: self.identity.fingerprint().to_string(),
+        };
+        if let Ok(bytes) = serde_json::to_vec(&req) {
+            self.network
+                .publish_room_message(room_id.to_string(), bytes)
+                .await;
+        }
+        Ok(())
     }
 
     // -------------------------------------------------------------------

@@ -65,6 +65,14 @@ pub enum Action {
     AttachPickerDown,
     AttachPickerAscend,
     AttachPickerDescendOrPick,
+    // Rotation
+    OpenRotateRoom,
+    RotateRoomTypeChar(char),
+    RotateRoomBackspace,
+    RotateRoomConfirm,
+    AcceptRotationTypeChar(char),
+    AcceptRotationBackspace,
+    AcceptRotationConfirm,
 }
 
 pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
@@ -129,6 +137,20 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
             KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => Action::AttachPickerDescendOrPick,
             _ => Action::Nothing,
         },
+        Modal::RotateRoom(_) => match key.code {
+            KeyCode::Esc => Action::CloseModal,
+            KeyCode::Enter => Action::RotateRoomConfirm,
+            KeyCode::Backspace => Action::RotateRoomBackspace,
+            KeyCode::Char(c) => Action::RotateRoomTypeChar(c),
+            _ => Action::Nothing,
+        },
+        Modal::AcceptRotation(_) => match key.code {
+            KeyCode::Esc => Action::CloseModal,
+            KeyCode::Enter => Action::AcceptRotationConfirm,
+            KeyCode::Backspace => Action::AcceptRotationBackspace,
+            KeyCode::Char(c) => Action::AcceptRotationTypeChar(c),
+            _ => Action::Nothing,
+        },
         Modal::Info(_) => match key.code {
             _ => Action::CloseModal,
         },
@@ -184,6 +206,7 @@ fn map_in_room(key: KeyEvent, app: &TuiApp) -> Action {
             KeyCode::Char('n') => Action::TabNext,
             KeyCode::Char('p') => Action::TabPrev,
             KeyCode::Char('a') if !input_active => Action::OpenAttachmentPicker,
+            KeyCode::Char('r') if !input_active => Action::OpenRotateRoom,
             _ => Action::Nothing,
         };
     }

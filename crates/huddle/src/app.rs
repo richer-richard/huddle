@@ -38,10 +38,29 @@ pub enum Modal {
     JoinRoom(JoinRoomState),
     DialPeer(DialPeerState),
     AttachPicker(AttachPickerState),
+    /// "Rotate the current room's key" — entered with ^R.
+    RotateRoom(RotateRoomState),
+    /// Someone else rotated our room's key; ask the user for the new
+    /// passphrase so we can continue receiving messages.
+    AcceptRotation(AcceptRotationState),
     QuitConfirm,
     Help,
     Error(String),
     Info(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct RotateRoomState {
+    pub room_id: String,
+    pub passphrase: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct AcceptRotationState {
+    pub room_id: String,
+    pub rotator_fingerprint: String,
+    pub new_salt: Vec<u8>,
+    pub passphrase: String,
 }
 
 #[derive(Debug, Clone)]
@@ -485,6 +504,18 @@ impl TuiApp {
             }
             AppEvent::FileFailed { file_id: _, reason } => {
                 self.set_status(format!("transfer failed: {}", reason));
+            }
+            AppEvent::RotationRequested {
+                room_id,
+                rotator_fingerprint,
+                new_salt,
+            } => {
+                self.modal = Modal::AcceptRotation(AcceptRotationState {
+                    room_id,
+                    rotator_fingerprint,
+                    new_salt,
+                    passphrase: String::new(),
+                });
             }
         }
     }
@@ -1141,6 +1172,78 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
         Action::AttachPickerAscend => {
             if let Modal::AttachPicker(s) = &mut app.modal {
                 s.ascend();
+            }
+            Ok(false)
+        }
+        Action::OpenRotateRoom => {
+            let room_id = match app.active_room() {
+                Some(r) if r.encrypted => r.room_id.clone(),
+                Some(_) => {
+                    app.set_status("rotation only applies to encrypted rooms");
+                    return Ok(false);
+                }
+                None => return Ok(false),
+            };
+            app.modal = Modal::RotateRoom(RotateRoomState {
+                room_id,
+                passphrase: String::new(),
+            });
+            Ok(false)
+        }
+        Action::RotateRoomTypeChar(c) => {
+            if let Modal::RotateRoom(s) = &mut app.modal {
+                s.passphrase.push(c);
+            }
+            Ok(false)
+        }
+        Action::RotateRoomBackspace => {
+            if let Modal::RotateRoom(s) = &mut app.modal {
+                s.passphrase.pop();
+            }
+            Ok(false)
+        }
+        Action::RotateRoomConfirm => {
+            let (room_id, pp) = match &app.modal {
+                Modal::RotateRoom(s) => (s.room_id.clone(), s.passphrase.clone()),
+                _ => return Ok(false),
+            };
+            if pp.is_empty() {
+                app.modal = Modal::Error("new passphrase cannot be empty".into());
+                return Ok(false);
+            }
+            app.modal = Modal::None;
+            match app.handle.rotate_room(&room_id, &pp).await {
+                Ok(()) => app.set_status("rotation broadcast — share the new passphrase out-of-band"),
+                Err(e) => app.modal = Modal::Error(format!("rotate failed: {e}")),
+            }
+            Ok(false)
+        }
+        Action::AcceptRotationTypeChar(c) => {
+            if let Modal::AcceptRotation(s) = &mut app.modal {
+                s.passphrase.push(c);
+            }
+            Ok(false)
+        }
+        Action::AcceptRotationBackspace => {
+            if let Modal::AcceptRotation(s) = &mut app.modal {
+                s.passphrase.pop();
+            }
+            Ok(false)
+        }
+        Action::AcceptRotationConfirm => {
+            let (room_id, new_salt, pp) = match &app.modal {
+                Modal::AcceptRotation(s) => {
+                    (s.room_id.clone(), s.new_salt.clone(), s.passphrase.clone())
+                }
+                _ => return Ok(false),
+            };
+            if pp.is_empty() {
+                return Ok(false);
+            }
+            app.modal = Modal::None;
+            match app.handle.accept_rotation(&room_id, &new_salt, &pp).await {
+                Ok(()) => app.set_status("accepted rotation — new key in use"),
+                Err(e) => app.modal = Modal::Error(format!("accept rotation failed: {e}")),
             }
             Ok(false)
         }
