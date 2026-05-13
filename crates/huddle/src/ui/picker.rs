@@ -1,5 +1,5 @@
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Padding, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Padding, Paragraph};
 
 use crate::ui::centered_rect;
 
@@ -9,7 +9,7 @@ pub fn render_welcome(f: &mut Frame) {
     let bg = Block::default().style(Style::default().bg(Color::Reset));
     f.render_widget(bg, f.area());
 
-    let area = centered_rect(76, 24, f.area());
+    let area = centered_rect(92, 24, f.area());
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan))
@@ -78,7 +78,7 @@ pub fn render_welcome(f: &mut Frame) {
         ]),
     ];
 
-    let para = Paragraph::new(lines).wrap(Wrap { trim: false }).block(block);
+    let para = Paragraph::new(lines).block(block);
     f.render_widget(para, area);
 }
 

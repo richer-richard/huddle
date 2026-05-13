@@ -48,39 +48,131 @@ file to stay within gossipsub's reasonable message budget; larger
 files defer to Phase 3 (dedicated libp2p streams via the
 `request-response` protocol or raw streams).
 
+### The file card (placeholder UX)
+
+Attachments don't render as raw pixels in the terminal. They appear
+in the chat history as a **focusable file card** — a multi-line
+block that's visually unmistakable as "not text", with explicit
+controls in its bottom row:
+
+```
+  10:42  8a13  ┌─[file] design-mockup.png · 4.2 MB · png ───────────┐
+              │  ████████████████░░░░░░░░░  74%  · downloading      │
+              │  [Enter] save to Downloads   [o] open   [c] cancel  │
+              └─────────────────────────────────────────────────────┘
+```
+
+Four visual states, distinguished by border color and the right-hand
+status word:
+
+- **offered** — peer announced the file; chunks not fetched yet.
+  Status: `offered · [Enter] to download`. Border: DarkGray.
+- **downloading** — chunks arriving. Status: `NN% · downloading`;
+  the progress bar fills. Border: Yellow.
+- **ready** — all chunks received, SHA-256 verified. Status:
+  `ready · [Enter] save to Downloads`, then after first save
+  `saved to ~/Downloads/…` and the primary action becomes `[o] open`.
+  Border: Green.
+- **failed** — hash mismatch or chunks didn't recover. Status:
+  `failed · [r] to retry`. Border: Red.
+
+Focused state overrides border color with Cyan and bolds the action
+hints in the bottom row, so users always see which card the next
+keystroke targets.
+
+#### Navigation
+
+The room view gains a second focus mode for cards. While the input
+is blurred (`Esc` from the input bar), `Tab` cycles focus among
+visible file cards; `j`/`k` (or arrows) step between them. The hint
+bar at the bottom of the screen swaps to show the focused card's
+available actions.
+
+| Key      | Action                                                       |
+|----------|--------------------------------------------------------------|
+| `Enter`  | Offered → start download. Ready → save to Downloads.         |
+| `o`      | Open the saved file via the system opener.                   |
+| `c`      | Cancel an in-flight download (partial chunks discarded).     |
+| `r`      | Retry a failed transfer.                                     |
+| `s`      | Save again with a fresh `-N` filename suffix.                |
+| `Esc`    | Return focus to the input bar.                               |
+
+**Mouse clicks** on a card's rendered area act as `Enter`.
+Implemented by enabling `crossterm::event::EnableMouseCapture` at
+startup and hit-testing the cached `Rect` of each rendered card on
+`MouseEvent::Down(Left)`. Keyboard nav remains the source of truth;
+the mouse is purely additive, so the app stays usable over SSH /
+without mouse support.
+
+#### Where files land
+
+Two paths on the receiving side, kept distinct on purpose:
+
+- **Cache** — chunks accumulate at
+  `<data_dir>/files/cache/<file_id>.part`, renamed to `<file_id>`
+  once the SHA-256 matches. The cache is the durable record of the
+  transfer; if the user saves twice (or restarts), saves are copies
+  from cache. Cache survives restarts so cards reappear in state
+  `ready` next time the room is opened.
+- **Downloads** — on `Enter` from a ready card, the cached file is
+  copied to the platform's Downloads directory via
+  `dirs::download_dir()` (`~/Downloads` on macOS/Linux,
+  `%USERPROFILE%\Downloads` on Windows). The original (sanitized)
+  filename is used; on collision the file gets a `-1`, `-2`, …
+  suffix before the extension. The card stores the resolved path so
+  `[o] open` knows what to launch.
+
 ### Files to add
 
 - `crates/huddle-core/src/files/mod.rs` — `FileManager`: track
-  outbound + inbound transfers, reassemble chunks, persist to disk
+  outbound + inbound transfers, reassemble chunks, verify SHA-256,
+  expose `save_to_downloads(file_id)` and `open_saved(file_id)`
 - `crates/huddle-core/src/files/encryption.rs` — wrap a file key with
   the room's Megolm session before sharing; encrypt the file with
   ChaCha20-Poly1305 (separate from message encryption to keep the
   Megolm ratchet from advancing on every chunk)
 - `crates/huddle-core/src/storage/repo.rs` — new `room_attachments`
-  table: (id, room_id, message_id, name, mime, size, local_path,
-  status [pending/complete/failed])
-- `crates/huddle/src/ui/attach_modal.rs` — file picker modal
-  triggered by `^A` in a room
-- `crates/huddle/src/ui/room.rs` — render file references as
-  `[file  filename.ext  4.2 MB  ████░░  47%]` with `^O` to open the
-  focused message's attachment via the system default opener
-  (`open` on macOS, `xdg-open` on Linux)
+  table: `(id, room_id, message_id, sender_fingerprint, file_id,
+  name, mime, size, status, cache_path, saved_path, created_at)`
+- `crates/huddle/src/ui/file_card.rs` — render one card across its
+  four states; return the rendered `Rect` for keyboard focus +
+  mouse hit-testing
+- `crates/huddle/src/ui/room.rs` — interleave file cards with text
+  messages in the scroll buffer; track focused-card index; route
+  card keys + mouse clicks to `AppHandle`
+- `crates/huddle/src/ui/attach_modal.rs` — outbound file picker
+  triggered by `^A`; navigate the local filesystem and pick a file
+  to offer
 
-### Storage
+### AppHandle additions
 
-Files are saved to `<data_dir>/files/<room_id>/<file_id>__<name>` —
-keeping the original name (after sanitization) for `open` to pick
-the right app.
+```rust
+impl AppHandle {
+    pub async fn send_file(&self, room_id: &str, path: &Path) -> Result<String>;
+    pub async fn start_download(&self, room_id: &str, file_id: &str) -> Result<()>;
+    pub async fn save_to_downloads(&self, file_id: &str) -> Result<PathBuf>;
+    pub async fn cancel_transfer(&self, file_id: &str) -> Result<()>;
+    pub fn open_saved(&self, file_id: &str) -> Result<()>;
+}
+```
+
+New `AppEvent` variants: `FileOffered { room_id, file_id, name,
+size, sender_fingerprint }`, `FileProgress { file_id, bytes_received,
+total_bytes }`, `FileReady { file_id }`, `FileSaved { file_id, path }`,
+`FileFailed { file_id, reason }`.
 
 ### Optional inline preview (later)
 
-The `ratatui-image` crate detects Kitty/Sixel/iTerm2 graphics
-protocols and renders inline. Defer until file transfer is solid.
-Audio/video stay external — `open` does the right thing.
+For image attachments, the card can render a thumbnail above its
+status line when the terminal supports Kitty / Sixel / iTerm2
+graphics protocols (via `ratatui-image`). Audio/video stay external
+— the system opener does the right thing. This is *additive* to the
+card; the card design above is the baseline that works in every
+terminal.
 
 ### Effort
 
-~800-1000 lines split across core + TUI. About 4-5 commits.
+~1000-1200 lines split across core + TUI. About 5-6 commits.
 
 ---
 

@@ -168,8 +168,37 @@ impl AppHandle {
     }
 
     pub fn discovered_rooms(&self) -> Vec<DiscoveredRoom> {
-        let map = self.discovered_rooms.lock().unwrap();
-        let mut v: Vec<DiscoveredRoom> = map.values().cloned().collect();
+        let now = now_unix();
+        let mut by_id: HashMap<String, DiscoveredRoom> = self
+            .discovered_rooms
+            .lock()
+            .unwrap()
+            .clone();
+
+        // Merge in rooms we're currently in — gossipsub doesn't echo our
+        // own announcements back to us, so without this our own hosted
+        // rooms wouldn't appear in the lobby.
+        for room in self.active_rooms.lock().unwrap().values() {
+            let entry = DiscoveredRoom {
+                room_id: room.info.id.clone(),
+                name: room.info.name.clone(),
+                encrypted: room.info.encrypted,
+                member_count: room.members.len() as u32,
+                creator_fingerprint: room.info.creator_fingerprint.clone(),
+                last_seen: now,
+            };
+            by_id
+                .entry(room.info.id.clone())
+                .and_modify(|d| {
+                    d.last_seen = now;
+                    if entry.member_count > d.member_count {
+                        d.member_count = entry.member_count;
+                    }
+                })
+                .or_insert(entry);
+        }
+
+        let mut v: Vec<DiscoveredRoom> = by_id.into_values().collect();
         v.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
         v
     }
