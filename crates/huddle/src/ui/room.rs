@@ -207,6 +207,20 @@ fn render_messages(f: &mut Frame, area: Rect, app: &TuiApp) {
         )));
     }
 
+    // visible_h = inner area minus 2 borders. Cap at 0 in case the
+    // window is impossibly small.
+    let visible_h = area.height.saturating_sub(2);
+    let total = lines.len() as u16;
+    let max_scroll = total.saturating_sub(visible_h);
+    // Publish max_scroll so action handlers can clamp without re-running
+    // the wrap.
+    r.last_max_scroll.set(max_scroll);
+    let scroll_y = if r.follow_mode {
+        max_scroll
+    } else {
+        r.scroll.min(max_scroll)
+    };
+
     let widget = Paragraph::new(lines)
         .block(
             Block::default()
@@ -214,7 +228,7 @@ fn render_messages(f: &mut Frame, area: Rect, app: &TuiApp) {
                 .border_style(Style::default().fg(Color::DarkGray))
                 .padding(Padding::horizontal(1)),
         )
-        .scroll((r.scroll, 0));
+        .scroll((scroll_y, 0));
     f.render_widget(widget, area);
 }
 

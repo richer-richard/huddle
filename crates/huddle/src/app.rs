@@ -1,5 +1,6 @@
+use std::cell::Cell;
 use std::io;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::{
@@ -16,6 +17,9 @@ use huddle_core::network::NetworkMode;
 use huddle_core::storage::repo::StoredRoomMessage;
 
 use crate::input::{self, Action};
+
+/// Default lifetime for transient status-bar messages.
+const STATUS_TTL: Duration = Duration::from_secs(6);
 
 /// Top-level screen — the lobby or the in-room view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,7 +90,16 @@ pub struct OpenRoom {
     pub messages: Vec<StoredRoomMessage>,
     pub input: String,
     pub input_active: bool,
+    /// Number of lines skipped from the top of the wrapped message
+    /// buffer. Bounded by `last_max_scroll` at render time.
     pub scroll: u16,
+    /// When true, render anchors to the bottom regardless of `scroll` —
+    /// new messages stay visible. Any ScrollUp / PgUp / Home disables it.
+    pub follow_mode: bool,
+    /// Last-rendered maximum scroll value (total_lines − visible_height).
+    /// Updated by `render_messages` so action handlers can clamp / detect
+    /// "we just hit the bottom" without re-running the wrap.
+    pub last_max_scroll: Cell<u16>,
     pub unread: bool,
 }
 
@@ -111,7 +124,9 @@ pub struct TuiApp {
     pub open_rooms: Vec<OpenRoom>,
     pub active_tab: usize,
     pub listen_addresses: Vec<String>,
-    pub status_message: Option<String>,
+    /// Bottom-bar status: text + expiry instant. After expiry, treated
+    /// as None by the renderer.
+    pub status_message: Option<(String, Instant)>,
 }
 
 impl TuiApp {
@@ -144,6 +159,37 @@ impl TuiApp {
         self.known_peers = self.handle.known_peers();
         if self.selected_peer_idx >= self.known_peers.len() && !self.known_peers.is_empty() {
             self.selected_peer_idx = self.known_peers.len() - 1;
+        }
+    }
+
+    /// Set the bottom status line with the default 6s TTL.
+    pub fn set_status(&mut self, msg: impl Into<String>) {
+        self.status_message = Some((msg.into(), Instant::now() + STATUS_TTL));
+    }
+
+    /// Set the status line with an explicit TTL.
+    pub fn set_status_for(&mut self, msg: impl Into<String>, ttl: Duration) {
+        self.status_message = Some((msg.into(), Instant::now() + ttl));
+    }
+
+    /// Returns the current status text if it hasn't expired.
+    pub fn current_status(&self) -> Option<&str> {
+        self.status_message.as_ref().and_then(|(msg, exp)| {
+            if *exp > Instant::now() {
+                Some(msg.as_str())
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Drop the stored status if it's already past its expiry. Cheap; safe
+    /// to call every tick.
+    pub fn tick_status(&mut self) {
+        if let Some((_, exp)) = &self.status_message {
+            if *exp <= Instant::now() {
+                self.status_message = None;
+            }
         }
     }
 
@@ -182,6 +228,8 @@ impl TuiApp {
                             input: String::new(),
                             input_active: true,
                             scroll: 0,
+                            follow_mode: true,
+                            last_max_scroll: Cell::new(0),
                             unread: false,
                         });
                         self.active_tab = self.open_rooms.len() - 1;
@@ -263,13 +311,13 @@ impl TuiApp {
             }
             AppEvent::PeerDiscovered { .. } => {}
             AppEvent::Dialing { address } => {
-                self.status_message = Some(format!("dialing {}…", address));
+                self.set_status(format!("dialing {}…", address));
                 if let Modal::DialPeer(s) = &mut self.modal {
                     s.status = Some(format!("dialing {}…", address));
                 }
             }
             AppEvent::DialSucceeded { address, .. } => {
-                self.status_message = Some(format!("connected to {}", address));
+                self.set_status(format!("connected to {}", address));
                 if matches!(self.modal, Modal::DialPeer(_)) {
                     self.modal = Modal::None;
                 }
@@ -277,7 +325,7 @@ impl TuiApp {
             }
             AppEvent::DialFailed { address, error } => {
                 let msg = format!("dial {} failed: {}", address, error);
-                self.status_message = Some(msg.clone());
+                self.set_status(msg.clone());
                 if matches!(self.modal, Modal::DialPeer(_)) {
                     self.modal = Modal::Error(msg);
                 }
@@ -289,9 +337,52 @@ impl TuiApp {
         }
     }
 
-    pub fn set_status(&mut self, msg: impl Into<String>) {
-        self.status_message = Some(msg.into());
-    }
+}
+
+/// Scroll the active room by `delta` lines (negative = up). Maintains
+/// `follow_mode` semantics: scrolling up disables it, reaching the bottom
+/// enables it.
+fn scroll_by(app: &mut TuiApp, delta: i32) {
+    let r = match app.active_room_mut() {
+        Some(r) => r,
+        None => return,
+    };
+    let max = r.last_max_scroll.get();
+    let current = if r.follow_mode { max } else { r.scroll };
+    let next = if delta < 0 {
+        current.saturating_sub(delta.unsigned_abs() as u16)
+    } else {
+        current.saturating_add(delta as u16).min(max)
+    };
+    r.scroll = next;
+    r.follow_mode = next >= max;
+}
+
+/// Open a tab for a room we're already subscribed to in `active_rooms`
+/// (e.g. one that was auto-restored at startup). Mirrors what the
+/// `AppEvent::RoomJoined` handler does, minus the actual join call.
+fn open_existing_room_tab(app: &mut TuiApp, room_id: &str) {
+    let info = match app.handle.active_room_info(room_id) {
+        Some(i) => i,
+        None => return,
+    };
+    let members = app.handle.room_members(room_id);
+    let messages = app.handle.room_messages(room_id, 200).unwrap_or_default();
+    app.open_rooms.push(OpenRoom {
+        room_id: room_id.to_string(),
+        name: info.name,
+        encrypted: info.encrypted,
+        members,
+        messages,
+        input: String::new(),
+        input_active: true,
+        scroll: 0,
+        follow_mode: true,
+        last_max_scroll: Cell::new(0),
+        unread: false,
+    });
+    app.active_tab = app.open_rooms.len() - 1;
+    app.screen = Screen::InRoom;
 }
 
 pub async fn run_tui(handle: AppHandle) -> Result<()> {
@@ -366,6 +457,9 @@ async fn main_loop(
             app.refresh_discovered();
             last_refresh = std::time::Instant::now();
         }
+
+        // Drop expired status-bar messages.
+        app.tick_status();
 
         if poll(Duration::from_millis(33))? {
             if let Event::Key(key) = event::read()? {
@@ -501,16 +595,20 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
         }
         Action::LobbyJoinSelected => {
             if let Some(room) = app.discovered_rooms.get(app.selected_room_idx).cloned() {
-                if app.open_rooms.iter().any(|r| r.room_id == room.room_id) {
-                    // Already joined — just switch to that tab.
-                    if let Some(idx) = app
-                        .open_rooms
-                        .iter()
-                        .position(|r| r.room_id == room.room_id)
-                    {
-                        app.active_tab = idx;
-                        app.screen = Screen::InRoom;
-                    }
+                // Already have a tab open — just focus it.
+                if let Some(idx) = app
+                    .open_rooms
+                    .iter()
+                    .position(|r| r.room_id == room.room_id)
+                {
+                    app.active_tab = idx;
+                    app.screen = Screen::InRoom;
+                    return Ok(false);
+                }
+                // Auto-restored non-encrypted room: we're already subscribed
+                // in active_rooms, just need to open a tab without re-joining.
+                if !room.encrypted && app.handle.active_room_info(&room.room_id).is_some() {
+                    open_existing_room_tab(app, &room.room_id);
                     return Ok(false);
                 }
                 if room.encrypted {
@@ -520,10 +618,8 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
                         encrypted: true,
                         passphrase: String::new(),
                     });
-                } else {
-                    if let Err(e) = app.handle.join_room(&room.room_id, None).await {
-                        app.modal = Modal::Error(format!("join failed: {e}"));
-                    }
+                } else if let Err(e) = app.handle.join_room(&room.room_id, None).await {
+                    app.modal = Modal::Error(format!("join failed: {e}"));
                 }
             }
             Ok(false)
@@ -677,14 +773,31 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             Ok(false)
         }
         Action::ScrollUp => {
-            if let Some(r) = app.active_room_mut() {
-                r.scroll = r.scroll.saturating_add(1);
-            }
+            scroll_by(app, -1);
             Ok(false)
         }
         Action::ScrollDown => {
+            scroll_by(app, 1);
+            Ok(false)
+        }
+        Action::PageUp => {
+            scroll_by(app, -10);
+            Ok(false)
+        }
+        Action::PageDown => {
+            scroll_by(app, 10);
+            Ok(false)
+        }
+        Action::JumpTop => {
             if let Some(r) = app.active_room_mut() {
-                r.scroll = r.scroll.saturating_sub(1);
+                r.scroll = 0;
+                r.follow_mode = false;
+            }
+            Ok(false)
+        }
+        Action::JumpBottom => {
+            if let Some(r) = app.active_room_mut() {
+                r.follow_mode = true;
             }
             Ok(false)
         }

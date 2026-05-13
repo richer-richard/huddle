@@ -93,6 +93,10 @@ pub struct AppHandle {
     mode: NetworkMode,
     active_rooms: Arc<Mutex<HashMap<String, ActiveRoom>>>,
     discovered_rooms: Arc<Mutex<HashMap<String, DiscoveredRoom>>>,
+    /// Encrypted rooms loaded from storage that we haven't rejoined yet
+    /// in this session (their passphrase-derived key isn't in memory).
+    /// Surfaced in the lobby so the user can re-enter with passphrase.
+    restorable_rooms: Arc<Mutex<HashMap<String, StoredRoom>>>,
     /// Peer addresses we've dialed in this process; tracks "is the
     /// connection currently up" for known peers shown in the lobby.
     connected_dial_addrs: Arc<Mutex<HashMap<String, PeerId>>>,
@@ -130,6 +134,7 @@ impl AppHandle {
 
         let active_rooms = Arc::new(Mutex::new(HashMap::new()));
         let discovered_rooms = Arc::new(Mutex::new(HashMap::new()));
+        let restorable_rooms = Arc::new(Mutex::new(HashMap::new()));
         let connected_dial_addrs = Arc::new(Mutex::new(HashMap::new()));
 
         let handle = Self {
@@ -138,6 +143,7 @@ impl AppHandle {
             mode,
             active_rooms,
             discovered_rooms,
+            restorable_rooms,
             connected_dial_addrs,
             db,
             app_event_tx,
@@ -147,6 +153,7 @@ impl AppHandle {
         handle.spawn_announcement_ticker();
         handle.spawn_discovered_room_pruner();
         handle.spawn_known_peer_reconnector();
+        handle.restore_rooms_from_db().await;
 
         Ok(handle)
     }
@@ -186,6 +193,7 @@ impl AppHandle {
                 member_count: room.members.len() as u32,
                 creator_fingerprint: room.info.creator_fingerprint.clone(),
                 last_seen: now,
+                restorable: false,
             };
             by_id
                 .entry(room.info.id.clone())
@@ -194,8 +202,30 @@ impl AppHandle {
                     if entry.member_count > d.member_count {
                         d.member_count = entry.member_count;
                     }
+                    d.restorable = false;
                 })
                 .or_insert(entry);
+        }
+
+        // Encrypted rooms we have on disk but haven't rejoined this
+        // session. Only surface them when no fresh discovery / active
+        // entry exists for the same room.
+        for (id, stored) in self.restorable_rooms.lock().unwrap().iter() {
+            if by_id.contains_key(id) {
+                continue;
+            }
+            by_id.insert(
+                id.clone(),
+                DiscoveredRoom {
+                    room_id: id.clone(),
+                    name: stored.name.clone(),
+                    encrypted: stored.encrypted,
+                    member_count: 0,
+                    creator_fingerprint: stored.creator_fingerprint.clone(),
+                    last_seen: stored.last_active.unwrap_or(stored.created_at),
+                    restorable: true,
+                },
+            );
         }
 
         let mut v: Vec<DiscoveredRoom> = by_id.into_values().collect();
@@ -312,28 +342,42 @@ impl AppHandle {
         Ok(room_id)
     }
 
-    /// Join an existing discovered room.
+    /// Join an existing room. The room may come from a live announcement
+    /// (preferred), our restorable set, or the DB directly — whichever has
+    /// the freshest copy. For encrypted rooms `passphrase` is required.
     pub async fn join_room(&self, room_id: &str, passphrase: Option<&str>) -> Result<()> {
-        let discovered = self
-            .discovered_rooms
-            .lock()
-            .unwrap()
-            .get(room_id)
-            .cloned()
-            .ok_or_else(|| HuddleError::Other(format!("room {room_id} not discovered")))?;
+        // Resolve room metadata from the freshest available source.
+        let (name, creator_fingerprint, encrypted, salt_opt) = {
+            if let Some(d) = self.discovered_rooms.lock().unwrap().get(room_id).cloned() {
+                let salt = self.get_room_salt(room_id);
+                (d.name, d.creator_fingerprint, d.encrypted, salt)
+            } else if let Some(stored) = self.restorable_rooms.lock().unwrap().get(room_id).cloned()
+            {
+                (
+                    stored.name,
+                    stored.creator_fingerprint,
+                    stored.encrypted,
+                    stored.passphrase_salt,
+                )
+            } else if let Some(stored) = repo::get_room(&self.db, room_id)? {
+                (
+                    stored.name,
+                    stored.creator_fingerprint,
+                    stored.encrypted,
+                    stored.passphrase_salt,
+                )
+            } else {
+                return Err(HuddleError::Other(format!("room {room_id} not found")));
+            }
+        };
 
-        if discovered.encrypted && passphrase.is_none() {
+        if encrypted && passphrase.is_none() {
             return Err(HuddleError::Other(
                 "encrypted room requires a passphrase".into(),
             ));
         }
 
-        // Re-fetch the announcement so we get the salt.
-        // (discovered_rooms stores the DiscoveredRoom struct which doesn't carry salt;
-        // we cache the salt separately in announcement_salts.)
-        let salt_opt = self.get_room_salt(room_id);
-
-        let passphrase_key = if discovered.encrypted {
+        let passphrase_key = if encrypted {
             let salt = salt_opt
                 .clone()
                 .ok_or_else(|| HuddleError::Other("missing salt for encrypted room".into()))?;
@@ -344,16 +388,16 @@ impl AppHandle {
 
         let info = StoredRoom {
             id: room_id.to_string(),
-            name: discovered.name.clone(),
-            creator_fingerprint: discovered.creator_fingerprint.clone(),
-            encrypted: discovered.encrypted,
+            name,
+            creator_fingerprint,
+            encrypted,
             passphrase_salt: salt_opt.clone(),
             created_at: now_unix(),
             last_active: Some(now_unix()),
         };
         repo::insert_room(&self.db, &info)?;
 
-        let crypto = if discovered.encrypted {
+        let crypto = if encrypted {
             Some(RoomCrypto::new_for_room(
                 self.db.clone(),
                 room_id.to_string(),
@@ -375,6 +419,8 @@ impl AppHandle {
                 members,
             },
         );
+        // No longer "restorable" now that we've rejoined.
+        self.restorable_rooms.lock().unwrap().remove(room_id);
 
         self.network.subscribe_room(room_id.to_string()).await;
 
@@ -399,6 +445,53 @@ impl AppHandle {
         });
 
         Ok(())
+    }
+
+    /// Walk the rooms table at startup. Non-encrypted rooms are silently
+    /// restored (subscribed + re-announced). Encrypted rooms get added to
+    /// `restorable_rooms` so the lobby surfaces them and the user can
+    /// re-enter via the join flow with passphrase.
+    async fn restore_rooms_from_db(&self) {
+        let rooms = match repo::list_rooms(&self.db) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(%e, "list rooms on restore");
+                return;
+            }
+        };
+        let our_fp = self.identity.fingerprint().to_string();
+        let count = rooms.len();
+        for info in rooms {
+            if info.encrypted {
+                self.restorable_rooms
+                    .lock()
+                    .unwrap()
+                    .insert(info.id.clone(), info);
+                continue;
+            }
+            let mut members = HashSet::new();
+            members.insert(our_fp.clone());
+            if let Ok(stored_members) = repo::list_room_members(&self.db, &info.id) {
+                for m in stored_members {
+                    members.insert(m.fingerprint);
+                }
+            }
+            self.active_rooms.lock().unwrap().insert(
+                info.id.clone(),
+                ActiveRoom {
+                    info: info.clone(),
+                    crypto: None,
+                    passphrase_key: None,
+                    members,
+                },
+            );
+            self.network.subscribe_room(info.id.clone()).await;
+            self.announce_room_now(&info, 1).await;
+            info!(room_id = %info.id, name = %info.name, "restored room");
+        }
+        if count > 0 {
+            debug!(count, "restored rooms from db");
+        }
     }
 
     pub async fn leave_room(&self, room_id: &str) -> Result<()> {
@@ -708,6 +801,7 @@ impl AppHandle {
                     member_count: ann.member_count,
                     creator_fingerprint: ann.creator_fingerprint.clone(),
                     last_seen: now_unix(),
+                    restorable: false,
                 };
                 // Skip our own announcements
                 if ann.creator_fingerprint == our_fp

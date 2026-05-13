@@ -10,7 +10,7 @@ pub fn render_lobby(f: &mut Frame, area: Rect, app: &TuiApp) {
     // Known-peers panel is always visible — listing + dialing coexist
     // in both LAN (mDNS) and Direct modes.
     let peer_h: u16 = ((app.known_peers.len() as u16).clamp(1, 6)) + 2;
-    let status_h: u16 = if app.status_message.is_some() { 1 } else { 0 };
+    let status_h: u16 = if app.current_status().is_some() { 1 } else { 0 };
 
     let mut constraints = vec![Constraint::Length(7), Constraint::Length(peer_h)];
     constraints.push(Constraint::Min(5));
@@ -226,22 +226,31 @@ fn render_rooms_list(f: &mut Frame, area: Rect, app: &TuiApp) {
                 Style::default().fg(Color::Green)
             };
             let highlighted = focused && i == app.selected_room_idx;
-            let line = Line::from(vec![
+            let name_style = if highlighted {
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            // Restorable rooms: "[saved]" tag instead of member count; the
+            // user enters via the join modal (passphrase prompt).
+            let last_col = if r.restorable {
                 Span::styled(
-                    format!("  {:<28}", r.name),
-                    if highlighted {
-                        Style::default()
-                            .fg(Color::White)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(Color::White)
-                    },
-                ),
-                Span::styled(format!("{:<11}", lock), lock_style),
+                    "saved · press Enter to rejoin",
+                    Style::default().fg(Color::Yellow),
+                )
+            } else {
                 Span::styled(
                     format!("{:<3} members  ", r.member_count),
                     Style::default().fg(Color::DarkGray),
-                ),
+                )
+            };
+            let line = Line::from(vec![
+                Span::styled(format!("  {:<28}", r.name), name_style),
+                Span::styled(format!("{:<11}", lock), lock_style),
+                last_col,
+                Span::styled("  ", Style::default()),
                 Span::styled(
                     short_fp(&r.creator_fingerprint),
                     Style::default().fg(Color::DarkGray),
@@ -277,7 +286,7 @@ fn render_rooms_list(f: &mut Frame, area: Rect, app: &TuiApp) {
 }
 
 fn render_status(f: &mut Frame, area: Rect, app: &TuiApp) {
-    let msg = app.status_message.clone().unwrap_or_default();
+    let msg = app.current_status().unwrap_or("").to_string();
     let para = Paragraph::new(Line::from(Span::styled(
         format!("  {}", msg),
         Style::default().fg(Color::Cyan),

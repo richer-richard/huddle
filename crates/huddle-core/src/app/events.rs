@@ -8,6 +8,11 @@ pub struct DiscoveredRoom {
     pub member_count: u32,
     pub creator_fingerprint: String,
     pub last_seen: i64,
+    /// True for rooms loaded from local storage that we haven't rejoined
+    /// yet this session (encrypted rooms whose passphrase key isn't in
+    /// memory). The lobby renders these with a "saved" hint; pressing
+    /// Enter goes through the join flow with passphrase prompt.
+    pub restorable: bool,
 }
 
 #[derive(Debug, Clone)]
