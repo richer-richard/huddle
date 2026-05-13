@@ -351,6 +351,204 @@ pub fn forget_known_peer(db: &Db, address: &str) -> Result<()> {
     Ok(())
 }
 
+// =========================================================================
+// Room attachments
+// =========================================================================
+
+/// Lifecycle of a file transfer card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttachmentStatus {
+    Offered,
+    Downloading,
+    Ready,
+    Saved,
+    Failed,
+    Cancelled,
+}
+
+impl AttachmentStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Offered => "offered",
+            Self::Downloading => "downloading",
+            Self::Ready => "ready",
+            Self::Saved => "saved",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+    pub fn from_str(s: &str) -> Option<Self> {
+        Some(match s {
+            "offered" => Self::Offered,
+            "downloading" => Self::Downloading,
+            "ready" => Self::Ready,
+            "saved" => Self::Saved,
+            "failed" => Self::Failed,
+            "cancelled" => Self::Cancelled,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct StoredAttachment {
+    pub id: i64,
+    pub room_id: String,
+    pub message_id: Option<i64>,
+    pub sender_fingerprint: String,
+    pub file_id: String,
+    pub name: String,
+    pub mime: Option<String>,
+    pub size_bytes: i64,
+    pub status: AttachmentStatus,
+    pub cache_path: Option<String>,
+    pub saved_path: Option<String>,
+    pub error: Option<String>,
+    pub encrypted: bool,
+    pub wrapped_key: Option<String>,
+    pub nonce: Option<String>,
+    pub created_at: i64,
+}
+
+/// Insert (or update on file_id collision within the same room).
+pub fn upsert_attachment(db: &Db, a: &StoredAttachment) -> Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "INSERT INTO room_attachments
+            (room_id, message_id, sender_fingerprint, file_id, name, mime,
+             size_bytes, status, cache_path, saved_path, error,
+             encrypted, wrapped_key, nonce, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+         ON CONFLICT(room_id, file_id) DO UPDATE SET
+            name = excluded.name,
+            mime = excluded.mime,
+            size_bytes = excluded.size_bytes,
+            -- Don't downgrade a more advanced status.
+            status = CASE
+                WHEN room_attachments.status IN ('saved','ready')
+                     AND excluded.status IN ('offered','downloading')
+                THEN room_attachments.status
+                ELSE excluded.status
+            END,
+            cache_path = COALESCE(excluded.cache_path, room_attachments.cache_path),
+            saved_path = COALESCE(excluded.saved_path, room_attachments.saved_path),
+            error      = excluded.error,
+            wrapped_key = COALESCE(excluded.wrapped_key, room_attachments.wrapped_key),
+            nonce       = COALESCE(excluded.nonce, room_attachments.nonce)",
+        params![
+            a.room_id,
+            a.message_id,
+            a.sender_fingerprint,
+            a.file_id,
+            a.name,
+            a.mime,
+            a.size_bytes,
+            a.status.as_str(),
+            a.cache_path,
+            a.saved_path,
+            a.error,
+            a.encrypted as i64,
+            a.wrapped_key,
+            a.nonce,
+            a.created_at,
+        ],
+    )?;
+    Ok(())
+}
+
+fn row_to_attachment(row: &rusqlite::Row) -> rusqlite::Result<StoredAttachment> {
+    let status_s: String = row.get(8)?;
+    let status = AttachmentStatus::from_str(&status_s).unwrap_or(AttachmentStatus::Failed);
+    Ok(StoredAttachment {
+        id: row.get(0)?,
+        room_id: row.get(1)?,
+        message_id: row.get(2)?,
+        sender_fingerprint: row.get(3)?,
+        file_id: row.get(4)?,
+        name: row.get(5)?,
+        mime: row.get(6)?,
+        size_bytes: row.get(7)?,
+        status,
+        cache_path: row.get(9)?,
+        saved_path: row.get(10)?,
+        error: row.get(11)?,
+        encrypted: row.get::<_, i64>(12)? != 0,
+        wrapped_key: row.get(13)?,
+        nonce: row.get(14)?,
+        created_at: row.get(15)?,
+    })
+}
+
+pub fn get_attachment(db: &Db, room_id: &str, file_id: &str) -> Result<Option<StoredAttachment>> {
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare(
+        "SELECT id, room_id, message_id, sender_fingerprint, file_id, name, mime,
+                size_bytes, status, cache_path, saved_path, error,
+                encrypted, wrapped_key, nonce, created_at
+         FROM room_attachments WHERE room_id = ?1 AND file_id = ?2",
+    )?;
+    let mut rows = stmt.query_map(params![room_id, file_id], row_to_attachment)?;
+    match rows.next() {
+        Some(r) => Ok(Some(r?)),
+        None => Ok(None),
+    }
+}
+
+pub fn list_room_attachments(db: &Db, room_id: &str) -> Result<Vec<StoredAttachment>> {
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare(
+        "SELECT id, room_id, message_id, sender_fingerprint, file_id, name, mime,
+                size_bytes, status, cache_path, saved_path, error,
+                encrypted, wrapped_key, nonce, created_at
+         FROM room_attachments WHERE room_id = ?1 ORDER BY created_at ASC",
+    )?;
+    let rows = stmt.query_map(params![room_id], row_to_attachment)?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+pub fn update_attachment_status(
+    db: &Db,
+    room_id: &str,
+    file_id: &str,
+    status: AttachmentStatus,
+    error: Option<&str>,
+) -> Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "UPDATE room_attachments SET status = ?1, error = ?2
+         WHERE room_id = ?3 AND file_id = ?4",
+        params![status.as_str(), error, room_id, file_id],
+    )?;
+    Ok(())
+}
+
+pub fn update_attachment_paths(
+    db: &Db,
+    room_id: &str,
+    file_id: &str,
+    cache_path: Option<&str>,
+    saved_path: Option<&str>,
+) -> Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "UPDATE room_attachments
+         SET cache_path = COALESCE(?1, cache_path),
+             saved_path = COALESCE(?2, saved_path)
+         WHERE room_id = ?3 AND file_id = ?4",
+        params![cache_path, saved_path, room_id, file_id],
+    )?;
+    Ok(())
+}
+
+pub fn delete_attachment(db: &Db, room_id: &str, file_id: &str) -> Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "DELETE FROM room_attachments WHERE room_id = ?1 AND file_id = ?2",
+        params![room_id, file_id],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -460,6 +658,121 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].session_data, vec![1, 2, 3, 4]);
         assert!(loaded[0].is_outbound);
+    }
+
+    fn make_attachment(room_id: &str, file_id: &str, name: &str) -> StoredAttachment {
+        StoredAttachment {
+            id: 0,
+            room_id: room_id.into(),
+            message_id: None,
+            sender_fingerprint: "sender-fp".into(),
+            file_id: file_id.into(),
+            name: name.into(),
+            mime: Some("image/png".into()),
+            size_bytes: 1234,
+            status: AttachmentStatus::Offered,
+            cache_path: None,
+            saved_path: None,
+            error: None,
+            encrypted: false,
+            wrapped_key: None,
+            nonce: None,
+            created_at: 100,
+        }
+    }
+
+    #[test]
+    fn attachment_upsert_and_get() {
+        let db = open_db_in_memory().unwrap();
+        let room = make_room("r");
+        insert_room(&db, &room).unwrap();
+        let a = make_attachment(&room.id, "file-abc", "photo.png");
+        upsert_attachment(&db, &a).unwrap();
+
+        let loaded = get_attachment(&db, &room.id, "file-abc").unwrap().unwrap();
+        assert_eq!(loaded.name, "photo.png");
+        assert_eq!(loaded.status, AttachmentStatus::Offered);
+        assert_eq!(loaded.size_bytes, 1234);
+    }
+
+    #[test]
+    fn attachment_status_transitions() {
+        let db = open_db_in_memory().unwrap();
+        let room = make_room("r");
+        insert_room(&db, &room).unwrap();
+        let a = make_attachment(&room.id, "fid", "f.bin");
+        upsert_attachment(&db, &a).unwrap();
+
+        update_attachment_status(&db, &room.id, "fid", AttachmentStatus::Downloading, None)
+            .unwrap();
+        assert_eq!(
+            get_attachment(&db, &room.id, "fid")
+                .unwrap()
+                .unwrap()
+                .status,
+            AttachmentStatus::Downloading
+        );
+
+        update_attachment_status(&db, &room.id, "fid", AttachmentStatus::Ready, None).unwrap();
+        update_attachment_paths(
+            &db,
+            &room.id,
+            "fid",
+            Some("/cache/fid"),
+            Some("/Downloads/f.bin"),
+        )
+        .unwrap();
+        let loaded = get_attachment(&db, &room.id, "fid").unwrap().unwrap();
+        assert_eq!(loaded.status, AttachmentStatus::Ready);
+        assert_eq!(loaded.cache_path.as_deref(), Some("/cache/fid"));
+        assert_eq!(loaded.saved_path.as_deref(), Some("/Downloads/f.bin"));
+    }
+
+    #[test]
+    fn upsert_does_not_downgrade_status() {
+        let db = open_db_in_memory().unwrap();
+        let room = make_room("r");
+        insert_room(&db, &room).unwrap();
+        let mut a = make_attachment(&room.id, "fid", "f.bin");
+        a.status = AttachmentStatus::Saved;
+        upsert_attachment(&db, &a).unwrap();
+
+        a.status = AttachmentStatus::Offered;
+        upsert_attachment(&db, &a).unwrap();
+        assert_eq!(
+            get_attachment(&db, &room.id, "fid")
+                .unwrap()
+                .unwrap()
+                .status,
+            AttachmentStatus::Saved
+        );
+    }
+
+    #[test]
+    fn list_attachments_for_room() {
+        let db = open_db_in_memory().unwrap();
+        let room = make_room("r");
+        insert_room(&db, &room).unwrap();
+        upsert_attachment(&db, &make_attachment(&room.id, "fid-a", "a.bin")).unwrap();
+        upsert_attachment(&db, &make_attachment(&room.id, "fid-b", "b.bin")).unwrap();
+        let list = list_room_attachments(&db, &room.id).unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].file_id, "fid-a");
+        assert_eq!(list[1].file_id, "fid-b");
+    }
+
+    #[test]
+    fn attachment_status_string_round_trip() {
+        for &s in &[
+            AttachmentStatus::Offered,
+            AttachmentStatus::Downloading,
+            AttachmentStatus::Ready,
+            AttachmentStatus::Saved,
+            AttachmentStatus::Failed,
+            AttachmentStatus::Cancelled,
+        ] {
+            assert_eq!(AttachmentStatus::from_str(s.as_str()), Some(s));
+        }
     }
 
     #[test]

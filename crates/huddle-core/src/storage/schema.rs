@@ -53,4 +53,27 @@ pub const MIGRATIONS: &[&str] = &[
         last_attempt_at INTEGER,
         created_at INTEGER NOT NULL
     );",
+    // File attachments offered / received in a room. A row is created
+    // the moment we see a FileOffer; status moves through the lifecycle
+    // as chunks arrive and the user activates the card.
+    "CREATE TABLE IF NOT EXISTS room_attachments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+        message_id INTEGER,
+        sender_fingerprint TEXT NOT NULL,
+        file_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        mime TEXT,
+        size_bytes INTEGER NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('offered','downloading','ready','saved','failed','cancelled')),
+        cache_path TEXT,
+        saved_path TEXT,
+        error TEXT,
+        encrypted INTEGER NOT NULL DEFAULT 0,
+        wrapped_key TEXT,
+        nonce TEXT,
+        created_at INTEGER NOT NULL,
+        UNIQUE(room_id, file_id)
+    );",
+    "CREATE INDEX IF NOT EXISTS idx_room_attachments_room ON room_attachments(room_id);",
 ];
