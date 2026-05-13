@@ -23,6 +23,7 @@ pub fn render(f: &mut Frame, app: &TuiApp) {
         Modal::RotateRoom(s) => modal::render_rotate_room(f, s),
         Modal::AcceptRotation(s) => modal::render_accept_rotation(f, s),
         Modal::Verify(s) => modal::render_verify(f, s),
+        Modal::Search(s) => modal::render_search(f, s),
         Modal::QuitConfirm => modal::render_quit_confirm(f),
         Modal::Help => modal::render_help(f),
         Modal::Error(msg) => modal::render_error(f, msg),

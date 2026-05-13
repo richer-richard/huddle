@@ -45,6 +45,8 @@ pub enum Modal {
     AcceptRotation(AcceptRotationState),
     /// Verify member fingerprints (^V).
     Verify(VerifyState),
+    /// Search room history (^F).
+    Search(SearchState),
     QuitConfirm,
     Help,
     Error(String),
@@ -63,6 +65,15 @@ pub struct AcceptRotationState {
     pub rotator_fingerprint: String,
     pub new_salt: Vec<u8>,
     pub passphrase: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SearchState {
+    pub room_id: String,
+    pub query: String,
+    pub results: Vec<StoredRoomMessage>,
+    pub selected: usize,
+    pub searched: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1280,6 +1291,67 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             match app.handle.accept_rotation(&room_id, &new_salt, &pp).await {
                 Ok(()) => app.set_status("accepted rotation — new key in use"),
                 Err(e) => app.modal = Modal::Error(format!("accept rotation failed: {e}")),
+            }
+            Ok(false)
+        }
+        Action::OpenSearch => {
+            let room_id = match app.active_room() {
+                Some(r) => r.room_id.clone(),
+                None => return Ok(false),
+            };
+            app.modal = Modal::Search(SearchState {
+                room_id,
+                query: String::new(),
+                results: Vec::new(),
+                selected: 0,
+                searched: false,
+            });
+            Ok(false)
+        }
+        Action::SearchTypeChar(c) => {
+            if let Modal::Search(s) = &mut app.modal {
+                s.query.push(c);
+            }
+            Ok(false)
+        }
+        Action::SearchBackspace => {
+            if let Modal::Search(s) = &mut app.modal {
+                s.query.pop();
+            }
+            Ok(false)
+        }
+        Action::SearchSubmit => {
+            let (room_id, query) = match &app.modal {
+                Modal::Search(s) => (s.room_id.clone(), s.query.clone()),
+                _ => return Ok(false),
+            };
+            if query.trim().is_empty() {
+                return Ok(false);
+            }
+            let results = app
+                .handle
+                .search_room_messages(&room_id, &query, 100)
+                .unwrap_or_default();
+            if let Modal::Search(s) = &mut app.modal {
+                s.results = results;
+                s.selected = 0;
+                s.searched = true;
+            }
+            Ok(false)
+        }
+        Action::SearchNext => {
+            if let Modal::Search(s) = &mut app.modal {
+                if s.selected + 1 < s.results.len() {
+                    s.selected += 1;
+                }
+            }
+            Ok(false)
+        }
+        Action::SearchPrev => {
+            if let Modal::Search(s) = &mut app.modal {
+                if s.selected > 0 {
+                    s.selected -= 1;
+                }
             }
             Ok(false)
         }

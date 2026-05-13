@@ -279,6 +279,15 @@ impl AppHandle {
         repo::get_room_messages(&self.db, room_id, limit)
     }
 
+    pub fn search_room_messages(
+        &self,
+        room_id: &str,
+        query: &str,
+        limit: i64,
+    ) -> Result<Vec<repo::StoredRoomMessage>> {
+        repo::search_room_messages(&self.db, room_id, query, limit)
+    }
+
     /// Create a new room. Returns its room_id.
     pub async fn start_room(
         &self,

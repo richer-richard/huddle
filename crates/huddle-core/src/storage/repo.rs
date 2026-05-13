@@ -302,6 +302,34 @@ pub fn insert_room_message(
     Ok(conn.last_insert_rowid())
 }
 
+/// LIKE-based message search within a room. Case-insensitive.
+pub fn search_room_messages(
+    db: &Db,
+    room_id: &str,
+    query: &str,
+    limit: i64,
+) -> Result<Vec<StoredRoomMessage>> {
+    let pattern = format!("%{}%", query);
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare(
+        "SELECT id, room_id, sender_fingerprint, direction, body, sent_at
+         FROM room_messages
+         WHERE room_id = ?1 AND body LIKE ?2 COLLATE NOCASE
+         ORDER BY sent_at DESC LIMIT ?3",
+    )?;
+    let rows = stmt.query_map(params![room_id, pattern, limit], |row| {
+        Ok(StoredRoomMessage {
+            id: row.get(0)?,
+            room_id: row.get(1)?,
+            sender_fingerprint: row.get(2)?,
+            direction: row.get(3)?,
+            body: row.get(4)?,
+            sent_at: row.get(5)?,
+        })
+    })?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
 pub fn get_room_messages(db: &Db, room_id: &str, limit: i64) -> Result<Vec<StoredRoomMessage>> {
     let conn = db.lock().unwrap();
     let mut stmt = conn.prepare(

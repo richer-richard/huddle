@@ -3,7 +3,7 @@ use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
 
 use crate::app::{
     AcceptRotationState, AttachPickerState, DialPeerState, JoinRoomState, RotateRoomState,
-    StartField, StartRoomState, VerifyState,
+    SearchState, StartField, StartRoomState, VerifyState,
 };
 use crate::ui::centered_rect;
 
@@ -343,6 +343,92 @@ pub fn render_accept_rotation(f: &mut Frame, s: &AcceptRotationState) {
         ]),
     ];
     f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+pub fn render_search(f: &mut Frame, s: &SearchState) {
+    let area = centered_rect(80, 20, f.area());
+    f.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .padding(Padding::uniform(1))
+        .title(Span::styled(
+            " search messages ",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        ));
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(vec![
+        Span::styled(" query: ", Style::default().fg(Color::Yellow)),
+        Span::styled(s.query.clone(), Style::default().fg(Color::White)),
+        Span::styled("_", Style::default().fg(Color::DarkGray)),
+    ]));
+    lines.push(Line::from(""));
+    if !s.searched {
+        lines.push(Line::from(Span::styled(
+            "  press Enter to search",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else if s.results.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  no matches",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            format!("  {} match(es) — newest first:", s.results.len()),
+            Style::default().fg(Color::DarkGray),
+        )));
+        lines.push(Line::from(""));
+        let visible = 10usize;
+        let offset = if s.selected >= visible {
+            s.selected.saturating_sub(visible - 1)
+        } else {
+            0
+        };
+        for (i, m) in s
+            .results
+            .iter()
+            .enumerate()
+            .skip(offset)
+            .take(visible)
+        {
+            let is_focused = i == s.selected;
+            let marker = if is_focused { "› " } else { "  " };
+            let time = {
+                let secs_today = (m.sent_at % 86_400) as u32;
+                let hh = (secs_today / 3600) % 24;
+                let mm = (secs_today / 60) % 60;
+                format!("{:02}:{:02}", hh, mm)
+            };
+            let snippet: String = m.body.chars().take(60).collect();
+            let style = if is_focused {
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {}", marker), Style::default().fg(Color::Yellow)),
+                Span::styled(
+                    format!("{}  ", time),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(snippet, style),
+            ]));
+        }
+    }
+    while lines.len() < 14 {
+        lines.push(Line::from(""));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled(" Enter", Style::default().fg(Color::Yellow)),
+        Span::styled(" search   ", Style::default().fg(Color::DarkGray)),
+        Span::styled("↑/↓", Style::default().fg(Color::Yellow)),
+        Span::styled(" results   ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Esc", Style::default().fg(Color::Yellow)),
+        Span::styled(" close", Style::default().fg(Color::DarkGray)),
+    ]));
+    f.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: false }), area);
 }
 
 pub fn render_verify(f: &mut Frame, s: &VerifyState) {

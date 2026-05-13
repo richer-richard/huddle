@@ -78,6 +78,13 @@ pub enum Action {
     VerifyNext,
     VerifyPrev,
     VerifyToggle,
+    // Search
+    OpenSearch,
+    SearchTypeChar(char),
+    SearchBackspace,
+    SearchSubmit,
+    SearchNext,
+    SearchPrev,
 }
 
 pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
@@ -163,6 +170,15 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
             KeyCode::Enter | KeyCode::Char(' ') => Action::VerifyToggle,
             _ => Action::Nothing,
         },
+        Modal::Search(_) => match key.code {
+            KeyCode::Esc => Action::CloseModal,
+            KeyCode::Enter => Action::SearchSubmit,
+            KeyCode::Down => Action::SearchNext,
+            KeyCode::Up => Action::SearchPrev,
+            KeyCode::Backspace => Action::SearchBackspace,
+            KeyCode::Char(c) => Action::SearchTypeChar(c),
+            _ => Action::Nothing,
+        },
         Modal::Info(_) => match key.code {
             _ => Action::CloseModal,
         },
@@ -220,6 +236,7 @@ fn map_in_room(key: KeyEvent, app: &TuiApp) -> Action {
             KeyCode::Char('a') if !input_active => Action::OpenAttachmentPicker,
             KeyCode::Char('r') if !input_active => Action::OpenRotateRoom,
             KeyCode::Char('v') if !input_active => Action::OpenVerify,
+            KeyCode::Char('f') if !input_active => Action::OpenSearch,
             _ => Action::Nothing,
         };
     }
