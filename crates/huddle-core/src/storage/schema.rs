@@ -1,24 +1,47 @@
 pub const MIGRATIONS: &[&str] = &[
+    // Identity unchanged — our own Ed25519 secret + vodozemac account
     "CREATE TABLE IF NOT EXISTS identity (
         id INTEGER PRIMARY KEY CHECK (id = 1),
         ed25519_secret BLOB NOT NULL,
         olm_account_data BLOB NOT NULL,
         created_at INTEGER NOT NULL
     );",
-    "CREATE TABLE IF NOT EXISTS peers (
-        peer_id TEXT PRIMARY KEY,
-        fingerprint TEXT NOT NULL,
-        display_name TEXT,
-        olm_session_data BLOB,
-        last_seen INTEGER
+    // Rooms we've created or joined
+    "CREATE TABLE IF NOT EXISTS rooms (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        creator_fingerprint TEXT NOT NULL,
+        encrypted INTEGER NOT NULL,
+        passphrase_salt BLOB,
+        created_at INTEGER NOT NULL,
+        last_active INTEGER
     );",
-    "CREATE TABLE IF NOT EXISTS messages (
+    // Per-room Megolm sessions: ours (outbound) and others' (inbound)
+    "CREATE TABLE IF NOT EXISTS room_megolm_sessions (
+        room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+        sender_fingerprint TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        session_data BLOB NOT NULL,
+        is_outbound INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (room_id, sender_fingerprint, session_id)
+    );",
+    // Known members of each room (libp2p peer_id + their fingerprint)
+    "CREATE TABLE IF NOT EXISTS room_members (
+        room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+        peer_id TEXT NOT NULL,
+        fingerprint TEXT NOT NULL,
+        last_seen INTEGER,
+        PRIMARY KEY (room_id, peer_id)
+    );",
+    "CREATE TABLE IF NOT EXISTS room_messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        peer_id TEXT NOT NULL REFERENCES peers(peer_id),
+        room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+        sender_fingerprint TEXT NOT NULL,
         direction TEXT NOT NULL CHECK (direction IN ('in', 'out')),
         body TEXT NOT NULL,
-        sent_at INTEGER NOT NULL,
-        delivered_at INTEGER
+        sent_at INTEGER NOT NULL
     );",
-    "CREATE INDEX IF NOT EXISTS idx_messages_peer ON messages(peer_id, sent_at);",
+    "CREATE INDEX IF NOT EXISTS idx_room_messages_room ON room_messages(room_id, sent_at);",
+    "CREATE INDEX IF NOT EXISTS idx_room_members_room ON room_members(room_id);",
 ];
