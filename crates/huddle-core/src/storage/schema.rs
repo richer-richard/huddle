@@ -82,4 +82,6 @@ pub const MIGRATIONS: &[&str] = &[
     // Phase 5: contact verification — user marks a member's fingerprint
     // as verified after comparing it out-of-band. Default 0 (unverified).
     "ALTER TABLE room_members ADD COLUMN verified INTEGER NOT NULL DEFAULT 0;",
+    // Phase 6 QoL: per-room mute flag.
+    "ALTER TABLE rooms ADD COLUMN muted INTEGER NOT NULL DEFAULT 0;",
 ];

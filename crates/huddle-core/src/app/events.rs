@@ -92,4 +92,8 @@ pub enum AppEvent {
     /// from `AppHandle::typers_in_room` on each render; the event is
     /// just a nudge.
     TypingChanged { room_id: String },
+    /// A received message included our fingerprint (full or short
+    /// form). The TUI uses this to ring the terminal bell, even in
+    /// muted rooms.
+    MentionReceived { room_id: String, body: String },
 }

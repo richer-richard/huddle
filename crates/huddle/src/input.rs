@@ -78,6 +78,8 @@ pub enum Action {
     VerifyNext,
     VerifyPrev,
     VerifyToggle,
+    // Mute
+    ToggleMute,
     // Search
     OpenSearch,
     SearchTypeChar(char),
@@ -237,6 +239,7 @@ fn map_in_room(key: KeyEvent, app: &TuiApp) -> Action {
             KeyCode::Char('r') if !input_active => Action::OpenRotateRoom,
             KeyCode::Char('v') if !input_active => Action::OpenVerify,
             KeyCode::Char('f') if !input_active => Action::OpenSearch,
+            KeyCode::Char('m') if !input_active => Action::ToggleMute,
             _ => Action::Nothing,
         };
     }

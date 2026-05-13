@@ -1013,6 +1013,7 @@ impl AppHandle {
                             sent_at,
                         );
                         let _ = repo::update_room_last_active(&self.db, room_id, sent_at);
+                        self.maybe_emit_mention(room_id, &body);
                         let _ = self.app_event_tx.send(AppEvent::MessageReceived {
                             room_id: room_id.to_string(),
                             sender_fingerprint,
@@ -1042,6 +1043,7 @@ impl AppHandle {
                     sent_at,
                 );
                 let _ = repo::update_room_last_active(&self.db, room_id, sent_at);
+                self.maybe_emit_mention(room_id, &body);
                 let _ = self.app_event_tx.send(AppEvent::MessageReceived {
                     room_id: room_id.to_string(),
                     sender_fingerprint,
@@ -1373,6 +1375,14 @@ impl AppHandle {
         repo::list_verified_fingerprints(&self.db, room_id).unwrap_or_default()
     }
 
+    pub fn is_room_muted(&self, room_id: &str) -> bool {
+        repo::is_room_muted(&self.db, room_id).unwrap_or(false)
+    }
+
+    pub fn set_room_muted(&self, room_id: &str, muted: bool) -> Result<()> {
+        repo::set_room_muted(&self.db, room_id, muted)
+    }
+
     /// Broadcast a "I'm typing" pulse to the given room. Caller is
     /// responsible for debouncing (don't fire more than every ~500ms).
     pub async fn broadcast_typing(&self, room_id: &str) {
@@ -1631,6 +1641,20 @@ impl AppHandle {
                     reason: msg,
                 });
             }
+        }
+    }
+
+    /// Emit MentionReceived if `body` contains either our full
+    /// fingerprint or its short form (first hex group).
+    fn maybe_emit_mention(&self, room_id: &str, body: &str) {
+        let full = self.identity.fingerprint();
+        let short = full.split('-').next().unwrap_or(full);
+        let lower = body.to_lowercase();
+        if lower.contains(&full.to_lowercase()) || lower.contains(&short.to_lowercase()) {
+            let _ = self.app_event_tx.send(AppEvent::MentionReceived {
+                room_id: room_id.to_string(),
+                body: body.to_string(),
+            });
         }
     }
 

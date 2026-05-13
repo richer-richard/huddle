@@ -538,6 +538,14 @@ impl TuiApp {
                 // The UI re-reads typers per-frame via handle.typers_in_room;
                 // nothing else to do here.
             }
+            AppEvent::MentionReceived { room_id, body } => {
+                // BEL (0x07): most terminals beep or flash on this.
+                use std::io::Write;
+                let _ = write!(std::io::stdout(), "\x07");
+                let _ = std::io::stdout().flush();
+                self.set_status(format!("@you mentioned in #{}", short_room(&room_id)));
+                let _ = body;
+            }
             AppEvent::RotationRequested {
                 room_id,
                 rotator_fingerprint,
@@ -553,6 +561,10 @@ impl TuiApp {
         }
     }
 
+}
+
+fn short_room(room_id: &str) -> String {
+    room_id.chars().take(8).collect()
 }
 
 /// Scroll the active room by `delta` lines (negative = up). Maintains
@@ -1291,6 +1303,19 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             match app.handle.accept_rotation(&room_id, &new_salt, &pp).await {
                 Ok(()) => app.set_status("accepted rotation — new key in use"),
                 Err(e) => app.modal = Modal::Error(format!("accept rotation failed: {e}")),
+            }
+            Ok(false)
+        }
+        Action::ToggleMute => {
+            let room_id = match app.active_room() {
+                Some(r) => r.room_id.clone(),
+                None => return Ok(false),
+            };
+            let now_muted = app.handle.is_room_muted(&room_id);
+            if let Err(e) = app.handle.set_room_muted(&room_id, !now_muted) {
+                app.modal = Modal::Error(format!("mute toggle failed: {e}"));
+            } else {
+                app.set_status(if !now_muted { "muted" } else { "unmuted" });
             }
             Ok(false)
         }

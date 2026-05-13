@@ -134,6 +134,22 @@ pub fn update_room_last_active(db: &Db, room_id: &str, ts: i64) -> Result<()> {
     Ok(())
 }
 
+pub fn set_room_muted(db: &Db, room_id: &str, muted: bool) -> Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "UPDATE rooms SET muted = ?1 WHERE id = ?2",
+        params![muted as i64, room_id],
+    )?;
+    Ok(())
+}
+
+pub fn is_room_muted(db: &Db, room_id: &str) -> Result<bool> {
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare("SELECT muted FROM rooms WHERE id = ?1")?;
+    let mut rows = stmt.query_map(params![room_id], |row| row.get::<_, i64>(0))?;
+    Ok(rows.next().map(|r| r.unwrap_or(0) != 0).unwrap_or(false))
+}
+
 // =========================================================================
 // Room members
 // =========================================================================
