@@ -6,7 +6,6 @@ use vodozemac::olm::{Account, InboundCreationResult, OlmMessage, Session, Sessio
 use vodozemac::Curve25519PublicKey;
 
 use crate::error::{HuddleError, Result};
-use crate::storage::repo;
 use crate::storage::Db;
 
 pub struct SessionManager {
@@ -145,6 +144,7 @@ impl SessionManager {
 mod tests {
     use super::*;
     use crate::storage::open_db_in_memory;
+    use crate::storage::repo;
     use vodozemac::olm::Account;
 
     #[test]

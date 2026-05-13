@@ -1,4 +1,4 @@
-use vodozemac::olm::{Account, AccountPickle, Session, SessionConfig, SessionPickle};
+use vodozemac::olm::{Account, AccountPickle, Session, SessionPickle};
 
 use crate::error::{HuddleError, Result};
 use crate::storage::repo;
@@ -70,6 +70,7 @@ pub fn load_session(db: &Db, peer_id: &str) -> Result<Option<Session>> {
 mod tests {
     use super::*;
     use crate::storage::open_db_in_memory;
+    use vodozemac::olm::SessionConfig;
 
     #[test]
     fn account_create_persist_reload() {
