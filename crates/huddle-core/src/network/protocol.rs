@@ -44,6 +44,10 @@ pub enum RoomMessage {
         /// SessionKey, encrypted under the passphrase-derived key.
         /// None for unencrypted rooms.
         wrapped_session_key: Option<String>,
+        /// Optional human-readable display name. Serde defaults to
+        /// `None` for forward compat with older peers.
+        #[serde(default)]
+        display_name: Option<String>,
     },
     /// A request from a recently-joined member: "I need session keys".
     /// Existing members respond with MemberAnnounce.
@@ -133,6 +137,7 @@ mod tests {
             RoomMessage::MemberAnnounce {
                 sender_fingerprint: "fp".into(),
                 wrapped_session_key: Some("base64data".into()),
+                display_name: Some("Daisy".into()),
             },
             RoomMessage::Plain {
                 sender_fingerprint: "fp".into(),

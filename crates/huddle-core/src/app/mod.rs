@@ -733,9 +733,11 @@ impl AppHandle {
                 None
             }
         };
+        let display_name = repo::get_display_name(&self.db).unwrap_or(None);
         let msg = RoomMessage::MemberAnnounce {
             sender_fingerprint: our_fp,
             wrapped_session_key: wrapped,
+            display_name,
         };
         let bytes = serde_json::to_vec(&msg)?;
         self.network
@@ -900,6 +902,7 @@ impl AppHandle {
             RoomMessage::MemberAnnounce {
                 sender_fingerprint,
                 wrapped_session_key,
+                display_name,
             } => {
                 if sender_fingerprint == our_fp {
                     return;
@@ -917,7 +920,7 @@ impl AppHandle {
                             fingerprint: sender_fingerprint.clone(),
                         });
                     }
-                    // Persist member
+                    // Persist member with optional display name.
                     let _ = repo::upsert_room_member(
                         &self.db,
                         &StoredRoomMember {
@@ -928,6 +931,14 @@ impl AppHandle {
                             verified: false,
                         },
                     );
+                    if let Some(name) = display_name.as_deref() {
+                        let _ = repo::set_member_display_name(
+                            &self.db,
+                            room_id,
+                            &sender_fingerprint,
+                            Some(name),
+                        );
+                    }
                     room.info.encrypted && wrapped_session_key.is_some()
                 };
 
@@ -1373,6 +1384,19 @@ impl AppHandle {
 
     pub fn verified_fingerprints(&self, room_id: &str) -> Vec<String> {
         repo::list_verified_fingerprints(&self.db, room_id).unwrap_or_default()
+    }
+
+    pub fn display_name(&self) -> Option<String> {
+        repo::get_display_name(&self.db).unwrap_or(None)
+    }
+
+    pub fn set_display_name(&self, name: Option<&str>) -> Result<()> {
+        repo::set_display_name(&self.db, name)
+    }
+
+    /// Look up the display name we've seen for a peer in any room.
+    pub fn lookup_member_display_name(&self, fingerprint: &str) -> Option<String> {
+        repo::lookup_display_name(&self.db, fingerprint).unwrap_or(None)
     }
 
     pub fn is_room_muted(&self, room_id: &str) -> bool {

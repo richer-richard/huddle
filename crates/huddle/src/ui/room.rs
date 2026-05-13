@@ -220,10 +220,16 @@ fn render_messages(f: &mut Frame, area: Rect, app: &TuiApp) {
             Row::Text(m) => {
                 let is_me = m.sender_fingerprint == me || m.direction == "out";
                 let label = if is_me {
-                    "you".to_string()
+                    app.handle
+                        .display_name()
+                        .unwrap_or_else(|| "you".to_string())
                 } else {
-                    short_fp(&m.sender_fingerprint)
+                    app.handle
+                        .lookup_member_display_name(&m.sender_fingerprint)
+                        .unwrap_or_else(|| short_fp(&m.sender_fingerprint))
                 };
+                // Truncate names to fit in the 6-char label column.
+                let label: String = label.chars().take(6).collect();
                 let label_style = if is_me {
                     Style::default().fg(Color::Yellow).bold()
                 } else {

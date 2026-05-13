@@ -38,6 +38,49 @@ pub fn load_identity(db: &Db) -> Result<Option<StoredIdentity>> {
     }
 }
 
+pub fn get_display_name(db: &Db) -> Result<Option<String>> {
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare("SELECT display_name FROM identity WHERE id = 1")?;
+    let mut rows = stmt.query_map([], |row| row.get::<_, Option<String>>(0))?;
+    Ok(rows.next().and_then(|r| r.ok()).flatten())
+}
+
+pub fn set_display_name(db: &Db, name: Option<&str>) -> Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "UPDATE identity SET display_name = ?1 WHERE id = 1",
+        params![name],
+    )?;
+    Ok(())
+}
+
+/// Look up the most-recently-seen display name for a given fingerprint
+/// in a room (or anywhere if room_id is empty).
+pub fn lookup_display_name(db: &Db, fingerprint: &str) -> Result<Option<String>> {
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare(
+        "SELECT display_name FROM room_members
+         WHERE fingerprint = ?1 AND display_name IS NOT NULL
+         ORDER BY last_seen DESC LIMIT 1",
+    )?;
+    let mut rows = stmt.query_map(params![fingerprint], |row| row.get::<_, Option<String>>(0))?;
+    Ok(rows.next().and_then(|r| r.ok()).flatten())
+}
+
+pub fn set_member_display_name(
+    db: &Db,
+    room_id: &str,
+    fingerprint: &str,
+    name: Option<&str>,
+) -> Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "UPDATE room_members SET display_name = ?1 WHERE room_id = ?2 AND fingerprint = ?3",
+        params![name, room_id, fingerprint],
+    )?;
+    Ok(())
+}
+
 // =========================================================================
 // Rooms
 // =========================================================================

@@ -84,4 +84,8 @@ pub const MIGRATIONS: &[&str] = &[
     "ALTER TABLE room_members ADD COLUMN verified INTEGER NOT NULL DEFAULT 0;",
     // Phase 6 QoL: per-room mute flag.
     "ALTER TABLE rooms ADD COLUMN muted INTEGER NOT NULL DEFAULT 0;",
+    // Phase 6: display names — our own, plus per-room remembered names
+    // of other members.
+    "ALTER TABLE identity ADD COLUMN display_name TEXT;",
+    "ALTER TABLE room_members ADD COLUMN display_name TEXT;",
 ];

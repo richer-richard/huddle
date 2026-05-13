@@ -24,6 +24,11 @@ struct Cli {
     /// people to be able to dial you reliably from outside the LAN.
     #[arg(long, default_value_t = 0u16)]
     port: u16,
+
+    /// Optional human-readable display name shown alongside your short
+    /// fingerprint in chat.
+    #[arg(long)]
+    name: Option<String>,
 }
 
 fn parse_mode(s: &str) -> std::result::Result<NetworkMode, String> {
@@ -59,5 +64,13 @@ async fn main() -> Result<()> {
     let handle = huddle_core::app::AppHandle::start_with_options(mode, cli.port)
         .await
         .map_err(|e| anyhow!(e))?;
+    if let Some(name) = cli.name.as_deref() {
+        let trimmed = name.trim();
+        if !trimmed.is_empty() {
+            handle
+                .set_display_name(Some(trimmed))
+                .map_err(|e| anyhow!(e))?;
+        }
+    }
     app::run_tui(handle).await
 }
