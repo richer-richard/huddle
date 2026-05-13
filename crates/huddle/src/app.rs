@@ -4,7 +4,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::{
-    event::{self, poll, Event},
+    event::{
+        self, poll, DisableMouseCapture, EnableMouseCapture, Event, MouseButton, MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -542,7 +544,7 @@ fn open_existing_room_tab(app: &mut TuiApp, room_id: &str) {
 pub async fn run_tui(handle: AppHandle) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -552,7 +554,11 @@ pub async fn run_tui(handle: AppHandle) -> Result<()> {
     let result = main_loop(&mut terminal, &mut app, &mut event_rx).await;
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
     app.handle.shutdown().await;
     result
 }
@@ -617,9 +623,28 @@ async fn main_loop(
         app.tick_status();
 
         if poll(Duration::from_millis(33))? {
-            if let Event::Key(key) = event::read()? {
-                let action = input::map_key(key, app);
-                should_quit = handle_action(action, app).await?;
+            match event::read()? {
+                Event::Key(key) => {
+                    let action = input::map_key(key, app);
+                    should_quit = handle_action(action, app).await?;
+                }
+                Event::Mouse(m) => {
+                    if matches!(m.kind, MouseEventKind::Down(MouseButton::Left))
+                        && app.screen == Screen::InRoom
+                    {
+                        // Click-to-toggle: clicking anywhere inside the
+                        // chat area while we're in a room enters card
+                        // focus mode if there are cards. Precise hit-
+                        // testing per-card requires Rect tracking from
+                        // render — left as a follow-up.
+                        if let Some(r) = app.active_room() {
+                            if !r.attachments.is_empty() && !r.card_focus {
+                                handle_action(input::Action::ToggleCardFocus, app).await?;
+                            }
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     }
