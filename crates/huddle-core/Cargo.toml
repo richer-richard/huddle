@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 libp2p = { version = "0.56", features = [
     "mdns", "identify", "ping", "request-response",
-    "tcp", "noise", "yamux", "tokio", "ed25519", "macros",
+    "tcp", "noise", "yamux", "tokio", "ed25519", "macros", "gossipsub",
 ] }
 vodozemac = "0.10"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
