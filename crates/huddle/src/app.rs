@@ -642,6 +642,151 @@ pub async fn run_tui(handle: AppHandle) -> Result<()> {
     result
 }
 
+/// Prompt the user for their master passphrase before bringing up the
+/// AppHandle. Returns the (raw) passphrase string; an empty string means
+/// the user wants to abort. When `is_new` is true the prompt asks for
+/// confirmation (typed twice).
+pub fn prompt_master_passphrase(is_new: bool) -> Result<String> {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
+
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    let mut first = String::new();
+    let mut confirm = String::new();
+    let mut on_confirm = false;
+    let mut error: Option<String> = None;
+    let mut outcome: Option<String> = None;
+
+    while outcome.is_none() {
+        terminal.draw(|f| {
+            let area = crate::ui::centered_rect(60, 14, f.area());
+            f.render_widget(Clear, area);
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan))
+                .padding(Padding::uniform(1))
+                .title(Span::styled(
+                    if is_new {
+                        " set a master passphrase "
+                    } else {
+                        " unlock huddle "
+                    },
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                ));
+            let masked = |s: &str| -> String { s.chars().map(|_| '•').collect() };
+            let mut lines: Vec<Line> = Vec::new();
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                if is_new {
+                    "  set a passphrase to encrypt your local database."
+                } else {
+                    "  enter your passphrase to unlock the database."
+                },
+                Style::default().fg(Color::DarkGray),
+            )));
+            lines.push(Line::from(Span::styled(
+                "  forget it and your data becomes unrecoverable.",
+                Style::default().fg(Color::DarkGray),
+            )));
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled(
+                    if is_new && on_confirm { "  confirm: " } else { "  passphrase: " },
+                    Style::default().fg(Color::Yellow),
+                ),
+                Span::styled(
+                    masked(if on_confirm { &confirm } else { &first }),
+                    Style::default().fg(Color::White),
+                ),
+                Span::styled("_", Style::default().fg(Color::DarkGray)),
+            ]));
+            if let Some(err) = &error {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    format!("  ! {}", err),
+                    Style::default().fg(Color::Red),
+                )));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled(" Enter", Style::default().fg(Color::Yellow)),
+                Span::styled(
+                    if is_new && !on_confirm {
+                        " continue   "
+                    } else {
+                        " unlock   "
+                    },
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled("Esc", Style::default().fg(Color::Yellow)),
+                Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
+            ]));
+            f.render_widget(Paragraph::new(lines).block(block), area);
+        })?;
+
+        if event::poll(Duration::from_millis(200))? {
+            if let Event::Key(key) = event::read()? {
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && matches!(key.code, crossterm::event::KeyCode::Char('c'))
+                {
+                    outcome = Some(String::new());
+                    break;
+                }
+                match key.code {
+                    KeyCode::Esc => {
+                        outcome = Some(String::new());
+                    }
+                    KeyCode::Backspace => {
+                        if on_confirm {
+                            confirm.pop();
+                        } else {
+                            first.pop();
+                        }
+                    }
+                    KeyCode::Enter => {
+                        if is_new {
+                            if !on_confirm {
+                                if first.is_empty() {
+                                    error = Some("passphrase is empty".into());
+                                } else {
+                                    on_confirm = true;
+                                    error = None;
+                                }
+                            } else if confirm != first {
+                                error = Some("doesn't match — try again".into());
+                                confirm.clear();
+                            } else {
+                                outcome = Some(first.clone());
+                            }
+                        } else if first.is_empty() {
+                            error = Some("passphrase is empty".into());
+                        } else {
+                            outcome = Some(first.clone());
+                        }
+                    }
+                    KeyCode::Char(c) => {
+                        if on_confirm {
+                            confirm.push(c);
+                        } else {
+                            first.push(c);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    Ok(outcome.unwrap_or_default())
+}
+
 /// Show the welcome card before bringing up `AppHandle`. Returns `Ok(true)`
 /// when the user is ready to continue or `Ok(false)` if they pressed
 /// Ctrl-C / q (caller exits without starting the app).

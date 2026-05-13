@@ -4,6 +4,7 @@ use tracing_appender::rolling;
 use tracing_subscriber::EnvFilter;
 
 use huddle_core::network::NetworkMode;
+use huddle_core::storage::keychain;
 
 mod app;
 mod input;
@@ -29,6 +30,11 @@ struct Cli {
     /// fingerprint in chat.
     #[arg(long)]
     name: Option<String>,
+
+    /// Skip the master passphrase prompt and run with an unencrypted
+    /// at-rest database (Phase 1 behavior). For testing only.
+    #[arg(long)]
+    no_master_passphrase: bool,
 }
 
 fn parse_mode(s: &str) -> std::result::Result<NetworkMode, String> {
@@ -61,9 +67,30 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let handle = huddle_core::app::AppHandle::start_with_options(mode, cli.port)
-        .await
-        .map_err(|e| anyhow!(e))?;
+    // Master passphrase: derives the SQLCipher DB key + Megolm persist
+    // subkey. `--no-master-passphrase` falls back to an unencrypted DB
+    // (Phase 1 behavior).
+    let master_key = if cli.no_master_passphrase {
+        None
+    } else {
+        let salt = keychain::load_or_create_salt().map_err(|e| anyhow!(e))?;
+        let salt_path = keychain::keychain_salt_path();
+        let is_new = !salt_path.metadata().map(|m| m.len() > 0).unwrap_or(false);
+        let passphrase = app::prompt_master_passphrase(is_new)?;
+        if passphrase.is_empty() {
+            return Ok(());
+        }
+        let key = keychain::derive_master_key(&passphrase, &salt).map_err(|e| anyhow!(e))?;
+        Some(key)
+    };
+
+    let handle = huddle_core::app::AppHandle::start_with_options(
+        mode,
+        cli.port,
+        master_key.as_ref(),
+    )
+    .await
+    .map_err(|e| anyhow!(e))?;
     if let Some(name) = cli.name.as_deref() {
         let trimmed = name.trim();
         if !trimmed.is_empty() {

@@ -17,11 +17,28 @@ use vodozemac::megolm::{
 
 use crate::error::{HuddleError, Result};
 use crate::storage::repo::{self, StoredMegolmSession};
+use std::sync::OnceLock;
+
 use crate::storage::Db;
 
-// TODO: Phase 4 — derive from user passphrase via Argon2id
-const SESSION_PERSIST_KEY: &[u8; 32] =
-    b"\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
+// Phase 4: installed by `AppHandle::start_with_options` once the master
+// passphrase is verified. Defaults to the all-zero key for tests and
+// for the `--no-master-passphrase` boot path (Phase 1 compatibility).
+static SESSION_PERSIST_KEY_OVERRIDE: OnceLock<[u8; 32]> = OnceLock::new();
+const SESSION_PERSIST_KEY_DEFAULT: [u8; 32] = [0u8; 32];
+
+/// Install a persist key for the running process. Idempotent: a second
+/// call is silently ignored, which is intentional — the master key never
+/// rotates mid-session.
+pub fn install_session_persist_key(key: [u8; 32]) {
+    let _ = SESSION_PERSIST_KEY_OVERRIDE.set(key);
+}
+
+fn persist_key() -> &'static [u8; 32] {
+    SESSION_PERSIST_KEY_OVERRIDE
+        .get()
+        .unwrap_or(&SESSION_PERSIST_KEY_DEFAULT)
+}
 
 /// Per-room Megolm crypto: one outbound session (ours) + many inbound (others').
 pub struct RoomCrypto {
@@ -59,11 +76,11 @@ impl RoomCrypto {
             let data_str = String::from_utf8(s.session_data)
                 .map_err(|e| HuddleError::Session(format!("session data utf8: {e}")))?;
             if s.is_outbound {
-                let p = GroupSessionPickle::from_encrypted(&data_str, SESSION_PERSIST_KEY)
+                let p = GroupSessionPickle::from_encrypted(&data_str, persist_key())
                     .map_err(|e| HuddleError::Session(format!("restore outbound: {e}")))?;
                 outbound = Some(GroupSession::from_pickle(p));
             } else {
-                let p = InboundGroupSessionPickle::from_encrypted(&data_str, SESSION_PERSIST_KEY)
+                let p = InboundGroupSessionPickle::from_encrypted(&data_str, persist_key())
                     .map_err(|e| HuddleError::Session(format!("restore inbound: {e}")))?;
                 let session = InboundGroupSession::from_pickle(p);
                 inbound.insert((s.sender_fingerprint, s.session_id), session);
@@ -111,7 +128,7 @@ impl RoomCrypto {
             .map_err(|e| HuddleError::Session(format!("megolm decrypt failed: {e}")))?;
 
         // Persist the advanced inbound ratchet state.
-        let persisted = session.pickle().encrypt(SESSION_PERSIST_KEY);
+        let persisted = session.pickle().encrypt(persist_key());
         repo::save_megolm_session(
             &self.db,
             &StoredMegolmSession {
@@ -139,7 +156,7 @@ impl RoomCrypto {
         let session = InboundGroupSession::new(&key, SessionConfig::version_1());
         let session_id = session.session_id();
 
-        let persisted = session.pickle().encrypt(SESSION_PERSIST_KEY);
+        let persisted = session.pickle().encrypt(persist_key());
         repo::save_megolm_session(
             &self.db,
             &StoredMegolmSession {
@@ -175,7 +192,7 @@ impl RoomCrypto {
     }
 
     fn persist_outbound(&self) -> Result<()> {
-        let persisted = self.outbound.pickle().encrypt(SESSION_PERSIST_KEY);
+        let persisted = self.outbound.pickle().encrypt(persist_key());
         repo::save_megolm_session(
             &self.db,
             &StoredMegolmSession {

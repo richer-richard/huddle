@@ -121,12 +121,20 @@ pub struct AppHandle {
 
 impl AppHandle {
     pub async fn start() -> Result<Self> {
-        Self::start_with_options(NetworkMode::Mdns, 0).await
+        Self::start_with_options(NetworkMode::Mdns, 0, None).await
     }
 
-    pub async fn start_with_options(mode: NetworkMode, port: u16) -> Result<Self> {
+    pub async fn start_with_options(
+        mode: NetworkMode,
+        port: u16,
+        master_key: Option<&[u8; 32]>,
+    ) -> Result<Self> {
         config::ensure_data_dir()?;
-        let db = storage::open_db(&config::db_path())?;
+        if let Some(mk) = master_key {
+            let subkey = storage::keychain::derive_subkey(mk, b"megolm-persist");
+            crate::crypto::megolm::install_session_persist_key(subkey);
+        }
+        let db = storage::open_db(&config::db_path(), master_key)?;
         Self::start_with_db_and_options(db, mode, port).await
     }
 
