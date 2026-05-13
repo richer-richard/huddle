@@ -52,6 +52,7 @@ pub enum Modal {
     QuitConfirm,
     Help,
     Error(String),
+    #[allow(dead_code)]
     Info(String),
 }
 
@@ -206,6 +207,7 @@ impl StartRoomState {
 pub struct JoinRoomState {
     pub room_id: String,
     pub room_name: String,
+    #[allow(dead_code)]
     pub encrypted: bool,
     pub passphrase: String,
 }
@@ -311,6 +313,7 @@ impl TuiApp {
     }
 
     /// Set the status line with an explicit TTL.
+    #[allow(dead_code)]
     pub fn set_status_for(&mut self, msg: impl Into<String>, ttl: Duration) {
         self.status_message = Some((msg.into(), Instant::now() + ttl));
     }

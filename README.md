@@ -9,11 +9,12 @@ wrapped with an Argon2id-derived passphrase key).
 
 No servers, no accounts, no cloud, no internet required.
 
-> **This is a learning project, not production-secure chat.**
-> The vodozemac session serialization key is hardcoded, the SQLite
-> database is unencrypted, and the protocol has not been audited.
-> Do not use this for real secrets. See `plan.md` for the roadmap
-> toward production security.
+> **This is a learning project, not production-audited chat.**
+> SQLCipher protects the database at rest under your master passphrase,
+> Megolm sessions are persisted with an Argon2id-derived key, files use
+> ChaCha20-Poly1305, and contact verification is available — but the
+> protocol has not been audited and threat-modelling work is ongoing.
+> Don't rely on it for real secrets without a careful review.
 
 ## Build
 
@@ -88,29 +89,51 @@ cargo build --release
 ## Key bindings
 
 ### Lobby
-| Key      | Action                          |
-|----------|---------------------------------|
-| `s`      | Start a new room                |
-| `j/Enter`| Join the selected room          |
-| `j/k` or arrows | Navigate rooms list      |
-| `r`      | Refresh discovered rooms        |
-| `?`      | Help                            |
-| `q`      | Quit                            |
+| Key             | Action                                  |
+|-----------------|-----------------------------------------|
+| `s`             | Start a new room                        |
+| `d`             | Dial a peer by `ip:port`                |
+| `i`             | Show your identity as a QR code         |
+| `Enter`         | Join / reconnect the selected entry     |
+| `Tab`           | Toggle focus rooms ↔ known peers        |
+| `j/k` or arrows | Navigate                                |
+| `r`             | Refresh / reconnect                     |
+| `x`             | Forget the selected known peer          |
+| `?`             | Help                                    |
+| `q`             | Quit                                    |
 
 ### In a room
-| Key       | Action                                |
-|-----------|---------------------------------------|
-| `/`       | Focus input (start typing)            |
-| `Enter`   | Send the typed message                |
-| `Esc`     | Blur input (or, if blurred, go to lobby) |
-| `^Tab`/`^N` | Next tab                            |
-| `^P`      | Previous tab                          |
-| `1`..`9`  | Jump to tab N                         |
-| `^L`      | Leave the current room                |
-| `^B`      | Back to lobby (without leaving)       |
-| `?`       | Help                                  |
-| `q`       | Quit (in-room, when input not focused)|
-| `Ctrl-C`  | Quit (always — confirms first)        |
+| Key       | Action                                       |
+|-----------|----------------------------------------------|
+| `/`       | Focus input (start typing)                   |
+| `Enter`   | Send the typed message                       |
+| `Alt+Enter` / `^J` | Insert a newline in the input        |
+| `Esc`     | Blur input (or, if blurred, go to lobby)     |
+| `^Tab`/`^N` | Next tab                                   |
+| `^P`      | Previous tab                                 |
+| `1`..`9`  | Jump to tab N                                |
+| `^L`      | Leave the current room                       |
+| `^B`      | Back to lobby (without leaving)              |
+| `^A`      | Attach a file (opens local FS picker)        |
+| `^R`      | Rotate the room key (encrypted rooms)        |
+| `^V`      | Verify member fingerprints                   |
+| `^F`      | Search this room's history                   |
+| `^M`      | Mute / unmute this room                      |
+| `f`       | Focus file cards (Tab/j/k between them)      |
+| `g` / `G` | Scroll to top / bottom of history            |
+| `?`       | Help                                         |
+| `q`       | Quit (in-room, when input not focused)       |
+| `Ctrl-C`  | Quit (always — confirms first)               |
+
+### File-card focus mode (after pressing `f`)
+| Key       | Action                                  |
+|-----------|-----------------------------------------|
+| `j/k`     | Navigate cards                          |
+| `Enter`   | Save to Downloads (or wait if not ready) |
+| `o`       | Open the saved file with system opener  |
+| `c`       | Cancel an in-flight transfer            |
+| `s`       | Save with a fresh `-N` suffix           |
+| `Esc/f`   | Exit card focus                         |
 
 ## Architecture
 
@@ -139,23 +162,46 @@ session keys in response.
 directory. Fingerprint format: six groups of four hex chars
 (`a3b1-c2d4-e5f6-7890-1234-abcd`).
 
-**Storage** — SQLite (rusqlite, bundled). Schema: `identity`, `rooms`,
-`room_members`, `room_megolm_sessions`, `room_messages`. Messages
-persist across launches keyed by room ID.
+**Storage** — SQLCipher (rusqlite + bundled SQLCipher + vendored OpenSSL).
+On launch you enter a master passphrase; it's stretched with Argon2id
+against a per-installation salt and used as `PRAGMA key` to decrypt the
+database, plus an HKDF subkey replaces the Phase-1 hardcoded Megolm
+persistence key. Tables: `identity`, `rooms`, `room_members`,
+`room_megolm_sessions`, `room_messages`, `room_attachments`,
+`known_peers`. Pass `--no-master-passphrase` to fall back to an
+unencrypted database for testing.
+
+**File attachments** — `^A` opens a local file picker; selected files
+are SHA-256-hashed, chunked into 64 KiB pieces, and broadcast over the
+room's gossipsub topic with a `FileOffer` + N `FileChunk` messages. In
+encrypted rooms the bytes are ChaCha20-Poly1305-encrypted with a fresh
+file key that's Megolm-wrapped in the offer. Receivers see a focusable
+file card in chat — press `f` to enter card mode, `j/k` to step, Enter
+to save to your platform's Downloads folder, `o` to open with the
+system opener. Phase 2 cap is 1 MiB per file.
+
+## Operator notes
+
+- The first launch creates `<data_dir>/keychain.salt`. Don't move or
+  delete it without your passphrase backed up — the salt is not secret
+  but losing it forces a re-derive that won't unlock the existing DB.
+- `--no-master-passphrase` skips the prompt and opens an unencrypted
+  DB. Use it only for testing.
 
 ## Current limitations
 
-- LAN only — mDNS discovery doesn't cross routers. No internet relay,
-  no Tor, no DHT. By design for this phase.
-- No file/image/audio/video attachments yet.
-- No contact verification UI (no safety-number flow).
-- No member removal — anyone with the passphrase keeps the key
-  forever. Removal requires rotation (not implemented).
-- Vodozemac session pickling key is hardcoded.
-- SQLite is unencrypted at rest.
-- Plain rooms are visible to anyone in the room (transport-encrypted
-  by libp2p Noise, but plaintext to room members).
-- mDNS may not work on some corporate/restricted networks.
+- LAN-only discovery by default. Cross-network use requires `^A` /
+  manual dial to an `ip:port` (port-forwarded if you're across NATs).
+  No DHT, no Tor.
+- File transfer is capped at 1 MiB per file (Phase 2). Larger files
+  defer to a dedicated libp2p stream protocol (Phase 3 in `plan.md`).
+- Member rotation broadcasts a new key but doesn't kick old members
+  for past messages — they can still decrypt history they have.
+- Plain rooms are transport-encrypted by libp2p Noise but plaintext
+  to every member of the room.
+- mDNS may not work on some corporate / restricted networks.
+- Contact verification is UX-only; the cryptographic check is the
+  user's responsibility (compare fingerprints out-of-band).
 
 ## Testing
 

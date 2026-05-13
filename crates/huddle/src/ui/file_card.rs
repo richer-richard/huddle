@@ -7,6 +7,7 @@ use ratatui::prelude::*;
 
 /// Card height in rows. The renderer emits exactly this many lines so
 /// interleaving with text in a shared Paragraph stays sane.
+#[allow(dead_code)]
 pub const CARD_HEIGHT: u16 = 4;
 
 /// Width reserved for the message prefix column ("  HH:MM  label  ").
