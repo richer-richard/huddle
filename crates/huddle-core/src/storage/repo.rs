@@ -11,29 +11,25 @@ use crate::storage::Db;
 #[derive(Debug, Clone)]
 pub struct StoredIdentity {
     pub ed25519_secret: Vec<u8>,
-    pub olm_account_data: Vec<u8>,
     pub created_at: i64,
 }
 
-pub fn save_identity(db: &Db, secret: &[u8], account_data: &[u8], created_at: i64) -> Result<()> {
+pub fn save_identity(db: &Db, secret: &[u8], created_at: i64) -> Result<()> {
     let conn = db.lock().unwrap();
     conn.execute(
-        "INSERT OR REPLACE INTO identity (id, ed25519_secret, olm_account_data, created_at) VALUES (1, ?1, ?2, ?3)",
-        params![secret, account_data, created_at],
+        "INSERT OR REPLACE INTO identity (id, ed25519_secret, olm_account_data, created_at) VALUES (1, ?1, NULL, ?2)",
+        params![secret, created_at],
     )?;
     Ok(())
 }
 
 pub fn load_identity(db: &Db) -> Result<Option<StoredIdentity>> {
     let conn = db.lock().unwrap();
-    let mut stmt = conn.prepare(
-        "SELECT ed25519_secret, olm_account_data, created_at FROM identity WHERE id = 1",
-    )?;
+    let mut stmt = conn.prepare("SELECT ed25519_secret, created_at FROM identity WHERE id = 1")?;
     let mut rows = stmt.query_map([], |row| {
         Ok(StoredIdentity {
             ed25519_secret: row.get(0)?,
-            olm_account_data: row.get(1)?,
-            created_at: row.get(2)?,
+            created_at: row.get(1)?,
         })
     })?;
     match rows.next() {
@@ -315,6 +311,15 @@ mod tests {
             created_at,
             last_active: None,
         }
+    }
+
+    #[test]
+    fn identity_round_trip() {
+        let db = open_db_in_memory().unwrap();
+        save_identity(&db, b"secret-bytes-32-chars-long-xxxxx", 1000).unwrap();
+        let loaded = load_identity(&db).unwrap().unwrap();
+        assert_eq!(loaded.ed25519_secret, b"secret-bytes-32-chars-long-xxxxx");
+        assert_eq!(loaded.created_at, 1000);
     }
 
     #[test]

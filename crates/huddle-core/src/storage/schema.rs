@@ -1,9 +1,9 @@
 pub const MIGRATIONS: &[&str] = &[
-    // Identity unchanged — our own Ed25519 secret + vodozemac account
+    // Our Ed25519 secret. olm_account_data left for forward compat but unused.
     "CREATE TABLE IF NOT EXISTS identity (
         id INTEGER PRIMARY KEY CHECK (id = 1),
         ed25519_secret BLOB NOT NULL,
-        olm_account_data BLOB NOT NULL,
+        olm_account_data BLOB,
         created_at INTEGER NOT NULL
     );",
     // Rooms we've created or joined
