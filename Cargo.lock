@@ -1436,6 +1436,7 @@ dependencies = [
  "clap",
  "crossterm",
  "huddle-core",
+ "libp2p",
  "ratatui",
  "tokio",
  "tracing",
