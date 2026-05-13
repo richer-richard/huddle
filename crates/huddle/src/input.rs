@@ -46,6 +46,7 @@ pub enum Action {
     ChatTypeChar(char),
     ChatBackspace,
     ChatSend,
+    ChatInsertNewline,
 }
 
 pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
@@ -147,6 +148,9 @@ fn map_in_room(key: KeyEvent, app: &TuiApp) -> Action {
     // Ctrl chords first (apply regardless of input focus).
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         return match key.code {
+            // ^J inserts a newline in the input (the canonical
+            // multiline trick; works on every terminal).
+            KeyCode::Char('j') if input_active => Action::ChatInsertNewline,
             KeyCode::Char('l') => Action::LeaveRoom,
             KeyCode::Char('b') => Action::BackToLobby,
             KeyCode::Char('n') => Action::TabNext,
@@ -168,8 +172,18 @@ fn map_in_room(key: KeyEvent, app: &TuiApp) -> Action {
     }
 
     if input_active {
+        // Alt+Enter (Option+Enter on macOS) and Shift+Enter both insert
+        // a newline. Plain Enter sends.
+        if matches!(key.code, KeyCode::Enter)
+            && (key.modifiers.contains(KeyModifiers::ALT)
+                || key.modifiers.contains(KeyModifiers::SHIFT))
+        {
+            return Action::ChatInsertNewline;
+        }
         match key.code {
             KeyCode::Enter => Action::ChatSend,
+            // Some terminals deliver Option+Enter as a literal LF char.
+            KeyCode::Char('\n') => Action::ChatInsertNewline,
             KeyCode::Esc => Action::BlurInput,
             KeyCode::Backspace => Action::ChatBackspace,
             KeyCode::Char(c) => Action::ChatTypeChar(c),

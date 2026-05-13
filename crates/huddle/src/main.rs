@@ -48,13 +48,13 @@ async fn main() -> Result<()> {
         .with_ansi(false)
         .init();
 
-    let mode = match cli.mode {
-        Some(m) => m,
-        None => match app::pick_network_mode(NetworkMode::Mdns)? {
-            Some(m) => m,
-            None => return Ok(()),
-        },
-    };
+    let mode = cli.mode.unwrap_or(NetworkMode::Mdns);
+
+    // Skip the welcome card if a mode was given explicitly — power users
+    // who script `--mode direct` don't want a prompt in the way.
+    if cli.mode.is_none() && !app::show_welcome()? {
+        return Ok(());
+    }
 
     let handle = huddle_core::app::AppHandle::start_with_options(mode, cli.port)
         .await

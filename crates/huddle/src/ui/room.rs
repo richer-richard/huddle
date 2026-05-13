@@ -5,14 +5,15 @@ use crate::app::TuiApp;
 use crate::ui::short_fp;
 
 pub fn render_room_screen(f: &mut Frame, area: Rect, app: &TuiApp) {
+    let input_h = input_height(app, area.width);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // tabs
-            Constraint::Length(3), // header
-            Constraint::Min(3),    // messages
-            Constraint::Length(3), // input
-            Constraint::Length(2), // hints
+            Constraint::Length(3),       // tabs
+            Constraint::Length(3),       // header
+            Constraint::Min(3),          // messages
+            Constraint::Length(input_h), // input (grows with content)
+            Constraint::Length(2),       // hints
         ])
         .split(area);
 
@@ -21,6 +22,31 @@ pub fn render_room_screen(f: &mut Frame, area: Rect, app: &TuiApp) {
     render_messages(f, chunks[2], app);
     render_input(f, chunks[3], app);
     render_hints(f, chunks[4]);
+}
+
+/// Compute the desired height for the input box, accounting for the
+/// number of lines the user has typed (including soft-wrapped lines).
+/// Clamps to a reasonable range so the chat doesn't get crushed.
+fn input_height(app: &TuiApp, screen_width: u16) -> u16 {
+    let r = match app.active_room() {
+        Some(r) => r,
+        None => return 3,
+    };
+    let inner_w = screen_width.saturating_sub(4) as usize; // 2 borders + 2 padding
+    let prompt_w = 2usize; // "> "
+    let body_w = inner_w.saturating_sub(prompt_w).max(1);
+    let mut lines: usize = 0;
+    if r.input.is_empty() {
+        lines = 1;
+    } else {
+        for raw_line in r.input.split('\n') {
+            let chars = raw_line.chars().count();
+            let n = ((chars + body_w) / body_w).max(1);
+            lines += n;
+        }
+    }
+    let clamped = lines.clamp(1, 8) as u16;
+    clamped + 2 // borders
 }
 
 fn render_tabs(f: &mut Frame, area: Rect, app: &TuiApp) {
@@ -119,12 +145,21 @@ fn render_header(f: &mut Frame, area: Rect, app: &TuiApp) {
     f.render_widget(para, area);
 }
 
+/// Width (in cols) of the "  HH:MM  label   " prefix. Continuation lines
+/// of a wrapped or multiline message are indented this many spaces so
+/// they sit under the body column.
+const MSG_PREFIX_WIDTH: usize = 2 + 5 + 2 + 6 + 2; // 17
+
 fn render_messages(f: &mut Frame, area: Rect, app: &TuiApp) {
     let r = match app.active_room() {
         Some(r) => r,
         None => return,
     };
     let me = app.handle.fingerprint().to_string();
+
+    // Available width for body text — account for borders + padding.
+    let inner_w = area.width.saturating_sub(4) as usize;
+    let body_w = inner_w.saturating_sub(MSG_PREFIX_WIDTH).max(8);
 
     let mut lines: Vec<Line> = Vec::new();
     for m in &r.messages {
@@ -140,12 +175,29 @@ fn render_messages(f: &mut Frame, area: Rect, app: &TuiApp) {
             Style::default().fg(Color::Cyan).bold()
         };
         let time = format_time(m.sent_at);
-        lines.push(Line::from(vec![
-            Span::styled(format!("  {}  ", time), Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{:<6}", label), label_style),
-            Span::styled("  ", Style::default()),
-            Span::styled(&m.body, Style::default().fg(Color::White)),
-        ]));
+
+        let chunks = wrap_body(&m.body, body_w);
+        for (i, chunk) in chunks.iter().enumerate() {
+            if i == 0 {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("  {}  ", time),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(format!("{:<6}", label), label_style),
+                    Span::styled("  ", Style::default()),
+                    Span::styled(chunk.clone(), Style::default().fg(Color::White)),
+                ]));
+            } else {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        " ".repeat(MSG_PREFIX_WIDTH),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(chunk.clone(), Style::default().fg(Color::White)),
+                ]));
+            }
+        }
     }
 
     if lines.is_empty() {
@@ -162,9 +214,32 @@ fn render_messages(f: &mut Frame, area: Rect, app: &TuiApp) {
                 .border_style(Style::default().fg(Color::DarkGray))
                 .padding(Padding::horizontal(1)),
         )
-        .wrap(Wrap { trim: false })
         .scroll((r.scroll, 0));
     f.render_widget(widget, area);
+}
+
+/// Split `body` into chunks no wider than `width` chars. Honors explicit
+/// `\n` newlines AND hard-wraps long single lines. We do character-based
+/// wrapping (not word-based) so long URLs / random text behave predictably.
+fn wrap_body(body: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![body.to_string()];
+    }
+    let mut out = Vec::new();
+    for line in body.split('\n') {
+        if line.is_empty() {
+            out.push(String::new());
+            continue;
+        }
+        let chars: Vec<char> = line.chars().collect();
+        let mut start = 0;
+        while start < chars.len() {
+            let end = (start + width).min(chars.len());
+            out.push(chars[start..end].iter().collect());
+            start = end;
+        }
+    }
+    out
 }
 
 fn render_input(f: &mut Frame, area: Rect, app: &TuiApp) {
@@ -177,17 +252,46 @@ fn render_input(f: &mut Frame, area: Rect, app: &TuiApp) {
     } else {
         Style::default().fg(Color::DarkGray)
     };
-    let text = if r.input_active {
-        format!("> {}_", r.input)
+
+    let lines: Vec<Line> = if !r.input_active {
+        vec![Line::from(Span::styled(
+            "press / to type   ·   Alt+Enter or ^J for newline",
+            Style::default().fg(Color::DarkGray),
+        ))]
     } else {
-        "  press / to type".to_string()
+        // Build the multiline input. Each row gets a "> " prompt on the
+        // first physical line and a "  " continuation on subsequent
+        // visual rows. We rely on Paragraph::wrap to do the soft wrap.
+        let mut out: Vec<Line> = Vec::new();
+        let raw_lines: Vec<&str> = if r.input.is_empty() {
+            vec![""]
+        } else {
+            r.input.split('\n').collect()
+        };
+        let last = raw_lines.len().saturating_sub(1);
+        for (i, line) in raw_lines.iter().enumerate() {
+            let prompt = if i == 0 { "> " } else { "  " };
+            let body = if i == last {
+                format!("{}_", line) // crude cursor on the last line
+            } else {
+                (*line).to_string()
+            };
+            out.push(Line::from(vec![
+                Span::styled(prompt, Style::default().fg(Color::DarkGray)),
+                Span::styled(body, Style::default().fg(Color::White)),
+            ]));
+        }
+        out
     };
-    let widget = Paragraph::new(text).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(border_style)
-            .padding(Padding::horizontal(1)),
-    );
+
+    let widget = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(border_style)
+                .padding(Padding::horizontal(1)),
+        );
     f.render_widget(widget, area);
 }
 

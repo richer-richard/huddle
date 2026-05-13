@@ -2,6 +2,13 @@
 name = "huddle-core"
 version = "0.1.0"
 edition = "2021"
+description = "Protocol, networking, crypto, and storage layer for huddle — a decentralized terminal chat app."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/richer-richard/huddle"
+homepage = "https://github.com/richer-richard/huddle"
+readme = "README.md"
+keywords = ["chat", "p2p", "libp2p", "mdns", "encryption"]
+categories = ["network-programming", "cryptography"]
 
 [dependencies]
 libp2p = { version = "0.56", features = [

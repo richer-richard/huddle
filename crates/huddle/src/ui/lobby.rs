@@ -7,18 +7,12 @@ use crate::app::{LobbyFocus, TuiApp};
 use crate::ui::short_fp;
 
 pub fn render_lobby(f: &mut Frame, area: Rect, app: &TuiApp) {
-    let show_peers = app.mode == NetworkMode::Direct || !app.known_peers.is_empty();
-    let peer_h: u16 = if show_peers {
-        ((app.known_peers.len() as u16).clamp(1, 6)) + 2
-    } else {
-        0
-    };
+    // Known-peers panel is always visible — listing + dialing coexist
+    // in both LAN (mDNS) and Direct modes.
+    let peer_h: u16 = ((app.known_peers.len() as u16).clamp(1, 6)) + 2;
     let status_h: u16 = if app.status_message.is_some() { 1 } else { 0 };
 
-    let mut constraints = vec![Constraint::Length(7)];
-    if show_peers {
-        constraints.push(Constraint::Length(peer_h));
-    }
+    let mut constraints = vec![Constraint::Length(7), Constraint::Length(peer_h)];
     constraints.push(Constraint::Min(5));
     if status_h > 0 {
         constraints.push(Constraint::Length(status_h));
@@ -33,10 +27,8 @@ pub fn render_lobby(f: &mut Frame, area: Rect, app: &TuiApp) {
     let mut idx = 0;
     render_header(f, chunks[idx], app);
     idx += 1;
-    if show_peers {
-        render_known_peers(f, chunks[idx], app);
-        idx += 1;
-    }
+    render_known_peers(f, chunks[idx], app);
+    idx += 1;
     render_rooms_list(f, chunks[idx], app);
     idx += 1;
     if status_h > 0 {

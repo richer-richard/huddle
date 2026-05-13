@@ -312,9 +312,10 @@ pub async fn run_tui(handle: AppHandle) -> Result<()> {
     result
 }
 
-/// Render a tiny startup picker before bringing up `AppHandle`. Returns the
-/// user's chosen mode, or `None` if they pressed Esc / q (caller exits).
-pub fn pick_network_mode(default: NetworkMode) -> Result<Option<NetworkMode>> {
+/// Show the welcome card before bringing up `AppHandle`. Returns `Ok(true)`
+/// when the user is ready to continue or `Ok(false)` if they pressed
+/// Ctrl-C / q (caller exits without starting the app).
+pub fn show_welcome() -> Result<bool> {
     use crossterm::event::{KeyCode, KeyModifiers};
 
     enable_raw_mode()?;
@@ -323,49 +324,25 @@ pub fn pick_network_mode(default: NetworkMode) -> Result<Option<NetworkMode>> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut selected: usize = match default {
-        NetworkMode::Mdns => 0,
-        NetworkMode::Direct => 1,
-    };
-    let result = loop {
-        terminal.draw(|f| crate::ui::picker::render_mode_picker(f, selected))?;
+    let outcome = loop {
+        terminal.draw(crate::ui::picker::render_welcome)?;
         if poll(Duration::from_millis(200))? {
             if let Event::Key(key) = event::read()? {
                 if key.modifiers.contains(KeyModifiers::CONTROL)
                     && matches!(key.code, KeyCode::Char('c'))
                 {
-                    break Ok(None);
+                    break false;
                 }
                 match key.code {
-                    KeyCode::Esc | KeyCode::Char('q') => break Ok(None),
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        if selected > 0 {
-                            selected -= 1;
-                        }
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        if selected < 1 {
-                            selected += 1;
-                        }
-                    }
-                    KeyCode::Char('1') => selected = 0,
-                    KeyCode::Char('2') => selected = 1,
-                    KeyCode::Enter | KeyCode::Char(' ') => {
-                        let mode = if selected == 0 {
-                            NetworkMode::Mdns
-                        } else {
-                            NetworkMode::Direct
-                        };
-                        break Ok(Some(mode));
-                    }
-                    _ => {}
+                    KeyCode::Char('q') => break false,
+                    _ => break true,
                 }
             }
         }
     };
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    result
+    Ok(outcome)
 }
 
 async fn main_loop(
@@ -730,7 +707,7 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
         Action::ChatSend => {
             let (room_id, body) = {
                 match app.active_room_mut() {
-                    Some(r) if r.input_active && !r.input.is_empty() => {
+                    Some(r) if r.input_active && !r.input.trim().is_empty() => {
                         let body = r.input.clone();
                         r.input.clear();
                         (r.room_id.clone(), body)
@@ -740,6 +717,14 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             };
             if let Err(e) = app.handle.send_room_message(&room_id, &body).await {
                 app.modal = Modal::Error(format!("send failed: {e}"));
+            }
+            Ok(false)
+        }
+        Action::ChatInsertNewline => {
+            if let Some(r) = app.active_room_mut() {
+                if r.input_active {
+                    r.input.push('\n');
+                }
             }
             Ok(false)
         }
