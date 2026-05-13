@@ -294,6 +294,63 @@ pub fn get_room_messages(db: &Db, room_id: &str, limit: i64) -> Result<Vec<Store
     Ok(msgs)
 }
 
+// =========================================================================
+// Known peers (manually dialed addresses we want to auto-reconnect to)
+// =========================================================================
+
+#[derive(Debug, Clone)]
+pub struct KnownPeer {
+    pub address: String,
+    pub label: Option<String>,
+    pub last_connected_at: Option<i64>,
+    pub last_attempt_at: Option<i64>,
+    pub created_at: i64,
+}
+
+pub fn upsert_known_peer(db: &Db, peer: &KnownPeer) -> Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "INSERT INTO known_peers (address, label, last_connected_at, last_attempt_at, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(address) DO UPDATE SET
+           label = COALESCE(excluded.label, known_peers.label),
+           last_connected_at = COALESCE(excluded.last_connected_at, known_peers.last_connected_at),
+           last_attempt_at = COALESCE(excluded.last_attempt_at, known_peers.last_attempt_at)",
+        params![
+            peer.address,
+            peer.label,
+            peer.last_connected_at,
+            peer.last_attempt_at,
+            peer.created_at,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn list_known_peers(db: &Db) -> Result<Vec<KnownPeer>> {
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare(
+        "SELECT address, label, last_connected_at, last_attempt_at, created_at
+         FROM known_peers ORDER BY COALESCE(last_connected_at, 0) DESC, created_at DESC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(KnownPeer {
+            address: row.get(0)?,
+            label: row.get(1)?,
+            last_connected_at: row.get(2)?,
+            last_attempt_at: row.get(3)?,
+            created_at: row.get(4)?,
+        })
+    })?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+pub fn forget_known_peer(db: &Db, address: &str) -> Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute("DELETE FROM known_peers WHERE address = ?1", params![address])?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

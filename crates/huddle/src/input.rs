@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::app::{Modal, Screen, TuiApp};
+use crate::app::{LobbyFocus, Modal, Screen, TuiApp};
 
 #[derive(Debug)]
 pub enum Action {
@@ -15,6 +15,10 @@ pub enum Action {
     LobbyNavigateDown,
     LobbyJoinSelected,
     LobbyRefresh,
+    LobbyFocusToggle,
+    LobbyReconnectPeer,
+    LobbyForgetPeer,
+    OpenDialPeer,
     // Start room modal
     StartRoomNextField,
     StartRoomToggleEncrypted,
@@ -25,6 +29,10 @@ pub enum Action {
     JoinRoomTypeChar(char),
     JoinRoomBackspace,
     JoinRoomConfirm,
+    // Dial peer modal
+    DialPeerTypeChar(char),
+    DialPeerBackspace,
+    DialPeerConfirm,
     // In-room
     TabNext,
     TabPrev,
@@ -87,26 +95,48 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
             KeyCode::Char(c) => Action::JoinRoomTypeChar(c),
             _ => Action::Nothing,
         },
+        Modal::DialPeer(_) => match key.code {
+            KeyCode::Esc => Action::CloseModal,
+            KeyCode::Enter => Action::DialPeerConfirm,
+            KeyCode::Backspace => Action::DialPeerBackspace,
+            KeyCode::Char(c) => Action::DialPeerTypeChar(c),
+            _ => Action::Nothing,
+        },
+        Modal::Info(_) => match key.code {
+            _ => Action::CloseModal,
+        },
         Modal::None => map_normal(key, app),
     }
 }
 
 fn map_normal(key: KeyEvent, app: &TuiApp) -> Action {
     match app.screen {
-        Screen::Lobby => map_lobby(key),
+        Screen::Lobby => map_lobby(key, app),
         Screen::InRoom => map_in_room(key, app),
     }
 }
 
-fn map_lobby(key: KeyEvent) -> Action {
+fn map_lobby(key: KeyEvent, app: &TuiApp) -> Action {
     match key.code {
         KeyCode::Char('q') => Action::OpenQuitConfirm,
         KeyCode::Char('s') => Action::OpenStartRoom,
         KeyCode::Char('?') => Action::OpenHelp,
-        KeyCode::Char('r') => Action::LobbyRefresh,
+        KeyCode::Char('d') => Action::OpenDialPeer,
+        KeyCode::Tab => Action::LobbyFocusToggle,
         KeyCode::Char('j') | KeyCode::Down => Action::LobbyNavigateDown,
         KeyCode::Char('k') | KeyCode::Up => Action::LobbyNavigateUp,
-        KeyCode::Enter => Action::LobbyJoinSelected,
+        KeyCode::Char('r') => match app.lobby_focus {
+            LobbyFocus::KnownPeers => Action::LobbyReconnectPeer,
+            LobbyFocus::Rooms => Action::LobbyRefresh,
+        },
+        KeyCode::Char('x') => match app.lobby_focus {
+            LobbyFocus::KnownPeers => Action::LobbyForgetPeer,
+            LobbyFocus::Rooms => Action::Nothing,
+        },
+        KeyCode::Enter => match app.lobby_focus {
+            LobbyFocus::KnownPeers => Action::LobbyReconnectPeer,
+            LobbyFocus::Rooms => Action::LobbyJoinSelected,
+        },
         _ => Action::Nothing,
     }
 }

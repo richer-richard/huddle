@@ -2,15 +2,45 @@ pub mod behavior;
 pub mod events;
 pub mod protocol;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use futures::StreamExt;
+use libp2p::core::ConnectedPoint;
+use libp2p::swarm::dial_opts::DialOpts;
+use libp2p::swarm::ConnectionId;
 use libp2p::{
-    gossipsub, identify, mdns, noise, ping, tcp, yamux, PeerId, Swarm, SwarmBuilder,
+    gossipsub, identify, mdns, noise, ping, tcp, yamux, Multiaddr, PeerId, Swarm, SwarmBuilder,
 };
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
+
+/// How the network discovers peers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkMode {
+    /// mDNS on: announce ourselves on the LAN and pick up announcements.
+    Mdns,
+    /// mDNS off: invisible to LAN discovery; the only way to connect is
+    /// for someone to dial our address (or for us to dial theirs).
+    Direct,
+}
+
+impl NetworkMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            NetworkMode::Mdns => "mdns",
+            NetworkMode::Direct => "direct",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "mdns" | "lan" | "open" => Some(NetworkMode::Mdns),
+            "direct" | "dial" | "private" => Some(NetworkMode::Direct),
+            _ => None,
+        }
+    }
+}
 
 use crate::identity::Identity;
 use crate::network::behavior::{HuddleBehavior, HuddleBehaviorEvent};
@@ -27,6 +57,9 @@ pub enum NetworkCommand {
     PublishRoomMessage { room_id: String, payload: Vec<u8> },
     /// Publish a room announcement on the global rooms topic.
     AnnounceRoom(RoomAnnouncement),
+    /// User-initiated dial of an explicit address. Used for cross-network
+    /// reach when mDNS isn't enough.
+    Dial { address: Multiaddr },
     Shutdown,
 }
 
@@ -61,6 +94,10 @@ impl NetworkHandle {
         let _ = self.cmd_tx.send(NetworkCommand::AnnounceRoom(ann)).await;
     }
 
+    pub async fn dial(&self, address: Multiaddr) {
+        let _ = self.cmd_tx.send(NetworkCommand::Dial { address }).await;
+    }
+
     pub async fn shutdown(&self) {
         let _ = self.cmd_tx.send(NetworkCommand::Shutdown).await;
     }
@@ -71,11 +108,26 @@ struct NetworkTask {
     cmd_rx: mpsc::Receiver<NetworkCommand>,
     event_tx: mpsc::Sender<NetworkEvent>,
     discovered_peers: HashSet<PeerId>,
+    /// Tracks user-initiated dials so we can correlate the eventual
+    /// `ConnectionEstablished` / `OutgoingConnectionError` back to a
+    /// specific address the user asked us to dial.
+    dial_attempts: HashMap<ConnectionId, Multiaddr>,
 }
 
 pub fn start_network(
     identity: &Identity,
     event_tx: mpsc::Sender<NetworkEvent>,
+) -> crate::error::Result<NetworkHandle> {
+    start_network_with(identity, event_tx, NetworkMode::Mdns, 0)
+}
+
+/// Start the network task with explicit mode and TCP listen port.
+/// `listen_port = 0` requests a random port.
+pub fn start_network_with(
+    identity: &Identity,
+    event_tx: mpsc::Sender<NetworkEvent>,
+    mode: NetworkMode,
+    listen_port: u16,
 ) -> crate::error::Result<NetworkHandle> {
     let keypair = identity.keypair().clone();
     let local_peer_id = identity.peer_id();
@@ -89,8 +141,14 @@ pub fn start_network(
         )
         .map_err(|e| crate::error::HuddleError::Network(e.to_string()))?
         .with_behaviour(|key| {
-            let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)
-                .expect("mDNS init failed");
+            let mdns_opt = match mode {
+                NetworkMode::Mdns => Some(
+                    mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)
+                        .expect("mDNS init failed"),
+                ),
+                NetworkMode::Direct => None,
+            };
+            let mdns: libp2p::swarm::behaviour::toggle::Toggle<_> = mdns_opt.into();
 
             let identify = identify::Behaviour::new(
                 identify::Config::new("/huddle/1.0.0".into(), key.public())
@@ -129,9 +187,19 @@ pub fn start_network(
         .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(120)))
         .build();
 
+    let listen_addr: Multiaddr = format!("/ip4/0.0.0.0/tcp/{}", listen_port)
+        .parse()
+        .expect("valid listen addr");
     swarm
-        .listen_on("/ip4/0.0.0.0/tcp/0".parse().unwrap())
+        .listen_on(listen_addr)
         .map_err(|e| crate::error::HuddleError::Network(e.to_string()))?;
+    // Also bind IPv6 on all interfaces so users can dial via IPv6.
+    let listen_addr6: Multiaddr = format!("/ip6/::/tcp/{}", listen_port)
+        .parse()
+        .expect("valid ipv6 listen addr");
+    if let Err(e) = swarm.listen_on(listen_addr6) {
+        debug!(%e, "ipv6 listen skipped");
+    }
 
     let (cmd_tx, cmd_rx) = mpsc::channel(256);
     let task = NetworkTask {
@@ -139,6 +207,7 @@ pub fn start_network(
         cmd_rx,
         event_tx,
         discovered_peers: HashSet::new(),
+        dial_attempts: HashMap::new(),
     };
     tokio::spawn(task.run());
 
@@ -174,6 +243,53 @@ impl NetworkTask {
                     .event_tx
                     .send(NetworkEvent::ListeningOn { address })
                     .await;
+            }
+            libp2p::swarm::SwarmEvent::ConnectionEstablished {
+                peer_id,
+                connection_id,
+                endpoint,
+                ..
+            } => {
+                if let Some(addr) = self.dial_attempts.remove(&connection_id) {
+                    info!(%peer_id, %addr, "user-dialed peer connected");
+                    // Treat dialed peers like mDNS-discovered: add to
+                    // gossipsub explicit peers so room announcements flow.
+                    self.swarm
+                        .behaviour_mut()
+                        .gossipsub
+                        .add_explicit_peer(&peer_id);
+                    self.discovered_peers.insert(peer_id);
+                    let _ = self
+                        .event_tx
+                        .send(NetworkEvent::DialSucceeded {
+                            peer_id,
+                            address: addr,
+                        })
+                        .await;
+                } else if let ConnectedPoint::Dialer { .. } = endpoint {
+                    // Outgoing connection we didn't track (e.g. mDNS auto-dial)
+                    // — still add to mesh; no user-visible event needed.
+                    self.swarm
+                        .behaviour_mut()
+                        .gossipsub
+                        .add_explicit_peer(&peer_id);
+                }
+            }
+            libp2p::swarm::SwarmEvent::OutgoingConnectionError {
+                connection_id,
+                error,
+                ..
+            } => {
+                if let Some(addr) = self.dial_attempts.remove(&connection_id) {
+                    warn!(%addr, %error, "user-dialed peer failed");
+                    let _ = self
+                        .event_tx
+                        .send(NetworkEvent::DialFailed {
+                            address: addr,
+                            error: error.to_string(),
+                        })
+                        .await;
+                }
             }
             libp2p::swarm::SwarmEvent::Behaviour(be) => self.handle_behavior_event(be).await,
             _ => {}
@@ -286,6 +402,28 @@ impl NetworkTask {
                         }
                     }
                     Err(e) => warn!(%e, "encode room announcement"),
+                }
+            }
+            NetworkCommand::Dial { address } => {
+                let opts: DialOpts = address.clone().into();
+                let conn_id = opts.connection_id();
+                match self.swarm.dial(opts) {
+                    Ok(()) => {
+                        self.dial_attempts.insert(conn_id, address);
+                    }
+                    Err(e) => {
+                        // Synchronous dial error (bad multiaddr, transport refused).
+                        let tx = self.event_tx.clone();
+                        let err = e.to_string();
+                        tokio::spawn(async move {
+                            let _ = tx
+                                .send(NetworkEvent::DialFailed {
+                                    address,
+                                    error: err,
+                                })
+                                .await;
+                        });
+                    }
                 }
             }
             NetworkCommand::Shutdown => unreachable!(),

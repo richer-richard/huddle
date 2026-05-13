@@ -1,7 +1,7 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
 
-use crate::app::{JoinRoomState, StartField, StartRoomState};
+use crate::app::{DialPeerState, JoinRoomState, StartField, StartRoomState};
 use crate::ui::centered_rect;
 
 pub fn render_start_room(f: &mut Frame, s: &StartRoomState) {
@@ -161,16 +161,20 @@ pub fn render_quit_confirm(f: &mut Frame) {
 }
 
 pub fn render_help(f: &mut Frame) {
-    let area = centered_rect(60, 18, f.area());
+    let area = centered_rect(64, 22, f.area());
     f.render_widget(Clear, area);
     let lines = vec![
         Line::from(""),
         Line::from(Span::styled(" Lobby", Style::default().fg(Color::Cyan).bold())),
         Line::from(""),
         kv("  s", "start a new room"),
-        kv("  j / Enter / arrow", "join the selected room"),
-        kv("  k / j / arrows", "navigate room list"),
-        kv("  r", "refresh"),
+        kv("  d", "dial a peer by IP:port (Direct mode)"),
+        kv("  Tab", "switch focus: known peers <-> rooms"),
+        kv("  Enter", "join selected room / reconnect peer"),
+        kv("  j/k or arrows", "navigate the focused list"),
+        kv("  r", "refresh rooms / retry connect"),
+        kv("  x", "forget the highlighted peer"),
+        kv("  ?", "this help"),
         kv("  q / Ctrl-C", "quit"),
         Line::from(""),
         Line::from(Span::styled(" In a room", Style::default().fg(Color::Cyan).bold())),
@@ -203,6 +207,77 @@ fn kv(k: &'static str, v: &'static str) -> Line<'static> {
         Span::styled(k, Style::default().fg(Color::Yellow)),
         Span::styled(format!("   {}", v), Style::default().fg(Color::White)),
     ])
+}
+
+pub fn render_dial_peer(f: &mut Frame, s: &DialPeerState) {
+    let area = centered_rect(64, 11, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .padding(Padding::uniform(1))
+        .title(Span::styled(
+            " dial a peer ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
+
+    let status = s
+        .status
+        .clone()
+        .unwrap_or_else(|| "ip:port  ·  [ipv6]:port  ·  /ip4/.../tcp/...".into());
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" address  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("[ {}_ ]", s.address),
+                Style::default().fg(Color::Yellow),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!(" {}", status),
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(""),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" Enter", Style::default().fg(Color::Yellow)),
+            Span::styled(" dial  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Esc", Style::default().fg(Color::Yellow)),
+            Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
+        ]),
+    ];
+
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false }).block(block);
+    f.render_widget(para, area);
+}
+
+pub fn render_info(f: &mut Frame, msg: &str) {
+    let area = centered_rect(56, 8, f.area());
+    f.render_widget(Clear, area);
+    let para = Paragraph::new(vec![
+        Line::from(""),
+        Line::from(Span::styled(msg, Style::default().fg(Color::White))),
+        Line::from(""),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  press any key to dismiss",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ])
+    .wrap(Wrap { trim: false })
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .padding(Padding::uniform(1)),
+    );
+    f.render_widget(para, area);
 }
 
 pub fn render_error(f: &mut Frame, msg: &str) {

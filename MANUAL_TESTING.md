@@ -4,13 +4,13 @@ Two (or more) machines connected to the same Wi-Fi network.
 
 ## Prerequisites
 
-- Both machines have `huddle-tui` built (`cargo build --release`)
+- Both machines have `huddle` built (`cargo build --release`)
 - Both machines on the same local network (same subnet, mDNS not blocked)
 - UDP 5353 (mDNS) and dynamic TCP ports not firewalled
 
 ## 1. First launch
 
-- [ ] On Machine A, run `./target/release/huddle-tui`
+- [ ] On Machine A, run `./target/release/huddle`
 - [ ] Lobby appears with the `huddle` banner
 - [ ] Your fingerprint shows (six groups of four hex chars)
 - [ ] "listening on /ip4/.../tcp/..." appears below the fingerprint

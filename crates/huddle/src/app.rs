@@ -11,7 +11,8 @@ use ratatui::prelude::*;
 use ratatui::Terminal;
 
 use huddle_core::app::events::{AppEvent, DiscoveredRoom};
-use huddle_core::app::AppHandle;
+use huddle_core::app::{AppHandle, KnownPeerStatus};
+use huddle_core::network::NetworkMode;
 use huddle_core::storage::repo::StoredRoomMessage;
 
 use crate::input::{self, Action};
@@ -29,9 +30,17 @@ pub enum Modal {
     None,
     StartRoom(StartRoomState),
     JoinRoom(JoinRoomState),
+    DialPeer(DialPeerState),
     QuitConfirm,
     Help,
     Error(String),
+    Info(String),
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DialPeerState {
+    pub address: String,
+    pub status: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,12 +90,24 @@ pub struct OpenRoom {
     pub unread: bool,
 }
 
+/// Which list the cursor is on in the lobby — known dial peers or
+/// discovered rooms. Used for `j/k` navigation and `Enter`/`r`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LobbyFocus {
+    KnownPeers,
+    Rooms,
+}
+
 pub struct TuiApp {
     pub handle: AppHandle,
+    pub mode: NetworkMode,
     pub screen: Screen,
     pub modal: Modal,
     pub discovered_rooms: Vec<DiscoveredRoom>,
+    pub known_peers: Vec<KnownPeerStatus>,
+    pub lobby_focus: LobbyFocus,
     pub selected_room_idx: usize,
+    pub selected_peer_idx: usize,
     pub open_rooms: Vec<OpenRoom>,
     pub active_tab: usize,
     pub listen_addresses: Vec<String>,
@@ -95,16 +116,34 @@ pub struct TuiApp {
 
 impl TuiApp {
     pub fn new(handle: AppHandle) -> Self {
+        let mode = handle.mode();
+        let known_peers = handle.known_peers();
+        let lobby_focus = if mode == NetworkMode::Direct && !known_peers.is_empty() {
+            LobbyFocus::KnownPeers
+        } else {
+            LobbyFocus::Rooms
+        };
         Self {
             handle,
+            mode,
             screen: Screen::Lobby,
             modal: Modal::None,
             discovered_rooms: Vec::new(),
+            known_peers,
+            lobby_focus,
             selected_room_idx: 0,
+            selected_peer_idx: 0,
             open_rooms: Vec::new(),
             active_tab: 0,
             listen_addresses: Vec::new(),
             status_message: None,
+        }
+    }
+
+    pub fn refresh_known_peers(&mut self) {
+        self.known_peers = self.handle.known_peers();
+        if self.selected_peer_idx >= self.known_peers.len() && !self.known_peers.is_empty() {
+            self.selected_peer_idx = self.known_peers.len() - 1;
         }
     }
 
@@ -223,6 +262,27 @@ impl TuiApp {
                 }
             }
             AppEvent::PeerDiscovered { .. } => {}
+            AppEvent::Dialing { address } => {
+                self.status_message = Some(format!("dialing {}…", address));
+                if let Modal::DialPeer(s) = &mut self.modal {
+                    s.status = Some(format!("dialing {}…", address));
+                }
+            }
+            AppEvent::DialSucceeded { address, .. } => {
+                self.status_message = Some(format!("connected to {}", address));
+                if matches!(self.modal, Modal::DialPeer(_)) {
+                    self.modal = Modal::None;
+                }
+                self.refresh_known_peers();
+            }
+            AppEvent::DialFailed { address, error } => {
+                let msg = format!("dial {} failed: {}", address, error);
+                self.status_message = Some(msg.clone());
+                if matches!(self.modal, Modal::DialPeer(_)) {
+                    self.modal = Modal::Error(msg);
+                }
+                self.refresh_known_peers();
+            }
             AppEvent::Error { description } => {
                 self.modal = Modal::Error(description);
             }
@@ -249,6 +309,62 @@ pub async fn run_tui(handle: AppHandle) -> Result<()> {
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     app.handle.shutdown().await;
+    result
+}
+
+/// Render a tiny startup picker before bringing up `AppHandle`. Returns the
+/// user's chosen mode, or `None` if they pressed Esc / q (caller exits).
+pub fn pick_network_mode(default: NetworkMode) -> Result<Option<NetworkMode>> {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    let mut selected: usize = match default {
+        NetworkMode::Mdns => 0,
+        NetworkMode::Direct => 1,
+    };
+    let result = loop {
+        terminal.draw(|f| crate::ui::picker::render_mode_picker(f, selected))?;
+        if poll(Duration::from_millis(200))? {
+            if let Event::Key(key) = event::read()? {
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && matches!(key.code, KeyCode::Char('c'))
+                {
+                    break Ok(None);
+                }
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => break Ok(None),
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        if selected > 0 {
+                            selected -= 1;
+                        }
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        if selected < 1 {
+                            selected += 1;
+                        }
+                    }
+                    KeyCode::Char('1') => selected = 0,
+                    KeyCode::Char('2') => selected = 1,
+                    KeyCode::Enter | KeyCode::Char(' ') => {
+                        let mode = if selected == 0 {
+                            NetworkMode::Mdns
+                        } else {
+                            NetworkMode::Direct
+                        };
+                        break Ok(Some(mode));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    };
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     result
 }
 
@@ -306,19 +422,104 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             Ok(false)
         }
         Action::LobbyNavigateUp => {
-            if app.selected_room_idx > 0 {
-                app.selected_room_idx -= 1;
+            match app.lobby_focus {
+                LobbyFocus::Rooms => {
+                    if app.selected_room_idx > 0 {
+                        app.selected_room_idx -= 1;
+                    }
+                }
+                LobbyFocus::KnownPeers => {
+                    if app.selected_peer_idx > 0 {
+                        app.selected_peer_idx -= 1;
+                    }
+                }
             }
             Ok(false)
         }
         Action::LobbyNavigateDown => {
-            if app.selected_room_idx + 1 < app.discovered_rooms.len() {
-                app.selected_room_idx += 1;
+            match app.lobby_focus {
+                LobbyFocus::Rooms => {
+                    if app.selected_room_idx + 1 < app.discovered_rooms.len() {
+                        app.selected_room_idx += 1;
+                    }
+                }
+                LobbyFocus::KnownPeers => {
+                    if app.selected_peer_idx + 1 < app.known_peers.len() {
+                        app.selected_peer_idx += 1;
+                    }
+                }
             }
             Ok(false)
         }
         Action::LobbyRefresh => {
             app.refresh_discovered();
+            app.refresh_known_peers();
+            Ok(false)
+        }
+        Action::LobbyFocusToggle => {
+            app.lobby_focus = match app.lobby_focus {
+                LobbyFocus::Rooms => LobbyFocus::KnownPeers,
+                LobbyFocus::KnownPeers => LobbyFocus::Rooms,
+            };
+            Ok(false)
+        }
+        Action::LobbyReconnectPeer => {
+            if let Some(p) = app.known_peers.get(app.selected_peer_idx).cloned() {
+                if let Err(e) = app.handle.redial(&p.address).await {
+                    app.modal = Modal::Error(format!("dial failed: {e}"));
+                }
+            }
+            Ok(false)
+        }
+        Action::LobbyForgetPeer => {
+            if let Some(p) = app.known_peers.get(app.selected_peer_idx).cloned() {
+                if let Err(e) = app.handle.forget_peer(&p.address).await {
+                    app.modal = Modal::Error(format!("forget failed: {e}"));
+                }
+                app.refresh_known_peers();
+                if app.selected_peer_idx >= app.known_peers.len() && !app.known_peers.is_empty() {
+                    app.selected_peer_idx = app.known_peers.len() - 1;
+                }
+            }
+            Ok(false)
+        }
+        Action::OpenDialPeer => {
+            app.modal = Modal::DialPeer(DialPeerState::default());
+            Ok(false)
+        }
+        Action::DialPeerTypeChar(c) => {
+            if let Modal::DialPeer(s) = &mut app.modal {
+                s.address.push(c);
+            }
+            Ok(false)
+        }
+        Action::DialPeerBackspace => {
+            if let Modal::DialPeer(s) = &mut app.modal {
+                s.address.pop();
+            }
+            Ok(false)
+        }
+        Action::DialPeerConfirm => {
+            let address = match &app.modal {
+                Modal::DialPeer(s) => s.address.clone(),
+                _ => return Ok(false),
+            };
+            if address.trim().is_empty() {
+                if let Modal::DialPeer(s) = &mut app.modal {
+                    s.status = Some("address is empty".into());
+                }
+                return Ok(false);
+            }
+            match app.handle.dial(&address).await {
+                Ok(()) => {
+                    if let Modal::DialPeer(s) = &mut app.modal {
+                        s.status = Some(format!("dialing {}…", address));
+                    }
+                }
+                Err(e) => {
+                    app.modal = Modal::Error(format!("invalid address: {e}"));
+                }
+            }
             Ok(false)
         }
         Action::LobbyJoinSelected => {

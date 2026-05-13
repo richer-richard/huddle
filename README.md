@@ -21,7 +21,7 @@ Requires Rust 1.75+ (edition 2021).
 
 ```bash
 cargo build --release
-./target/release/huddle-tui
+./target/release/huddle
 ```
 
 ## How it works
@@ -117,7 +117,7 @@ cargo build --release
 ```
 huddle/
   huddle-core    library: rooms, crypto, network, storage
-  huddle-tui     terminal UI (the only frontend)
+  huddle     terminal UI (the only frontend)
   huddle-tauri   stub (kept for future desktop shell)
 ```
 

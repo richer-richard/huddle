@@ -59,9 +59,9 @@ files defer to Phase 3 (dedicated libp2p streams via the
 - `crates/huddle-core/src/storage/repo.rs` — new `room_attachments`
   table: (id, room_id, message_id, name, mime, size, local_path,
   status [pending/complete/failed])
-- `crates/huddle-tui/src/ui/attach_modal.rs` — file picker modal
+- `crates/huddle/src/ui/attach_modal.rs` — file picker modal
   triggered by `^A` in a room
-- `crates/huddle-tui/src/ui/room.rs` — render file references as
+- `crates/huddle/src/ui/room.rs` — render file references as
   `[file  filename.ext  4.2 MB  ████░░  47%]` with `^O` to open the
   focused message's attachment via the system default opener
   (`open` on macOS, `xdg-open` on Linux)
@@ -106,7 +106,7 @@ initiates a rotation:
   events
 - `crates/huddle-core/src/network/protocol.rs` — new `RotateRoomKey`
   RoomMessage variant
-- `crates/huddle-tui/src/ui/modal.rs` — rotation confirmation modal,
+- `crates/huddle/src/ui/modal.rs` — rotation confirmation modal,
   triggered by a new key binding (`^R` in a room)
 
 ### Effort
@@ -131,7 +131,7 @@ initiates a rotation:
   master key
 - `crates/huddle-core/src/storage/keychain.rs` — derive + cache the
   master key
-- `crates/huddle-tui/src/ui/master_passphrase.rs` — startup modal
+- `crates/huddle/src/ui/master_passphrase.rs` — startup modal
   for entering the master passphrase
 
 ### Migration
@@ -163,8 +163,8 @@ channel). We just provide the UX; the user does the verification.
 
 - `crates/huddle-core/src/storage/repo.rs` — `verified BOOL` column
   on `room_members`
-- `crates/huddle-tui/src/ui/modal.rs` — `render_verify_modal`
-- `crates/huddle-tui/src/input.rs` — `^V` binding in room view
+- `crates/huddle/src/ui/modal.rs` — `render_verify_modal`
+- `crates/huddle/src/input.rs` — `^V` binding in room view
 
 ### Effort
 

@@ -2,6 +2,6 @@
 resolver = "2"
 members = [
     "crates/huddle-core",
-    "crates/huddle-tui",
+    "crates/huddle",
     "crates/huddle-tauri",
 ]

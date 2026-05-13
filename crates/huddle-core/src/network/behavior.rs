@@ -1,10 +1,11 @@
+use libp2p::swarm::behaviour::toggle::Toggle;
 use libp2p::swarm::NetworkBehaviour;
 use libp2p::{gossipsub, identify, mdns, ping};
 
 #[derive(NetworkBehaviour)]
 #[behaviour(to_swarm = "HuddleBehaviorEvent")]
 pub struct HuddleBehavior {
-    pub mdns: mdns::tokio::Behaviour,
+    pub mdns: Toggle<mdns::tokio::Behaviour>,
     pub identify: identify::Behaviour,
     pub ping: ping::Behaviour,
     pub gossipsub: gossipsub::Behaviour,

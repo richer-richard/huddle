@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use libp2p::PeerId;
+use libp2p::{Multiaddr, PeerId};
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 
@@ -15,11 +15,60 @@ use crate::error::{HuddleError, Result};
 use crate::identity::Identity;
 use crate::network::events::NetworkEvent;
 use crate::network::protocol::{RoomAnnouncement, RoomMessage};
-use crate::network::{self, NetworkHandle};
-use crate::storage::repo::{self, derive_room_id, StoredRoom, StoredRoomMember};
+use crate::network::{self, NetworkHandle, NetworkMode};
+use crate::storage::repo::{self, derive_room_id, KnownPeer, StoredRoom, StoredRoomMember};
 use crate::storage::{self, Db};
 
 pub use self::events::{AppEvent, DiscoveredRoom};
+
+/// Lobby-facing view of a known dial peer: persisted address plus
+/// runtime "is the connection currently up?" status.
+#[derive(Debug, Clone)]
+pub struct KnownPeerStatus {
+    pub address: String,
+    pub label: Option<String>,
+    pub last_connected_at: Option<i64>,
+    pub connected_peer_id: Option<PeerId>,
+}
+
+/// Parse a user-entered dial address into a libp2p `Multiaddr`.
+/// Accepts `ip:port`, `[ipv6]:port`, or a raw multiaddr starting with `/`.
+pub fn parse_dial_address(input: &str) -> Result<Multiaddr> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err(HuddleError::Other("address is empty".into()));
+    }
+    if trimmed.starts_with('/') {
+        return trimmed
+            .parse::<Multiaddr>()
+            .map_err(|e| HuddleError::Other(format!("invalid multiaddr: {e}")));
+    }
+    if let Some(rest) = trimmed.strip_prefix('[') {
+        let (host, port) = rest
+            .split_once("]:")
+            .ok_or_else(|| HuddleError::Other(format!("expected [ipv6]:port, got {trimmed}")))?;
+        let port: u16 = port
+            .parse()
+            .map_err(|_| HuddleError::Other(format!("invalid port: {port}")))?;
+        return format!("/ip6/{}/tcp/{}", host, port)
+            .parse::<Multiaddr>()
+            .map_err(|e| HuddleError::Other(format!("invalid ipv6 address: {e}")));
+    }
+    let (host, port) = trimmed
+        .rsplit_once(':')
+        .ok_or_else(|| HuddleError::Other(format!("expected ip:port, got {trimmed}")))?;
+    if host.contains(':') {
+        return Err(HuddleError::Other(format!(
+            "ambiguous IPv6 address — wrap host in brackets: [{host}]:{port}"
+        )));
+    }
+    let port: u16 = port
+        .parse()
+        .map_err(|_| HuddleError::Other(format!("invalid port: {port}")))?;
+    format!("/ip4/{}/tcp/{}", host, port)
+        .parse::<Multiaddr>()
+        .map_err(|e| HuddleError::Other(format!("invalid address: {e}")))
+}
 
 /// State for a room we've created or joined this session.
 struct ActiveRoom {
@@ -41,36 +90,55 @@ const ANNOUNCE_INTERVAL_SECS: u64 = 15;
 pub struct AppHandle {
     identity: Arc<Identity>,
     network: NetworkHandle,
+    mode: NetworkMode,
     active_rooms: Arc<Mutex<HashMap<String, ActiveRoom>>>,
     discovered_rooms: Arc<Mutex<HashMap<String, DiscoveredRoom>>>,
+    /// Peer addresses we've dialed in this process; tracks "is the
+    /// connection currently up" for known peers shown in the lobby.
+    connected_dial_addrs: Arc<Mutex<HashMap<String, PeerId>>>,
     db: Db,
     app_event_tx: broadcast::Sender<AppEvent>,
 }
 
 impl AppHandle {
     pub async fn start() -> Result<Self> {
+        Self::start_with_options(NetworkMode::Mdns, 0).await
+    }
+
+    pub async fn start_with_options(mode: NetworkMode, port: u16) -> Result<Self> {
         config::ensure_data_dir()?;
         let db = storage::open_db(&config::db_path())?;
-        Self::start_with_db(db).await
+        Self::start_with_db_and_options(db, mode, port).await
     }
 
     pub async fn start_with_db(db: Db) -> Result<Self> {
+        Self::start_with_db_and_options(db, NetworkMode::Mdns, 0).await
+    }
+
+    pub async fn start_with_db_and_options(
+        db: Db,
+        mode: NetworkMode,
+        port: u16,
+    ) -> Result<Self> {
         let identity = Self::load_or_create_identity(&db)?;
         let identity = Arc::new(identity);
-        info!(fingerprint = %identity.fingerprint(), peer_id = %identity.peer_id(), "identity loaded");
+        info!(fingerprint = %identity.fingerprint(), peer_id = %identity.peer_id(), mode = %mode.as_str(), port, "identity loaded");
 
         let (net_event_tx, net_event_rx) = tokio::sync::mpsc::channel::<NetworkEvent>(256);
         let (app_event_tx, _) = broadcast::channel::<AppEvent>(256);
-        let network = network::start_network(&identity, net_event_tx)?;
+        let network = network::start_network_with(&identity, net_event_tx, mode, port)?;
 
         let active_rooms = Arc::new(Mutex::new(HashMap::new()));
         let discovered_rooms = Arc::new(Mutex::new(HashMap::new()));
+        let connected_dial_addrs = Arc::new(Mutex::new(HashMap::new()));
 
         let handle = Self {
             identity,
             network,
+            mode,
             active_rooms,
             discovered_rooms,
+            connected_dial_addrs,
             db,
             app_event_tx,
         };
@@ -78,8 +146,13 @@ impl AppHandle {
         handle.spawn_event_processor(net_event_rx);
         handle.spawn_announcement_ticker();
         handle.spawn_discovered_room_pruner();
+        handle.spawn_known_peer_reconnector();
 
         Ok(handle)
+    }
+
+    pub fn mode(&self) -> NetworkMode {
+        self.mode
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<AppEvent> {
@@ -373,6 +446,79 @@ impl AppHandle {
     }
 
     // -------------------------------------------------------------------
+    // Dial / known peers
+    // -------------------------------------------------------------------
+
+    /// Dial a peer by a user-entered address. Accepts:
+    /// - `1.2.3.4:9000`
+    /// - `[fe80::1]:9000`
+    /// - `/ip4/.../tcp/...[/p2p/<peer>]` (raw multiaddr)
+    pub async fn dial(&self, input: &str) -> Result<()> {
+        let multiaddr = parse_dial_address(input)?;
+        let canonical = multiaddr.to_string();
+        info!(%canonical, "dialing");
+
+        repo::upsert_known_peer(
+            &self.db,
+            &KnownPeer {
+                address: canonical.clone(),
+                label: None,
+                last_connected_at: None,
+                last_attempt_at: Some(now_unix()),
+                created_at: now_unix(),
+            },
+        )?;
+
+        let _ = self.app_event_tx.send(AppEvent::Dialing {
+            address: canonical.clone(),
+        });
+        self.network.dial(multiaddr).await;
+        Ok(())
+    }
+
+    pub fn known_peers(&self) -> Vec<KnownPeerStatus> {
+        let connected = self.connected_dial_addrs.lock().unwrap().clone();
+        let stored = repo::list_known_peers(&self.db).unwrap_or_default();
+        stored
+            .into_iter()
+            .map(|p| {
+                let connected_peer = connected.get(&p.address).copied();
+                KnownPeerStatus {
+                    address: p.address,
+                    label: p.label,
+                    last_connected_at: p.last_connected_at,
+                    connected_peer_id: connected_peer,
+                }
+            })
+            .collect()
+    }
+
+    pub async fn forget_peer(&self, address: &str) -> Result<()> {
+        repo::forget_known_peer(&self.db, address)?;
+        self.connected_dial_addrs.lock().unwrap().remove(address);
+        Ok(())
+    }
+
+    /// Re-dial a stored address — used by the lobby's "reconnect" action.
+    pub async fn redial(&self, address: &str) -> Result<()> {
+        self.dial(address).await
+    }
+
+    fn spawn_known_peer_reconnector(&self) {
+        let handle = self.clone();
+        tokio::spawn(async move {
+            // Brief delay so listeners come up first.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let known = repo::list_known_peers(&handle.db).unwrap_or_default();
+            for peer in known {
+                if let Err(e) = handle.dial(&peer.address).await {
+                    debug!(%e, addr = %peer.address, "auto-reconnect failed");
+                }
+            }
+        });
+    }
+
+    // -------------------------------------------------------------------
     // Internal helpers
     // -------------------------------------------------------------------
 
@@ -564,6 +710,34 @@ impl AppHandle {
                     }
                 };
                 self.handle_room_message(&room_id, msg).await;
+            }
+            NetworkEvent::DialSucceeded { peer_id, address } => {
+                let addr_s = address.to_string();
+                self.connected_dial_addrs
+                    .lock()
+                    .unwrap()
+                    .insert(addr_s.clone(), peer_id);
+                let _ = repo::upsert_known_peer(
+                    &self.db,
+                    &KnownPeer {
+                        address: addr_s.clone(),
+                        label: None,
+                        last_connected_at: Some(now_unix()),
+                        last_attempt_at: Some(now_unix()),
+                        created_at: now_unix(),
+                    },
+                );
+                let _ = self.app_event_tx.send(AppEvent::DialSucceeded {
+                    address: addr_s,
+                    peer_id,
+                });
+            }
+            NetworkEvent::DialFailed { address, error } => {
+                let addr_s = address.to_string();
+                let _ = self.app_event_tx.send(AppEvent::DialFailed {
+                    address: addr_s,
+                    error,
+                });
             }
         }
     }
@@ -760,4 +934,43 @@ fn now_unix() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64
+}
+
+#[cfg(test)]
+mod parser_tests {
+    use super::parse_dial_address;
+
+    #[test]
+    fn parses_ipv4_port() {
+        let m = parse_dial_address("10.3.72.53:9027").unwrap();
+        assert_eq!(m.to_string(), "/ip4/10.3.72.53/tcp/9027");
+    }
+
+    #[test]
+    fn parses_bracketed_ipv6() {
+        let m = parse_dial_address("[::1]:9027").unwrap();
+        assert_eq!(m.to_string(), "/ip6/::1/tcp/9027");
+    }
+
+    #[test]
+    fn rejects_unbracketed_ipv6() {
+        let err = parse_dial_address("fe80::1:9027").unwrap_err();
+        assert!(err.to_string().contains("brackets"));
+    }
+
+    #[test]
+    fn passes_through_raw_multiaddr() {
+        let m = parse_dial_address("/ip4/1.2.3.4/tcp/9000").unwrap();
+        assert_eq!(m.to_string(), "/ip4/1.2.3.4/tcp/9000");
+    }
+
+    #[test]
+    fn empty_address_is_error() {
+        assert!(parse_dial_address("   ").is_err());
+    }
+
+    #[test]
+    fn rejects_bad_port() {
+        assert!(parse_dial_address("1.2.3.4:notaport").is_err());
+    }
 }

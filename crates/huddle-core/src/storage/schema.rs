@@ -44,4 +44,13 @@ pub const MIGRATIONS: &[&str] = &[
     );",
     "CREATE INDEX IF NOT EXISTS idx_room_messages_room ON room_messages(room_id, sent_at);",
     "CREATE INDEX IF NOT EXISTS idx_room_members_room ON room_members(room_id);",
+    // Peers we've manually dialed. We auto-reconnect on the next launch so
+    // the user doesn't have to retype an address to rejoin a room.
+    "CREATE TABLE IF NOT EXISTS known_peers (
+        address TEXT PRIMARY KEY,
+        label TEXT,
+        last_connected_at INTEGER,
+        last_attempt_at INTEGER,
+        created_at INTEGER NOT NULL
+    );",
 ];

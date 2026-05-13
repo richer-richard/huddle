@@ -47,6 +47,12 @@ pub enum AppEvent {
     ListeningOn { address: String },
     /// A peer was discovered on the LAN.
     PeerDiscovered { peer_id: PeerId },
+    /// We've fired a dial command — useful for the UI to show "dialing...".
+    Dialing { address: String },
+    /// A user-initiated dial completed successfully.
+    DialSucceeded { address: String, peer_id: PeerId },
+    /// A user-initiated dial failed.
+    DialFailed { address: String, error: String },
     /// Non-fatal error.
     Error { description: String },
 }

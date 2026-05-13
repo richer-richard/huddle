@@ -1,5 +1,6 @@
 pub mod lobby;
 pub mod modal;
+pub mod picker;
 pub mod room;
 
 use ratatui::prelude::*;
@@ -16,9 +17,11 @@ pub fn render(f: &mut Frame, app: &TuiApp) {
         Modal::None => {}
         Modal::StartRoom(s) => modal::render_start_room(f, s),
         Modal::JoinRoom(j) => modal::render_join_room(f, j),
+        Modal::DialPeer(d) => modal::render_dial_peer(f, d),
         Modal::QuitConfirm => modal::render_quit_confirm(f),
         Modal::Help => modal::render_help(f),
         Modal::Error(msg) => modal::render_error(f, msg),
+        Modal::Info(msg) => modal::render_info(f, msg),
     }
 }
 
