@@ -214,12 +214,28 @@ fn render_rooms_list(f: &mut Frame, area: Rect, app: &TuiApp) {
         return;
     }
 
+    // Column widths for the meta block on the right. Name takes the
+    // remaining space; if a name is too long it gets ellipsised so the
+    // meta block always lines up.
+    const LOCK_W: usize = 9; // "encrypted" / "public"
+    const MIDDLE_W: usize = 29; // "saved · press Enter to rejoin"
+    const FP_W: usize = 4;
+    const GAP: usize = 2;
+    const LEADING: usize = 2;
+    // List reserves: 2 borders + 2 horizontal padding + 1 highlight
+    // symbol = 5 cols of chrome around the content.
+    let inner_w = (area.width as usize).saturating_sub(5);
+    let meta_w = LOCK_W + GAP + MIDDLE_W + GAP + FP_W;
+    let name_w = inner_w
+        .saturating_sub(LEADING + GAP + meta_w)
+        .max(8);
+
     let items: Vec<ListItem> = app
         .discovered_rooms
         .iter()
         .enumerate()
         .map(|(i, r)| {
-            let lock = if r.encrypted { "encrypted" } else { "public   " };
+            let lock = if r.encrypted { "encrypted" } else { "public" };
             let lock_style = if r.encrypted {
                 Style::default().fg(Color::Magenta)
             } else {
@@ -233,24 +249,28 @@ fn render_rooms_list(f: &mut Frame, area: Rect, app: &TuiApp) {
             } else {
                 Style::default().fg(Color::White)
             };
-            // Restorable rooms: "[saved]" tag instead of member count; the
+            // Restorable rooms: "saved" tag instead of member count; the
             // user enters via the join modal (passphrase prompt).
-            let last_col = if r.restorable {
-                Span::styled(
-                    "saved · press Enter to rejoin",
+            let (middle_text, middle_style) = if r.restorable {
+                (
+                    "saved · press Enter to rejoin".to_string(),
                     Style::default().fg(Color::Yellow),
                 )
             } else {
-                Span::styled(
-                    format!("{:<3} members  ", r.member_count),
+                (
+                    format!("{} members", r.member_count),
                     Style::default().fg(Color::DarkGray),
                 )
             };
+            let name_display = truncate_with_ellipsis(&r.name, name_w);
             let line = Line::from(vec![
-                Span::styled(format!("  {:<28}", r.name), name_style),
-                Span::styled(format!("{:<11}", lock), lock_style),
-                last_col,
-                Span::styled("  ", Style::default()),
+                Span::raw(" ".repeat(LEADING)),
+                Span::styled(pad_right(&name_display, name_w), name_style),
+                Span::raw(" ".repeat(GAP)),
+                Span::styled(pad_right(lock, LOCK_W), lock_style),
+                Span::raw(" ".repeat(GAP)),
+                Span::styled(pad_right(&middle_text, MIDDLE_W), middle_style),
+                Span::raw(" ".repeat(GAP)),
                 Span::styled(
                     short_fp(&r.creator_fingerprint),
                     Style::default().fg(Color::DarkGray),
@@ -283,6 +303,35 @@ fn render_rooms_list(f: &mut Frame, area: Rect, app: &TuiApp) {
         state.select(Some(app.selected_room_idx));
     }
     f.render_stateful_widget(list, area, &mut state);
+}
+
+fn truncate_with_ellipsis(s: &str, max: usize) -> String {
+    let count = s.chars().count();
+    if count <= max {
+        return s.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    if max == 1 {
+        return "…".into();
+    }
+    let mut out: String = s.chars().take(max - 1).collect();
+    out.push('…');
+    out
+}
+
+fn pad_right(s: &str, w: usize) -> String {
+    let count = s.chars().count();
+    if count >= w {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len() + (w - count));
+    out.push_str(s);
+    for _ in 0..(w - count) {
+        out.push(' ');
+    }
+    out
 }
 
 fn render_status(f: &mut Frame, area: Rect, app: &TuiApp) {
