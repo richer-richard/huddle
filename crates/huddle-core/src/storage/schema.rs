@@ -134,4 +134,17 @@ pub const MIGRATIONS: &[&str] = &[
         fingerprint TEXT PRIMARY KEY,
         verified_at INTEGER NOT NULL
     );",
+    // Phase E: simple app-wide settings KV. First use: a global
+    // 'verified_only_inbound' flag that auto-rejects inbound dials
+    // from unverified fingerprints without prompting.
+    "CREATE TABLE IF NOT EXISTS app_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );",
+    // Phase E: per-room verified-only join. When 1, existing members
+    // refuse to wrap their session key for an unverified joiner's
+    // MemberAnnounce, and the lowest-fp owner sends a signed
+    // `JoinRefused` so the joiner sees an explanation instead of a
+    // silent hang.
+    "ALTER TABLE rooms ADD COLUMN verified_only_join INTEGER NOT NULL DEFAULT 0;",
 ];

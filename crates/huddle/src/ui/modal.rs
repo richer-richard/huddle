@@ -4,7 +4,7 @@ use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
 use crate::app::{
     AcceptRotationState, AttachPickerState, DialPeerState, InboundDialState, JoinRoomState,
     MemberActionKind, MemberActionState, RotateRoomState, SasStage, SasState, SearchState,
-    StartField, StartRoomState, VerifyState,
+    SettingsState, StartField, StartRoomState, VerifyState,
 };
 use crate::ui::centered_rect;
 
@@ -930,6 +930,57 @@ pub fn render_sas(f: &mut Frame, s: &SasState) {
                 .title(Span::styled(
                     " SAS verify ",
                     Style::default().fg(Color::Magenta).bold(),
+                )),
+        );
+    f.render_widget(para, area);
+}
+
+/// Phase E: settings modal (global verified-only-inbound toggle).
+pub fn render_settings(f: &mut Frame, s: &SettingsState) {
+    let area = centered_rect(64, 12, f.area());
+    f.render_widget(Clear, area);
+    let check = if s.verified_only_inbound { "[x]" } else { "[ ]" };
+    let lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" ", Style::default()),
+            Span::styled(check, Style::default().fg(Color::Yellow).bold()),
+            Span::styled(
+                " reject inbound dials from unverified fingerprints",
+                Style::default().fg(Color::White),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  when on: a peer dialing us is auto-rejected unless their",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(Span::styled(
+            "  fingerprint is in your SAS-verified set (^V → s) or you've",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(Span::styled(
+            "  previously trusted them on an inbound prompt.",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" Enter / Space / v", Style::default().fg(Color::Yellow)),
+            Span::styled(" toggle  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Esc", Style::default().fg(Color::Yellow)),
+            Span::styled(" close", Style::default().fg(Color::DarkGray)),
+        ]),
+    ];
+    let para = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan))
+                .padding(Padding::uniform(1))
+                .title(Span::styled(
+                    " settings ",
+                    Style::default().fg(Color::Cyan).bold(),
                 )),
         );
     f.render_widget(para, area);

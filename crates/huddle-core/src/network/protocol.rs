@@ -86,6 +86,13 @@ pub struct RoomAnnouncement {
     /// `#[serde(default)]` for forward-compat with pre-0.3 senders.
     #[serde(default)]
     pub owner_fingerprints: Vec<String>,
+    /// Phase E: when true, existing members refuse to wrap their
+    /// session key for a joiner whose fingerprint isn't in the
+    /// global `verified_peers` set. Joiner sees a `JoinRefused`
+    /// reply from at least one owner so the UX isn't a silent hang.
+    /// `#[serde(default)]` so pre-0.3 senders default to permissive.
+    #[serde(default)]
+    pub verified_only: bool,
 }
 
 /// All messages on a room's per-room topic.
@@ -212,6 +219,15 @@ pub enum RoomMessage {
         tx_id: String,
         matched: bool,
     },
+    /// Phase E: an existing owner of a `verified_only` room is
+    /// telling `target_fingerprint` (an unverified joiner) why their
+    /// announce went unanswered. Replaces a silent hang on the
+    /// joiner's side. Signed.
+    JoinRefused {
+        room_id: String,
+        target_fingerprint: String,
+        reason: String,
+    },
 }
 
 #[cfg(test)]
@@ -229,6 +245,7 @@ mod tests {
             creator_fingerprint: "creator-fp".into(),
             announced_at: 100,
             owner_fingerprints: vec!["creator-fp".into()],
+            verified_only: false,
         };
         let json = serde_json::to_vec(&ann).unwrap();
         let back: RoomAnnouncement = serde_json::from_slice(&json).unwrap();

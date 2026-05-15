@@ -103,6 +103,10 @@ pub enum Action {
     VerifyStartSas,
     SasMatch,
     SasCancel,
+    // Phase E: verified-only-mode toggles
+    OpenSettings,
+    SettingsToggleGlobalVerifiedOnly,
+    ToggleRoomVerifiedOnly,
 }
 
 pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
@@ -194,6 +198,13 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
             KeyCode::Char('m') | KeyCode::Enter => Action::SasMatch,
             _ => Action::Nothing,
         },
+        Modal::Settings(_) => match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => Action::CloseModal,
+            KeyCode::Char('v') | KeyCode::Enter | KeyCode::Char(' ') => {
+                Action::SettingsToggleGlobalVerifiedOnly
+            }
+            _ => Action::Nothing,
+        },
         Modal::Search(_) => match key.code {
             KeyCode::Esc => Action::CloseModal,
             KeyCode::Enter => Action::SearchSubmit,
@@ -242,6 +253,7 @@ fn map_lobby(key: KeyEvent, app: &TuiApp) -> Action {
         KeyCode::Char('?') => Action::OpenHelp,
         KeyCode::Char('d') => Action::OpenDialPeer,
         KeyCode::Char('i') => Action::OpenQrIdentity,
+        KeyCode::Char(',') => Action::OpenSettings,
         KeyCode::Tab => Action::LobbyFocusToggle,
         KeyCode::Char('j') | KeyCode::Down => Action::LobbyNavigateDown,
         KeyCode::Char('k') | KeyCode::Up => Action::LobbyNavigateUp,
@@ -283,6 +295,7 @@ fn map_in_room(key: KeyEvent, app: &TuiApp) -> Action {
             KeyCode::Char('m') if !input_active => Action::ToggleMute,
             KeyCode::Char('k') if !input_active => Action::OpenKickPicker,
             KeyCode::Char('g') if !input_active => Action::OpenGrantPicker,
+            KeyCode::Char('o') if !input_active => Action::ToggleRoomVerifiedOnly,
             _ => Action::Nothing,
         };
     }

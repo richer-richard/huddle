@@ -60,11 +60,19 @@ pub enum Modal {
     /// before the partner's ephemeral pubkey arrives, then code-display
     /// + match-confirm.
     Sas(SasState),
+    /// Phase E: app-wide settings (currently just the global
+    /// verified-only inbound toggle). Opened with `,` from lobby.
+    Settings(SettingsState),
     QuitConfirm,
     Help,
     Error(String),
     #[allow(dead_code)]
     Info(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct SettingsState {
+    pub verified_only_inbound: bool,
 }
 
 /// Phase G: stages of an in-flight SAS verification. The state advances
@@ -1964,6 +1972,47 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             if let Err(e) = app.handle.set_member_verified(&room_id, &fp, new_state) {
                 app.modal = Modal::Error(format!("verify failed: {e}"));
             }
+            Ok(false)
+        }
+        Action::OpenSettings => {
+            app.modal = Modal::Settings(SettingsState {
+                verified_only_inbound: app.handle.verified_only_inbound(),
+            });
+            Ok(false)
+        }
+        Action::SettingsToggleGlobalVerifiedOnly => {
+            if let Modal::Settings(s) = &mut app.modal {
+                s.verified_only_inbound = !s.verified_only_inbound;
+                if let Err(e) = app
+                    .handle
+                    .set_verified_only_inbound(s.verified_only_inbound)
+                {
+                    app.modal = Modal::Error(format!("save failed: {e}"));
+                    return Ok(false);
+                }
+            }
+            Ok(false)
+        }
+        Action::ToggleRoomVerifiedOnly => {
+            let room_id = match app.active_room() {
+                Some(r) => r.room_id.clone(),
+                None => return Ok(false),
+            };
+            let our_fp = app.handle.fingerprint().to_string();
+            if !app.handle.is_owner(&room_id, &our_fp) {
+                app.set_status("only an owner can toggle room verified-only");
+                return Ok(false);
+            }
+            let new_state = !app.handle.room_verified_only(&room_id);
+            if let Err(e) = app.handle.set_room_verified_only(&room_id, new_state) {
+                app.modal = Modal::Error(format!("toggle failed: {e}"));
+                return Ok(false);
+            }
+            app.set_status(if new_state {
+                "room is now verified-only — non-SAS-verified joiners refused"
+            } else {
+                "room verified-only mode off"
+            });
             Ok(false)
         }
         Action::VerifyStartSas => {

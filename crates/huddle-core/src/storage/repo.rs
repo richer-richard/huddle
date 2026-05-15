@@ -663,6 +663,49 @@ pub fn block_peer(db: &Db, fingerprint: &str, now: i64) -> Result<()> {
     Ok(())
 }
 
+/// Phase E: simple app-wide KV. Used for the global
+/// 'verified_only_inbound' toggle and any other future flags.
+pub fn get_setting(db: &Db, key: &str) -> Result<Option<String>> {
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare("SELECT value FROM app_settings WHERE key = ?1")?;
+    let row = stmt
+        .query_row(params![key], |r| r.get::<_, String>(0))
+        .ok();
+    Ok(row)
+}
+
+pub fn set_setting(db: &Db, key: &str, value: &str) -> Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "INSERT INTO app_settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    )?;
+    Ok(())
+}
+
+/// Phase E: per-room "only verified members may join" toggle.
+pub fn get_room_verified_only(db: &Db, room_id: &str) -> Result<bool> {
+    let conn = db.lock().unwrap();
+    let v: i64 = conn
+        .query_row(
+            "SELECT verified_only_join FROM rooms WHERE id = ?1",
+            params![room_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    Ok(v != 0)
+}
+
+pub fn set_room_verified_only(db: &Db, room_id: &str, on: bool) -> Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "UPDATE rooms SET verified_only_join = ?1 WHERE id = ?2",
+        params![on as i64, room_id],
+    )?;
+    Ok(())
+}
+
 /// Phase G: mark a fingerprint as globally SAS-verified. Idempotent;
 /// re-verifying just refreshes `verified_at`. Used by both sides of
 /// an SAS exchange on receiving the partner's matching `SasConfirm`.

@@ -849,6 +849,7 @@ impl AppHandle {
     async fn announce_room_now(&self, info: &StoredRoom, member_count: u32) {
         let owner_fingerprints =
             repo::list_room_owners(&self.db, &info.id).unwrap_or_default();
+        let verified_only = repo::get_room_verified_only(&self.db, &info.id).unwrap_or(false);
         let ann = RoomAnnouncement {
             room_id: info.id.clone(),
             name: info.name.clone(),
@@ -858,6 +859,7 @@ impl AppHandle {
             creator_fingerprint: info.creator_fingerprint.clone(),
             announced_at: now_unix(),
             owner_fingerprints,
+            verified_only,
         };
         self.network.announce_room(ann).await;
     }
@@ -1119,6 +1121,30 @@ impl AppHandle {
                     self.network.reject_inbound(peer_id).await;
                     return;
                 }
+                // Phase E: global verified-only inbound mode. If on,
+                // reject any unverified fingerprint without prompting.
+                // SAS-verified (Phase G) and already-trusted (Phase A)
+                // peers still come through.
+                let global_verified_only =
+                    repo::get_setting(&self.db, "verified_only_inbound")
+                        .ok()
+                        .flatten()
+                        .map(|v| v == "1")
+                        .unwrap_or(false);
+                if global_verified_only {
+                    let is_verified =
+                        repo::is_globally_verified(&self.db, &fingerprint).unwrap_or(false)
+                            || repo::is_fingerprint_trusted(&self.db, &fingerprint)
+                                .unwrap_or(false);
+                    if !is_verified {
+                        info!(
+                            %fingerprint,
+                            "inbound dial auto-rejected: verified-only mode"
+                        );
+                        self.network.reject_inbound(peer_id).await;
+                        return;
+                    }
+                }
                 if repo::is_fingerprint_trusted(&self.db, &fingerprint).unwrap_or(false) {
                     info!(%fingerprint, "inbound dial auto-accepted: peer is trusted");
                     // Persist the address → peer_id mapping just as a
@@ -1180,6 +1206,39 @@ impl AppHandle {
                     .unwrap_or(false)
                 {
                     info!(%sender_fingerprint, %room_id, "dropping MemberAnnounce from banned peer");
+                    return;
+                }
+                // Phase E per-room enforcement: if this room is
+                // verified-only and the joiner isn't globally SAS-
+                // verified, refuse to add them. The lowest-fp owner
+                // (deterministic across honest peers) also sends a
+                // signed `JoinRefused` so the joiner gets an explicit
+                // message instead of a silent hang.
+                if repo::get_room_verified_only(&self.db, room_id).unwrap_or(false)
+                    && !repo::is_globally_verified(&self.db, &sender_fingerprint).unwrap_or(false)
+                {
+                    info!(
+                        %sender_fingerprint, %room_id,
+                        "dropping MemberAnnounce: room is verified-only and joiner isn't verified"
+                    );
+                    let owners = repo::list_room_owners(&self.db, room_id).unwrap_or_default();
+                    let lowest_owner = owners.iter().min().cloned();
+                    if lowest_owner.as_deref() == Some(&our_fp) {
+                        let msg = RoomMessage::JoinRefused {
+                            room_id: room_id.to_string(),
+                            target_fingerprint: sender_fingerprint.clone(),
+                            reason: "room requires SAS verification — ask an existing member to verify you".into(),
+                        };
+                        if let Ok(env) = crate::crypto::sign_message(&self.identity, &msg) {
+                            if let Ok(bytes) =
+                                crate::network::protocol::encode_wire_signed(&env)
+                            {
+                                self.network
+                                    .publish_room_message(room_id.to_string(), bytes)
+                                    .await;
+                            }
+                        }
+                    }
                     return;
                 }
                 let need_inbound = {
@@ -1644,6 +1703,21 @@ impl AppHandle {
                     decimal: emit.decimal,
                 });
             }
+            RoomMessage::JoinRefused {
+                room_id: announced_room_id,
+                target_fingerprint,
+                reason,
+            } => {
+                if announced_room_id != room_id || target_fingerprint != our_fp {
+                    return;
+                }
+                // Surface the refusal as an Error so the user sees why
+                // their join didn't take. The Phase 3 modal-queue rule
+                // means this won't clobber typing in another modal.
+                let _ = self.app_event_tx.send(AppEvent::Error {
+                    description: format!("join refused: {reason}"),
+                });
+            }
             RoomMessage::SasConfirm { tx_id, matched } => {
                 let signer = match verified_signer {
                     Some(fp) => fp,
@@ -1961,6 +2035,31 @@ impl AppHandle {
     /// render an owner badge in the member panel.
     pub fn room_owners(&self, room_id: &str) -> Vec<String> {
         repo::list_room_owners(&self.db, room_id).unwrap_or_default()
+    }
+
+    /// Phase E: global toggle — when true, inbound dials from
+    /// unverified fingerprints are auto-rejected without prompting.
+    pub fn verified_only_inbound(&self) -> bool {
+        repo::get_setting(&self.db, "verified_only_inbound")
+            .unwrap_or(None)
+            .map(|v| v == "1")
+            .unwrap_or(false)
+    }
+
+    pub fn set_verified_only_inbound(&self, on: bool) -> Result<()> {
+        repo::set_setting(&self.db, "verified_only_inbound", if on { "1" } else { "0" })
+    }
+
+    /// Phase E: per-room verified-only-join. When true, the host (and
+    /// every honest existing member) drops MemberAnnounce from joiners
+    /// who aren't globally SAS-verified, and the lowest-fp owner sends
+    /// back a signed `JoinRefused` so the joiner sees an explanation.
+    pub fn room_verified_only(&self, room_id: &str) -> bool {
+        repo::get_room_verified_only(&self.db, room_id).unwrap_or(false)
+    }
+
+    pub fn set_room_verified_only(&self, room_id: &str, on: bool) -> Result<()> {
+        repo::set_room_verified_only(&self.db, room_id, on)
     }
 
     /// Phase B: promote `target_fingerprint` to owner. Builds a signed

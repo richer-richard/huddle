@@ -28,6 +28,7 @@ pub fn render(f: &mut Frame, app: &TuiApp) {
         Modal::InboundDial(s) => modal::render_inbound_dial(f, s),
         Modal::MemberAction(s) => modal::render_member_action(f, s),
         Modal::Sas(s) => modal::render_sas(f, s),
+        Modal::Settings(s) => modal::render_settings(f, s),
         Modal::QuitConfirm => modal::render_quit_confirm(f),
         Modal::Help => modal::render_help(f),
         Modal::Error(msg) => modal::render_error(f, msg),
