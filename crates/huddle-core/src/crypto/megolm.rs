@@ -15,30 +15,12 @@ use vodozemac::megolm::{
     MegolmMessage, SessionConfig, SessionKey,
 };
 
+use tracing::warn;
+
 use crate::error::{HuddleError, Result};
 use crate::storage::repo::{self, StoredMegolmSession};
-use std::sync::OnceLock;
 
 use crate::storage::Db;
-
-// Phase 4: installed by `AppHandle::start_with_options` once the master
-// passphrase is verified. Defaults to the all-zero key for tests and
-// for the `--no-master-passphrase` boot path (Phase 1 compatibility).
-static SESSION_PERSIST_KEY_OVERRIDE: OnceLock<[u8; 32]> = OnceLock::new();
-const SESSION_PERSIST_KEY_DEFAULT: [u8; 32] = [0u8; 32];
-
-/// Install a persist key for the running process. Idempotent: a second
-/// call is silently ignored, which is intentional — the master key never
-/// rotates mid-session.
-pub fn install_session_persist_key(key: [u8; 32]) {
-    let _ = SESSION_PERSIST_KEY_OVERRIDE.set(key);
-}
-
-fn persist_key() -> &'static [u8; 32] {
-    SESSION_PERSIST_KEY_OVERRIDE
-        .get()
-        .unwrap_or(&SESSION_PERSIST_KEY_DEFAULT)
-}
 
 /// Per-room Megolm crypto: one outbound session (ours) + many inbound (others').
 pub struct RoomCrypto {
@@ -48,11 +30,22 @@ pub struct RoomCrypto {
     /// Keyed by (sender_fingerprint, session_id).
     inbound: HashMap<(String, String), InboundGroupSession>,
     db: Db,
+    /// 32-byte key the session pickles are encrypted under at rest.
+    /// Derived from the master passphrase (an HKDF subkey); all-zero on
+    /// the `--no-master-passphrase` / unencrypted-DB path. Threaded in
+    /// explicitly rather than read from process-global state.
+    persist_key: [u8; 32],
 }
 
 impl RoomCrypto {
-    /// Create a fresh outbound session and persist it.
-    pub fn new_for_room(db: Db, room_id: String, our_fingerprint: String) -> Result<Self> {
+    /// Create a fresh outbound session and persist it. `persist_key` is
+    /// the 32-byte key the at-rest session pickles are encrypted under.
+    pub fn new_for_room(
+        db: Db,
+        room_id: String,
+        our_fingerprint: String,
+        persist_key: [u8; 32],
+    ) -> Result<Self> {
         let outbound = GroupSession::new(SessionConfig::version_1());
         let crypto = Self {
             room_id,
@@ -60,30 +53,56 @@ impl RoomCrypto {
             outbound,
             inbound: HashMap::new(),
             db,
+            persist_key,
         };
         crypto.persist_outbound()?;
         Ok(crypto)
     }
 
-    /// Load any persisted sessions for the room. Returns None if no outbound
-    /// session is stored (meaning we haven't joined or created it).
-    pub fn load(db: Db, room_id: String, our_fingerprint: String) -> Result<Option<Self>> {
+    /// Load any persisted sessions for the room. Returns `None` when no
+    /// usable outbound session is stored (we haven't joined or created it,
+    /// or the only outbound pickle is unreadable).
+    ///
+    /// Resilient by design: a single session that fails to decode or
+    /// decrypt is logged and skipped rather than aborting the whole room
+    /// load. One corrupt row should not lock the user out.
+    pub fn load(
+        db: Db,
+        room_id: String,
+        our_fingerprint: String,
+        persist_key: [u8; 32],
+    ) -> Result<Option<Self>> {
         let sessions = repo::load_megolm_sessions_for_room(&db, &room_id)?;
         let mut outbound: Option<GroupSession> = None;
         let mut inbound: HashMap<(String, String), InboundGroupSession> = HashMap::new();
 
         for s in sessions {
-            let data_str = String::from_utf8(s.session_data)
-                .map_err(|e| HuddleError::Session(format!("session data utf8: {e}")))?;
+            let data_str = match String::from_utf8(s.session_data) {
+                Ok(d) => d,
+                Err(e) => {
+                    warn!(%e, room_id = %room_id, "skipping persisted megolm session: invalid utf8");
+                    continue;
+                }
+            };
             if s.is_outbound {
-                let p = GroupSessionPickle::from_encrypted(&data_str, persist_key())
-                    .map_err(|e| HuddleError::Session(format!("restore outbound: {e}")))?;
-                outbound = Some(GroupSession::from_pickle(p));
+                match GroupSessionPickle::from_encrypted(&data_str, &persist_key) {
+                    Ok(p) => outbound = Some(GroupSession::from_pickle(p)),
+                    Err(e) => {
+                        warn!(%e, room_id = %room_id, "skipping persisted outbound megolm session: restore failed");
+                    }
+                }
             } else {
-                let p = InboundGroupSessionPickle::from_encrypted(&data_str, persist_key())
-                    .map_err(|e| HuddleError::Session(format!("restore inbound: {e}")))?;
-                let session = InboundGroupSession::from_pickle(p);
-                inbound.insert((s.sender_fingerprint, s.session_id), session);
+                match InboundGroupSessionPickle::from_encrypted(&data_str, &persist_key) {
+                    Ok(p) => {
+                        inbound.insert(
+                            (s.sender_fingerprint, s.session_id),
+                            InboundGroupSession::from_pickle(p),
+                        );
+                    }
+                    Err(e) => {
+                        warn!(%e, room_id = %room_id, "skipping persisted inbound megolm session: restore failed");
+                    }
+                }
             }
         }
 
@@ -94,6 +113,7 @@ impl RoomCrypto {
                 outbound,
                 inbound,
                 db,
+                persist_key,
             })),
             None => Ok(None),
         }
@@ -128,7 +148,7 @@ impl RoomCrypto {
             .map_err(|e| HuddleError::Session(format!("megolm decrypt failed: {e}")))?;
 
         // Persist the advanced inbound ratchet state.
-        let persisted = session.pickle().encrypt(persist_key());
+        let persisted = session.pickle().encrypt(&self.persist_key);
         repo::save_megolm_session(
             &self.db,
             &StoredMegolmSession {
@@ -156,7 +176,7 @@ impl RoomCrypto {
         let session = InboundGroupSession::new(&key, SessionConfig::version_1());
         let session_id = session.session_id();
 
-        let persisted = session.pickle().encrypt(persist_key());
+        let persisted = session.pickle().encrypt(&self.persist_key);
         repo::save_megolm_session(
             &self.db,
             &StoredMegolmSession {
@@ -192,7 +212,7 @@ impl RoomCrypto {
     }
 
     fn persist_outbound(&self) -> Result<()> {
-        let persisted = self.outbound.pickle().encrypt(persist_key());
+        let persisted = self.outbound.pickle().encrypt(&self.persist_key);
         repo::save_megolm_session(
             &self.db,
             &StoredMegolmSession {
@@ -245,10 +265,10 @@ mod tests {
         setup_room(&db_bob, "test", "alice-fp");
 
         let mut alice =
-            RoomCrypto::new_for_room(db_alice.clone(), room_id.clone(), "alice-fp".into())
+            RoomCrypto::new_for_room(db_alice.clone(), room_id.clone(), "alice-fp".into(), [0u8; 32])
                 .unwrap();
         let mut bob =
-            RoomCrypto::new_for_room(db_bob.clone(), room_id.clone(), "bob-fp".into()).unwrap();
+            RoomCrypto::new_for_room(db_bob.clone(), room_id.clone(), "bob-fp".into(), [0u8; 32]).unwrap();
 
         bob.add_inbound_session("alice-fp", &alice.our_session_key_b64())
             .unwrap();
@@ -266,9 +286,9 @@ mod tests {
         setup_room(&db_b, "r", "a-fp");
 
         let mut alice =
-            RoomCrypto::new_for_room(db_a.clone(), room_id.clone(), "a-fp".into()).unwrap();
+            RoomCrypto::new_for_room(db_a.clone(), room_id.clone(), "a-fp".into(), [0u8; 32]).unwrap();
         let mut bob =
-            RoomCrypto::new_for_room(db_b.clone(), room_id.clone(), "b-fp".into()).unwrap();
+            RoomCrypto::new_for_room(db_b.clone(), room_id.clone(), "b-fp".into(), [0u8; 32]).unwrap();
 
         alice
             .add_inbound_session("b-fp", &bob.our_session_key_b64())
@@ -289,12 +309,12 @@ mod tests {
         let room_id = setup_room(&db, "r", "me-fp");
 
         let mut crypto =
-            RoomCrypto::new_for_room(db.clone(), room_id.clone(), "me-fp".into()).unwrap();
+            RoomCrypto::new_for_room(db.clone(), room_id.clone(), "me-fp".into(), [0u8; 32]).unwrap();
         let original_session_id = crypto.our_session_id();
         let (_, _) = crypto.encrypt(b"advance the ratchet").unwrap();
         drop(crypto);
 
-        let reloaded = RoomCrypto::load(db.clone(), room_id.clone(), "me-fp".into())
+        let reloaded = RoomCrypto::load(db.clone(), room_id.clone(), "me-fp".into(), [0u8; 32])
             .unwrap()
             .expect("should have outbound session");
         assert_eq!(reloaded.our_session_id(), original_session_id);
@@ -305,7 +325,7 @@ mod tests {
         let db = open_db_in_memory().unwrap();
         let room_id = setup_room(&db, "r", "me-fp");
         let mut crypto =
-            RoomCrypto::new_for_room(db.clone(), room_id.clone(), "me-fp".into()).unwrap();
+            RoomCrypto::new_for_room(db.clone(), room_id.clone(), "me-fp".into(), [0u8; 32]).unwrap();
         let err = crypto.decrypt("unknown-fp", "session-id", b"junk");
         assert!(err.is_err());
     }

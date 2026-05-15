@@ -116,6 +116,10 @@ pub struct AppHandle {
     /// File chunking + cache + downloads.
     file_manager: Arc<FileManager>,
     db: Db,
+    /// 32-byte key Megolm session pickles are encrypted under at rest —
+    /// an HKDF subkey of the master key, or all-zero on the
+    /// `--no-master-passphrase` / unencrypted-DB path.
+    session_persist_key: [u8; 32],
     app_event_tx: broadcast::Sender<AppEvent>,
 }
 
@@ -130,22 +134,27 @@ impl AppHandle {
         master_key: Option<&[u8; 32]>,
     ) -> Result<Self> {
         config::ensure_data_dir()?;
-        if let Some(mk) = master_key {
-            let subkey = storage::keychain::derive_subkey(mk, b"megolm-persist");
-            crate::crypto::megolm::install_session_persist_key(subkey);
-        }
+        // Megolm session state is encrypted at rest with an HKDF subkey
+        // of the master key. With no master key (--no-master-passphrase /
+        // tests) it's persisted under the all-zero key, matching the
+        // unencrypted-DB story.
+        let session_persist_key = match master_key {
+            Some(mk) => storage::keychain::derive_subkey(mk, b"megolm-persist"),
+            None => [0u8; 32],
+        };
         let db = storage::open_db(&config::db_path(), master_key)?;
-        Self::start_with_db_and_options(db, mode, port).await
+        Self::start_with_db_and_options(db, mode, port, session_persist_key).await
     }
 
     pub async fn start_with_db(db: Db) -> Result<Self> {
-        Self::start_with_db_and_options(db, NetworkMode::Mdns, 0).await
+        Self::start_with_db_and_options(db, NetworkMode::Mdns, 0, [0u8; 32]).await
     }
 
     pub async fn start_with_db_and_options(
         db: Db,
         mode: NetworkMode,
         port: u16,
+        session_persist_key: [u8; 32],
     ) -> Result<Self> {
         let identity = Self::load_or_create_identity(&db)?;
         let identity = Arc::new(identity);
@@ -171,6 +180,7 @@ impl AppHandle {
             connected_dial_addrs,
             file_manager,
             db,
+            session_persist_key,
             app_event_tx,
         };
 
@@ -337,6 +347,7 @@ impl AppHandle {
                 self.db.clone(),
                 room_id.clone(),
                 creator_fp.clone(),
+                self.session_persist_key,
             )?)
         } else {
             None
@@ -433,11 +444,24 @@ impl AppHandle {
         repo::insert_room(&self.db, &info)?;
 
         let crypto = if encrypted {
-            Some(RoomCrypto::new_for_room(
+            // Reuse persisted Megolm sessions on re-join; only mint a fresh
+            // outbound session when nothing is stored for this room yet.
+            let our_fp = self.identity.fingerprint().to_string();
+            let existing = RoomCrypto::load(
                 self.db.clone(),
                 room_id.to_string(),
-                self.identity.fingerprint().to_string(),
-            )?)
+                our_fp.clone(),
+                self.session_persist_key,
+            )?;
+            Some(match existing {
+                Some(c) => c,
+                None => RoomCrypto::new_for_room(
+                    self.db.clone(),
+                    room_id.to_string(),
+                    our_fp,
+                    self.session_persist_key,
+                )?,
+            })
         } else {
             None
         };
@@ -512,6 +536,7 @@ impl AppHandle {
                     members.insert(m.fingerprint);
                 }
             }
+            let member_count = members.len() as u32;
             self.active_rooms.lock().unwrap().insert(
                 info.id.clone(),
                 ActiveRoom {
@@ -523,7 +548,7 @@ impl AppHandle {
                 },
             );
             self.network.subscribe_room(info.id.clone()).await;
-            self.announce_room_now(&info, 1).await;
+            self.announce_room_now(&info, member_count).await;
             info!(room_id = %info.id, name = %info.name, "restored room");
         }
         if count > 0 {
@@ -531,16 +556,27 @@ impl AppHandle {
         }
     }
 
-    pub async fn leave_room(&self, room_id: &str) -> Result<()> {
-        // Broadcast a leave message before unsubscribing.
+    /// Leave a room. Returns `true` when the `MemberLeave` notice was
+    /// handed to the network layer, `false` when it couldn't be encoded
+    /// (peers then only notice via the discovered-room TTL). The local
+    /// leave always succeeds regardless.
+    pub async fn leave_room(&self, room_id: &str) -> Result<bool> {
+        // Broadcast a leave notice before unsubscribing.
         let leave_msg = RoomMessage::MemberLeave {
             sender_fingerprint: self.identity.fingerprint().to_string(),
         };
-        if let Ok(bytes) = serde_json::to_vec(&leave_msg) {
-            self.network
-                .publish_room_message(room_id.to_string(), bytes)
-                .await;
-        }
+        let dispatched = match serde_json::to_vec(&leave_msg) {
+            Ok(bytes) => {
+                self.network
+                    .publish_room_message(room_id.to_string(), bytes)
+                    .await;
+                true
+            }
+            Err(e) => {
+                warn!(%e, %room_id, "failed to encode MemberLeave notice");
+                false
+            }
+        };
 
         self.active_rooms.lock().unwrap().remove(room_id);
         self.network.unsubscribe_room(room_id.to_string()).await;
@@ -548,7 +584,7 @@ impl AppHandle {
         let _ = self.app_event_tx.send(AppEvent::RoomLeft {
             room_id: room_id.to_string(),
         });
-        Ok(())
+        Ok(dispatched)
     }
 
     pub async fn send_room_message(&self, room_id: &str, body: &str) -> Result<()> {
@@ -666,13 +702,23 @@ impl AppHandle {
     fn spawn_known_peer_reconnector(&self) {
         let handle = self.clone();
         tokio::spawn(async move {
-            // Brief delay so listeners come up first.
+            // Brief delay so our own listeners come up first.
             tokio::time::sleep(Duration::from_millis(500)).await;
             let known = repo::list_known_peers(&handle.db).unwrap_or_default();
-            for peer in known {
-                if let Err(e) = handle.dial(&peer.address).await {
-                    debug!(%e, addr = %peer.address, "auto-reconnect failed");
-                }
+            // Reconnect each peer from its own task on a staggered, jittered
+            // delay so a long known-peer list doesn't fire a synchronized
+            // burst of dials (and serialized DB writes) all at once.
+            for (i, peer) in known.into_iter().enumerate() {
+                let handle = handle.clone();
+                tokio::spawn(async move {
+                    // Deterministic per-address jitter de-correlates peers
+                    // without pulling an RNG into scope.
+                    let jitter = (peer.address.len() as u64 * 37) % 200;
+                    tokio::time::sleep(Duration::from_millis(150 * i as u64 + jitter)).await;
+                    if let Err(e) = handle.dial(&peer.address).await {
+                        debug!(%e, addr = %peer.address, "auto-reconnect failed");
+                    }
+                });
             }
         });
     }
@@ -818,14 +864,24 @@ impl AppHandle {
             NetworkEvent::PeerDiscovered { peer_id } => {
                 let _ = self.app_event_tx.send(AppEvent::PeerDiscovered { peer_id });
             }
-            NetworkEvent::PeerExpired { .. } => {}
+            NetworkEvent::PeerExpired { peer_id } => {
+                // Drop any tracked dial-connection entry for this peer so
+                // the lobby's online/offline dots stay accurate. mDNS
+                // expiry only gives us a PeerId (no fingerprint), so we
+                // can't touch room membership here — that relies on the
+                // explicit MemberLeave path and the discovered-room TTL.
+                self.connected_dial_addrs
+                    .lock()
+                    .unwrap()
+                    .retain(|_addr, pid| *pid != peer_id);
+                let _ = self.app_event_tx.send(AppEvent::PeerExpired { peer_id });
+            }
             NetworkEvent::ListeningOn { address } => {
                 let _ = self.app_event_tx.send(AppEvent::ListeningOn {
                     address: address.to_string(),
                 });
             }
             NetworkEvent::RoomAnnouncementReceived(ann) => {
-                let our_fp = self.identity.fingerprint();
                 // Cache the salt for join_room
                 if let Some(salt) = &ann.passphrase_salt {
                     ROOM_SALT_CACHE
@@ -842,11 +898,11 @@ impl AppHandle {
                     last_seen: now_unix(),
                     restorable: false,
                 };
-                // Skip our own announcements
-                if ann.creator_fingerprint == our_fp
-                    && self.active_rooms.lock().unwrap().contains_key(&ann.room_id)
-                {
-                    // It's our room — still cache it so others can join, but don't emit.
+                // If we're already in this room, cache the announcement so
+                // others can still discover it through us, but don't emit
+                // RoomDiscovered — it isn't "newly discovered" to us, and
+                // emitting it spuriously re-opens the lobby join prompt.
+                if self.active_rooms.lock().unwrap().contains_key(&ann.room_id) {
                     self.discovered_rooms
                         .lock()
                         .unwrap()
@@ -1221,6 +1277,7 @@ impl AppHandle {
             megolm_session_id: encrypted_meta_opt
                 .as_ref()
                 .map(|m| m.megolm_session_id.clone()),
+            content_hash: encrypted_meta_opt.as_ref().map(|m| m.content_hash.clone()),
             created_at: now_unix(),
         };
         repo::upsert_attachment(&self.db, &attachment)?;
@@ -1288,35 +1345,57 @@ impl AppHandle {
                 attachment.status.as_str()
             )));
         }
-        let cached = self.file_manager.read_cache(file_id)?;
-        let plaintext = if attachment.encrypted {
-            let meta = EncryptedFileMeta {
-                megolm_session_id: attachment
-                    .megolm_session_id
-                    .clone()
-                    .ok_or_else(|| HuddleError::Other("missing megolm_session_id".into()))?,
-                wrapped_key_b64: attachment
-                    .wrapped_key
-                    .clone()
-                    .ok_or_else(|| HuddleError::Other("missing wrapped_key".into()))?,
-                nonce_b64: attachment
-                    .nonce
-                    .clone()
-                    .ok_or_else(|| HuddleError::Other("missing nonce".into()))?,
-            };
-            // For our own sent files we don't have an inbound session
-            // keyed by ourselves; the file_manager cache for the sender
-            // already holds the ciphertext. To open our own attachment
-            // we just open the original saved_path via open_saved (which
-            // doesn't decrypt — the bytes already exist on disk).
-            if attachment.sender_fingerprint == self.identity.fingerprint() {
-                return Err(HuddleError::Other(
-                    "this attachment is your own — use [o] open to open the source file".into(),
-                ));
+        // Our own encrypted attachment: the file_manager cache holds the
+        // ciphertext and we have no inbound Megolm session keyed by
+        // ourselves, so it can't be decrypted back. But `saved_path` still
+        // points at the original plaintext we sent — copy from there.
+        let plaintext = if attachment.encrypted
+            && attachment.sender_fingerprint == self.identity.fingerprint()
+        {
+            match attachment
+                .saved_path
+                .as_deref()
+                .filter(|p| Path::new(p).exists())
+            {
+                Some(src) => std::fs::read(src)?,
+                None => {
+                    return Err(HuddleError::Other(
+                        "your original file has moved or been deleted — it can't be \
+                         recovered from the encrypted cache"
+                            .into(),
+                    ));
+                }
             }
-            self.decrypt_attachment(room_id, &attachment.sender_fingerprint, &cached, &meta)?
         } else {
-            cached
+            let cached = self.file_manager.read_cache(file_id)?;
+            if attachment.encrypted {
+                let meta = EncryptedFileMeta {
+                    megolm_session_id: attachment
+                        .megolm_session_id
+                        .clone()
+                        .ok_or_else(|| HuddleError::Other("missing megolm_session_id".into()))?,
+                    wrapped_key_b64: attachment
+                        .wrapped_key
+                        .clone()
+                        .ok_or_else(|| HuddleError::Other("missing wrapped_key".into()))?,
+                    nonce_b64: attachment
+                        .nonce
+                        .clone()
+                        .ok_or_else(|| HuddleError::Other("missing nonce".into()))?,
+                    content_hash: attachment
+                        .content_hash
+                        .clone()
+                        .ok_or_else(|| HuddleError::Other("missing content_hash".into()))?,
+                };
+                self.decrypt_attachment(
+                    room_id,
+                    &attachment.sender_fingerprint,
+                    &cached,
+                    &meta,
+                )?
+            } else {
+                cached
+            }
         };
         let saved = self.file_manager.write_to_downloads(&attachment.name, &plaintext)?;
         repo::update_attachment_paths(
@@ -1477,6 +1556,7 @@ impl AppHandle {
                 self.db.clone(),
                 room_id.to_string(),
                 self.identity.fingerprint().to_string(),
+                self.session_persist_key,
             )?;
             room.crypto = Some(new_crypto);
             room.passphrase_key = Some(new_key);
@@ -1484,10 +1564,11 @@ impl AppHandle {
             room.info.clone()
         };
 
-        // Persist the new salt on the stored row.
-        repo::insert_room(&self.db, &info)?;
-
-        // Broadcast the rotation signal.
+        // Broadcast before persisting: peers learn about the rotation even
+        // if we crash before the DB write lands, and our own restore path
+        // can recover from the persisted Megolm session plus the announced
+        // salt. Persisting first would risk a DB row that's ahead of what
+        // any peer knows.
         let rot = RoomMessage::RotateRoomKey {
             rotator_fingerprint: self.identity.fingerprint().to_string(),
             new_salt: new_salt.to_vec(),
@@ -1497,11 +1578,13 @@ impl AppHandle {
                 .publish_room_message(room_id.to_string(), bytes)
                 .await;
         }
-
         // Re-announce ourselves with the new wrapped session key.
         if let Err(e) = self.broadcast_member_announce(room_id).await {
             warn!(%e, "rotate: broadcast announce failed");
         }
+
+        // Now persist the new salt on the stored row.
+        repo::insert_room(&self.db, &info)?;
         Ok(())
     }
 
@@ -1524,8 +1607,9 @@ impl AppHandle {
             room.info.passphrase_salt = Some(new_salt.to_vec());
             room.info.clone()
         };
-        repo::insert_room(&self.db, &info)?;
-        // Ask the rotator (and anyone) to re-share their session key.
+        // Ask the rotator (and anyone) to re-share their session key
+        // before persisting, so a crash before the DB write still leaves
+        // peers aware we've moved to the new salt.
         let req = RoomMessage::SessionKeyRequest {
             requester_fingerprint: self.identity.fingerprint().to_string(),
         };
@@ -1534,6 +1618,7 @@ impl AppHandle {
                 .publish_room_message(room_id.to_string(), bytes)
                 .await;
         }
+        repo::insert_room(&self.db, &info)?;
         Ok(())
     }
 
@@ -1571,12 +1656,16 @@ impl AppHandle {
             wrapped_key: encrypted_meta.as_ref().map(|m| m.wrapped_key_b64.clone()),
             nonce: encrypted_meta.as_ref().map(|m| m.nonce_b64.clone()),
             megolm_session_id: encrypted_meta.as_ref().map(|m| m.megolm_session_id.clone()),
+            content_hash: encrypted_meta.as_ref().map(|m| m.content_hash.clone()),
             created_at: now_unix(),
         };
         if let Err(e) = repo::upsert_attachment(&self.db, &attachment) {
             warn!(%e, "upsert attachment");
             return;
         }
+        // If chunks started arriving before this offer, the transfer's
+        // size denominator was a guess — correct it with the real size.
+        self.file_manager.set_expected_size(&file_id, size_bytes);
         let _ = self.app_event_tx.send(AppEvent::FileOffered {
             room_id: room_id.to_string(),
             file_id,
@@ -1602,12 +1691,25 @@ impl AppHandle {
                 return;
             }
         };
-        // Pull the announced size from our stored offer.
-        let expected_size = repo::get_attachment(&self.db, room_id, &file_id)
-            .ok()
-            .flatten()
-            .map(|a| a.size_bytes as u64)
-            .unwrap_or(crate::files::MAX_FILE_SIZE);
+        // Pull the announced size + lifecycle state from our stored offer.
+        // A terminal-state row means the user cancelled or the transfer
+        // already failed — late chunks must not resurrect it.
+        let expected_size = match repo::get_attachment(&self.db, room_id, &file_id) {
+            Ok(Some(a)) => {
+                if matches!(
+                    a.status,
+                    AttachmentStatus::Cancelled | AttachmentStatus::Failed
+                ) {
+                    return;
+                }
+                a.size_bytes as u64
+            }
+            Ok(None) => crate::files::MAX_FILE_SIZE,
+            Err(e) => {
+                warn!(%e, "get attachment for chunk");
+                crate::files::MAX_FILE_SIZE
+            }
+        };
 
         let result = self.file_manager.accept_chunk(
             &file_id,
@@ -1679,10 +1781,18 @@ impl AppHandle {
     /// Emit MentionReceived if `body` contains either our full
     /// fingerprint or its short form (first hex group).
     fn maybe_emit_mention(&self, room_id: &str, body: &str) {
-        let full = self.identity.fingerprint();
-        let short = full.split('-').next().unwrap_or(full);
+        let full = self.identity.fingerprint().to_lowercase();
+        // First hex group, e.g. "a3b1" of "a3b1-c2d4-...".
+        let short: &str = full.split('-').next().unwrap_or(&full);
         let lower = body.to_lowercase();
-        if lower.contains(&full.to_lowercase()) || lower.contains(&short.to_lowercase()) {
+        // The full fingerprint anywhere counts; the short form counts only
+        // as a standalone hex token, so it can't match an arbitrary
+        // substring of an unrelated hash, URL, or word.
+        let hit = lower.contains(full.as_str())
+            || lower
+                .split(|c: char| !c.is_ascii_hexdigit())
+                .any(|tok| tok == short);
+        if hit {
             let _ = self.app_event_tx.send(AppEvent::MentionReceived {
                 room_id: room_id.to_string(),
                 body: body.to_string(),

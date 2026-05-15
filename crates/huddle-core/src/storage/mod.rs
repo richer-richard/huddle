@@ -31,22 +31,20 @@ pub fn open_db_in_memory() -> Result<Db> {
     Ok(Arc::new(Mutex::new(conn)))
 }
 
+/// Apply pending schema migrations, tracked by `PRAGMA user_version`.
+/// Each entry in `schema::MIGRATIONS` runs exactly once, in order; the
+/// version cursor advances after each so a real SQL error aborts startup
+/// instead of being silently swallowed. Migrations are therefore
+/// append-only — never reorder or delete an existing entry.
 fn run_migrations(conn: &Connection) -> Result<()> {
-    for migration in schema::MIGRATIONS {
-        if let Err(e) = conn.execute_batch(migration) {
-            let msg = e.to_string().to_lowercase();
-            // Tolerate idempotent additive migrations on existing DBs
-            // (ALTER TABLE ... ADD COLUMN runs every launch but errors
-            // on the second run; CREATE INDEX IF NOT EXISTS already
-            // handles itself).
-            if msg.contains("duplicate column")
-                || msg.contains("already exists")
-                || msg.contains("duplicate column name")
-            {
-                continue;
-            }
-            return Err(e.into());
+    let applied: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    for (idx, migration) in schema::MIGRATIONS.iter().enumerate() {
+        if (idx as i64) < applied {
+            continue;
         }
+        conn.execute_batch(migration)?;
+        // `PRAGMA user_version` does not accept bound parameters.
+        conn.execute_batch(&format!("PRAGMA user_version = {};", idx + 1))?;
     }
     Ok(())
 }

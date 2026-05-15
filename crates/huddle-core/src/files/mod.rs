@@ -21,10 +21,13 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{HuddleError, Result};
 
-/// Bytes per chunk on the wire. Picked to fit comfortably under
-/// gossipsub's per-message budget even after base64 expansion (64 KiB
-/// raw → ~88 KiB base64).
-pub const CHUNK_SIZE: usize = 64 * 1024;
+/// Bytes per chunk on the wire. A `FileChunk` is base64-encoded inside a
+/// JSON envelope, so the raw chunk must leave room for ~34% base64
+/// expansion plus the envelope and still fit under gossipsub's transmit
+/// limit. 40 KiB raw → ~55 KiB on the wire, comfortably under even the
+/// 64 KiB gossipsub default (and well under the 256 KiB ceiling huddle
+/// sets explicitly — see `network::start_network_with`).
+pub const CHUNK_SIZE: usize = 40 * 1024;
 
 /// Hard cap on a single offer for Phase 2. Larger files defer to a
 /// dedicated libp2p stream protocol (see plan.md Phase 3 notes).
@@ -51,6 +54,11 @@ pub struct CompletedFile {
 
 struct IncomingTransfer {
     expected_total: u32,
+    /// Announced total file size. Seeded from the caller's best guess
+    /// (the offer's `size_bytes`, or `MAX_FILE_SIZE` when chunks arrive
+    /// before the offer) and corrected by `set_expected_size` once the
+    /// offer lands. Drives the progress bar's denominator.
+    expected_size: u64,
     chunks: HashMap<u32, Vec<u8>>,
     bytes_received: u64,
 }
@@ -169,6 +177,7 @@ impl FileManager {
         let mut map = self.incoming.lock().unwrap();
         let entry = map.entry(file_id.to_string()).or_insert(IncomingTransfer {
             expected_total: total_chunks,
+            expected_size,
             chunks: HashMap::new(),
             bytes_received: 0,
         });
@@ -224,11 +233,22 @@ impl FileManager {
         self.incoming.lock().unwrap().remove(file_id);
     }
 
-    /// Bytes received so far for an in-progress transfer.
+    /// Record the authoritative total size for an in-progress transfer —
+    /// called when a FileOffer arrives after chunks have already started,
+    /// so the progress denominator stops being a guess. No-op when there
+    /// is no active transfer for `file_id`.
+    pub fn set_expected_size(&self, file_id: &str, size: u64) {
+        if let Some(e) = self.incoming.lock().unwrap().get_mut(file_id) {
+            e.expected_size = size;
+        }
+    }
+
+    /// Bytes received so far and the expected total, for an in-progress
+    /// transfer.
     pub fn progress(&self, file_id: &str) -> Option<(u64, u64)> {
         let map = self.incoming.lock().unwrap();
         let e = map.get(file_id)?;
-        Some((e.bytes_received, 0)) // total not known until offer arrives
+        Some((e.bytes_received, e.expected_size))
     }
 
     /// Copy `bytes` into the platform's Downloads folder under

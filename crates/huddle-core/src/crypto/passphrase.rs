@@ -23,9 +23,12 @@ pub fn random_salt() -> [u8; SALT_LEN] {
     salt
 }
 
-/// Derive a 32-byte symmetric key from a passphrase and salt using Argon2id.
+/// Derive a 32-byte symmetric key from a passphrase and salt using
+/// Argon2id. Parameters follow the strong RFC 9106 / OWASP profile
+/// (64 MiB memory, 3 iterations, 4 lanes) and must stay in sync with the
+/// master-key KDF in `storage::keychain::derive_master_key`.
 pub fn derive_key(passphrase: &str, salt: &[u8]) -> Result<[u8; KEY_LEN]> {
-    let params = Params::new(19_456, 2, 1, Some(KEY_LEN))
+    let params = Params::new(65_536, 3, 4, Some(KEY_LEN))
         .map_err(|e| HuddleError::Session(format!("argon2 params: {e}")))?;
     let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut out = [0u8; KEY_LEN];

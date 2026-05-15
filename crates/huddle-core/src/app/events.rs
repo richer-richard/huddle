@@ -52,6 +52,9 @@ pub enum AppEvent {
     ListeningOn { address: String },
     /// A peer was discovered on the LAN.
     PeerDiscovered { peer_id: PeerId },
+    /// A peer's mDNS presence expired — they left the LAN or stopped
+    /// announcing. The lobby refreshes its online/offline indicators.
+    PeerExpired { peer_id: PeerId },
     /// We've fired a dial command — useful for the UI to show "dialing...".
     Dialing { address: String },
     /// A user-initiated dial completed successfully.

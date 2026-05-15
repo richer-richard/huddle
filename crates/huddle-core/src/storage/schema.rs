@@ -26,13 +26,15 @@ pub const MIGRATIONS: &[&str] = &[
         created_at INTEGER NOT NULL,
         PRIMARY KEY (room_id, sender_fingerprint, session_id)
     );",
-    // Known members of each room (libp2p peer_id + their fingerprint)
+    // Known members of each room, keyed by their fingerprint (the stable
+    // cryptographic identity). peer_id is informational and often unknown
+    // at the app layer, so it is not part of the primary key.
     "CREATE TABLE IF NOT EXISTS room_members (
         room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
-        peer_id TEXT NOT NULL,
+        peer_id TEXT NOT NULL DEFAULT '',
         fingerprint TEXT NOT NULL,
         last_seen INTEGER,
-        PRIMARY KEY (room_id, peer_id)
+        PRIMARY KEY (room_id, fingerprint)
     );",
     "CREATE TABLE IF NOT EXISTS room_messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -73,12 +75,11 @@ pub const MIGRATIONS: &[&str] = &[
         wrapped_key TEXT,
         nonce TEXT,
         megolm_session_id TEXT,
+        content_hash TEXT,
         created_at INTEGER NOT NULL,
         UNIQUE(room_id, file_id)
     );",
     "CREATE INDEX IF NOT EXISTS idx_room_attachments_room ON room_attachments(room_id);",
-    // Tolerated by the migration runner if the column already exists.
-    "ALTER TABLE room_attachments ADD COLUMN megolm_session_id TEXT;",
     // Phase 5: contact verification — user marks a member's fingerprint
     // as verified after comparing it out-of-band. Default 0 (unverified).
     "ALTER TABLE room_members ADD COLUMN verified INTEGER NOT NULL DEFAULT 0;",

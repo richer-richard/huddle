@@ -23,6 +23,10 @@ pub struct EncryptedFileMeta {
     pub megolm_session_id: String,
     pub wrapped_key_b64: String,
     pub nonce_b64: String,
+    /// SHA-256 of the plaintext, hex-encoded. Bound as AEAD associated
+    /// data so the (key, nonce, ciphertext) triple can't be replayed
+    /// against different content, and verified after decryption.
+    pub content_hash: String,
 }
 
 /// Encrypt `plaintext` with a fresh ChaCha20-Poly1305 key, then Megolm-
@@ -38,10 +42,21 @@ pub fn encrypt_file(
     rand::thread_rng().fill_bytes(&mut file_key);
     rand::thread_rng().fill_bytes(&mut nonce_bytes);
 
+    // Bind the ciphertext to a commitment of its plaintext via AEAD
+    // associated data, so a room member can't replay this (key, nonce,
+    // ciphertext) triple under a different file_id / name.
+    let content_hash = super::sha256_hex(plaintext);
+
     let cipher = ChaCha20Poly1305::new(Key::from_slice(&file_key));
     let nonce = Nonce::from_slice(&nonce_bytes);
     let ciphertext = cipher
-        .encrypt(nonce, plaintext)
+        .encrypt(
+            nonce,
+            chacha20poly1305::aead::Payload {
+                msg: plaintext,
+                aad: content_hash.as_bytes(),
+            },
+        )
         .map_err(|e| HuddleError::Other(format!("chacha20 encrypt: {e}")))?;
 
     let (session_id, wrapped) = room_crypto.encrypt(&file_key)?;
@@ -49,6 +64,7 @@ pub fn encrypt_file(
         megolm_session_id: session_id,
         wrapped_key_b64: B64.encode(wrapped),
         nonce_b64: B64.encode(nonce_bytes),
+        content_hash,
     };
     Ok((ciphertext, meta))
 }
@@ -82,9 +98,24 @@ pub fn decrypt_file(
     }
     let cipher = ChaCha20Poly1305::new(Key::from_slice(&file_key_bytes));
     let nonce = Nonce::from_slice(&nonce_bytes);
-    cipher
-        .decrypt(nonce, ciphertext)
-        .map_err(|e| HuddleError::Other(format!("chacha20 decrypt: {e}")))
+    let plaintext = cipher
+        .decrypt(
+            nonce,
+            chacha20poly1305::aead::Payload {
+                msg: ciphertext,
+                aad: meta.content_hash.as_bytes(),
+            },
+        )
+        .map_err(|e| HuddleError::Other(format!("chacha20 decrypt: {e}")))?;
+    // The AEAD tag already binds the ciphertext to the content_hash AAD;
+    // verifying the hash explicitly also catches a sender who announced a
+    // content_hash that doesn't match what they actually encrypted.
+    if super::sha256_hex(&plaintext) != meta.content_hash {
+        return Err(HuddleError::Other(
+            "decrypted file content does not match its announced hash".into(),
+        ));
+    }
+    Ok(plaintext)
 }
 
 #[cfg(test)]
@@ -114,9 +145,11 @@ mod tests {
         insert_room(&db_b, &make_room(room_id)).unwrap();
 
         let mut alice =
-            RoomCrypto::new_for_room(db_a.clone(), room_id.into(), "alice-fp".into()).unwrap();
+            RoomCrypto::new_for_room(db_a.clone(), room_id.into(), "alice-fp".into(), [0u8; 32])
+                .unwrap();
         let mut bob =
-            RoomCrypto::new_for_room(db_b.clone(), room_id.into(), "bob-fp".into()).unwrap();
+            RoomCrypto::new_for_room(db_b.clone(), room_id.into(), "bob-fp".into(), [0u8; 32])
+                .unwrap();
         // Bob must learn Alice's outbound session before decrypting.
         bob.add_inbound_session("alice-fp", &alice.our_session_key_b64())
             .unwrap();
@@ -138,9 +171,11 @@ mod tests {
         insert_room(&db_b, &make_room(room_id)).unwrap();
 
         let mut alice =
-            RoomCrypto::new_for_room(db_a.clone(), room_id.into(), "alice-fp".into()).unwrap();
+            RoomCrypto::new_for_room(db_a.clone(), room_id.into(), "alice-fp".into(), [0u8; 32])
+                .unwrap();
         let mut bob =
-            RoomCrypto::new_for_room(db_b.clone(), room_id.into(), "bob-fp".into()).unwrap();
+            RoomCrypto::new_for_room(db_b.clone(), room_id.into(), "bob-fp".into(), [0u8; 32])
+                .unwrap();
         bob.add_inbound_session("alice-fp", &alice.our_session_key_b64())
             .unwrap();
 
@@ -159,9 +194,11 @@ mod tests {
         insert_room(&db_b, &make_room(room_id)).unwrap();
 
         let mut alice =
-            RoomCrypto::new_for_room(db_a.clone(), room_id.into(), "alice-fp".into()).unwrap();
+            RoomCrypto::new_for_room(db_a.clone(), room_id.into(), "alice-fp".into(), [0u8; 32])
+                .unwrap();
         let mut bob =
-            RoomCrypto::new_for_room(db_b.clone(), room_id.into(), "bob-fp".into()).unwrap();
+            RoomCrypto::new_for_room(db_b.clone(), room_id.into(), "bob-fp".into(), [0u8; 32])
+                .unwrap();
         bob.add_inbound_session("alice-fp", &alice.our_session_key_b64())
             .unwrap();
 

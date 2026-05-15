@@ -261,6 +261,10 @@ pub struct TuiApp {
     pub mode: NetworkMode,
     pub screen: Screen,
     pub modal: Modal,
+    /// An async-event modal (an error, or a rotation request) that
+    /// arrived while the user was mid-interaction with another modal.
+    /// Surfaced once the foreground modal is dismissed.
+    pub pending_modal: Option<Modal>,
     pub discovered_rooms: Vec<DiscoveredRoom>,
     pub known_peers: Vec<KnownPeerStatus>,
     pub lobby_focus: LobbyFocus,
@@ -288,6 +292,7 @@ impl TuiApp {
             mode,
             screen: Screen::Lobby,
             modal: Modal::None,
+            pending_modal: None,
             discovered_rooms: Vec::new(),
             known_peers,
             lobby_focus,
@@ -366,6 +371,19 @@ impl TuiApp {
             } else if room.focused_card_idx >= room.attachments.len() {
                 room.focused_card_idx = room.attachments.len() - 1;
             }
+        }
+    }
+
+    /// Show `m` now if the user isn't mid-interaction with a modal,
+    /// otherwise queue it behind the current one. Dismissible modals
+    /// (None / Error / Info) are pure output and safe to displace; input
+    /// modals hold unsaved user state and must not be clobbered by an
+    /// async event.
+    fn replace_modal_if_idle(&mut self, m: Modal) {
+        if matches!(self.modal, Modal::None | Modal::Error(_) | Modal::Info(_)) {
+            self.modal = m;
+        } else {
+            self.pending_modal = Some(m);
         }
     }
 
@@ -479,6 +497,9 @@ impl TuiApp {
                 }
             }
             AppEvent::PeerDiscovered { .. } => {}
+            AppEvent::PeerExpired { .. } => {
+                self.refresh_known_peers();
+            }
             AppEvent::Dialing { address } => {
                 self.set_status(format!("dialing {}…", address));
                 if let Modal::DialPeer(s) = &mut self.modal {
@@ -501,7 +522,7 @@ impl TuiApp {
                 self.refresh_known_peers();
             }
             AppEvent::Error { description } => {
-                self.modal = Modal::Error(description);
+                self.replace_modal_if_idle(Modal::Error(description));
             }
             AppEvent::FileOffered {
                 room_id,
@@ -556,12 +577,12 @@ impl TuiApp {
                 rotator_fingerprint,
                 new_salt,
             } => {
-                self.modal = Modal::AcceptRotation(AcceptRotationState {
+                self.replace_modal_if_idle(Modal::AcceptRotation(AcceptRotationState {
                     room_id,
                     rotator_fingerprint,
                     new_salt,
                     passphrase: String::new(),
-                });
+                }));
             }
         }
     }
@@ -623,8 +644,36 @@ fn open_existing_room_tab(app: &mut TuiApp, room_id: &str) {
     app.screen = Screen::InRoom;
 }
 
+/// Restores the terminal on drop — raw mode off, alternate screen left,
+/// mouse capture disabled. Holding one of these guarantees cleanup on
+/// every exit path (normal return, early `?`, or a panic unwind), not
+/// just the happy path.
+struct TerminalGuard;
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+    }
+}
+
+/// Install a panic hook that restores the terminal *before* the default
+/// hook prints the panic message. Without this, a panic inside the TUI
+/// prints into the alternate screen, which is then torn down — losing the
+/// message. Call once at startup.
+pub fn install_panic_hook() {
+    let original = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+        original(info);
+    }));
+}
+
 pub async fn run_tui(handle: AppHandle) -> Result<()> {
     enable_raw_mode()?;
+    // From here on, every exit path restores the terminal.
+    let _guard = TerminalGuard;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
@@ -635,12 +684,6 @@ pub async fn run_tui(handle: AppHandle) -> Result<()> {
 
     let result = main_loop(&mut terminal, &mut app, &mut event_rx).await;
 
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
     app.handle.shutdown().await;
     result
 }
@@ -669,6 +712,7 @@ pub fn prompt_master_passphrase(is_new: bool) -> Result<AuthPrompt> {
     use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
 
     enable_raw_mode()?;
+    let _guard = TerminalGuard;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
@@ -891,8 +935,6 @@ pub fn prompt_master_passphrase(is_new: bool) -> Result<AuthPrompt> {
         }
     }
 
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     Ok(outcome.unwrap_or(AuthPrompt {
         passphrase: String::new(),
         username: None,
@@ -906,6 +948,7 @@ pub fn show_welcome() -> Result<bool> {
     use crossterm::event::{KeyCode, KeyModifiers};
 
     enable_raw_mode()?;
+    let _guard = TerminalGuard;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
@@ -927,8 +970,6 @@ pub fn show_welcome() -> Result<bool> {
             }
         }
     };
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     Ok(outcome)
 }
 
@@ -981,6 +1022,15 @@ async fn main_loop(
                     }
                 }
                 _ => {}
+            }
+        }
+
+        // An async-event modal queued while the user was mid-interaction
+        // (see `replace_modal_if_idle`) surfaces once the foreground modal
+        // is dismissed — by any path, not just `Action::CloseModal`.
+        if matches!(app.modal, Modal::None) {
+            if let Some(m) = app.pending_modal.take() {
+                app.modal = m;
             }
         }
     }
@@ -1121,9 +1171,11 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
                     app.screen = Screen::InRoom;
                     return Ok(false);
                 }
-                // Auto-restored non-encrypted room: we're already subscribed
-                // in active_rooms, just need to open a tab without re-joining.
-                if !room.encrypted && app.handle.active_room_info(&room.room_id).is_some() {
+                // Already an active room (auto-restored, or joined earlier
+                // this session) — open a tab without re-running the join
+                // flow. Applies to encrypted rooms too: we already hold the
+                // passphrase-derived key, so re-prompting would be wrong.
+                if app.handle.active_room_info(&room.room_id).is_some() {
                     open_existing_room_tab(app, &room.room_id);
                     return Ok(false);
                 }
@@ -1161,6 +1213,11 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
                 s.encrypted = !s.encrypted;
                 if !s.encrypted {
                     s.passphrase.clear();
+                    // The passphrase field is hidden when encryption is
+                    // off — don't strand focus on an invisible field.
+                    if s.focus == StartField::Passphrase {
+                        s.focus = StartField::Encrypted;
+                    }
                 }
             }
             Ok(false)
@@ -1270,8 +1327,12 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
         Action::LeaveRoom => {
             if let Some(room) = app.active_room() {
                 let id = room.room_id.clone();
-                if let Err(e) = app.handle.leave_room(&id).await {
-                    app.modal = Modal::Error(format!("leave failed: {e}"));
+                match app.handle.leave_room(&id).await {
+                    Ok(true) => {}
+                    Ok(false) => app.set_status(
+                        "left locally — peers may still see you until they time you out",
+                    ),
+                    Err(e) => app.modal = Modal::Error(format!("leave failed: {e}")),
                 }
             }
             Ok(false)

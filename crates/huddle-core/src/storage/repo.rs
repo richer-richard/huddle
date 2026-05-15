@@ -107,11 +107,21 @@ pub fn derive_room_id(creator_fp: &str, name: &str, created_at: i64) -> String {
     hex::encode(&hasher.finalize()[..16])
 }
 
+/// Insert a room, or update it in place on id collision. Uses a real
+/// UPSERT (not `INSERT OR REPLACE`) so no implicit DELETE fires — the
+/// `ON DELETE CASCADE` on room_megolm_sessions / room_members /
+/// room_messages / room_attachments must never be triggered here.
+/// `created_at`, `creator_fingerprint`, and `encrypted` are immutable
+/// once set and are deliberately not updated on conflict.
 pub fn insert_room(db: &Db, room: &StoredRoom) -> Result<()> {
     let conn = db.lock().unwrap();
     conn.execute(
-        "INSERT OR REPLACE INTO rooms (id, name, creator_fingerprint, encrypted, passphrase_salt, created_at, last_active)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO rooms (id, name, creator_fingerprint, encrypted, passphrase_salt, created_at, last_active)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            passphrase_salt = excluded.passphrase_salt,
+            last_active = excluded.last_active",
         params![
             room.id,
             room.name,
@@ -206,14 +216,23 @@ pub struct StoredRoomMember {
     pub verified: bool,
 }
 
+/// Insert a member, or update in place on (room_id, fingerprint) collision.
+/// `verified` is set only on first insert and is intentionally absent from
+/// the conflict-update clause: a re-announcement can never silently reset
+/// a member's verified flag, and a genuinely new fingerprint is a new
+/// (unverified) row. `peer_id` is only overwritten when the incoming value
+/// is non-empty, since the app layer often doesn't know it.
 pub fn upsert_room_member(db: &Db, member: &StoredRoomMember) -> Result<()> {
     let conn = db.lock().unwrap();
     conn.execute(
         "INSERT INTO room_members (room_id, peer_id, fingerprint, last_seen, verified)
          VALUES (?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT(room_id, peer_id) DO UPDATE SET
-            fingerprint = excluded.fingerprint,
-            last_seen = excluded.last_seen",
+         ON CONFLICT(room_id, fingerprint) DO UPDATE SET
+            last_seen = excluded.last_seen,
+            peer_id = CASE
+                WHEN excluded.peer_id != '' THEN excluded.peer_id
+                ELSE room_members.peer_id
+            END",
         params![
             member.room_id,
             member.peer_id,
@@ -242,11 +261,11 @@ pub fn list_room_members(db: &Db, room_id: &str) -> Result<Vec<StoredRoomMember>
     Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
 }
 
-pub fn remove_room_member(db: &Db, room_id: &str, peer_id: &str) -> Result<()> {
+pub fn remove_room_member(db: &Db, room_id: &str, fingerprint: &str) -> Result<()> {
     let conn = db.lock().unwrap();
     conn.execute(
-        "DELETE FROM room_members WHERE room_id = ?1 AND peer_id = ?2",
-        params![room_id, peer_id],
+        "DELETE FROM room_members WHERE room_id = ?1 AND fingerprint = ?2",
+        params![room_id, fingerprint],
     )?;
     Ok(())
 }
@@ -361,19 +380,26 @@ pub fn insert_room_message(
     Ok(conn.last_insert_rowid())
 }
 
-/// LIKE-based message search within a room. Case-insensitive.
+/// LIKE-based message search within a room. Case-insensitive. The query
+/// is treated as a literal substring — `%`, `_`, and `\` are escaped so
+/// they cannot act as LIKE wildcards.
 pub fn search_room_messages(
     db: &Db,
     room_id: &str,
     query: &str,
     limit: i64,
 ) -> Result<Vec<StoredRoomMessage>> {
-    let pattern = format!("%{}%", query);
+    // Escape `\` first so the escapes added for `%` / `_` aren't doubled.
+    let escaped = query
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    let pattern = format!("%{}%", escaped);
     let conn = db.lock().unwrap();
     let mut stmt = conn.prepare(
         "SELECT id, room_id, sender_fingerprint, direction, body, sent_at
          FROM room_messages
-         WHERE room_id = ?1 AND body LIKE ?2 COLLATE NOCASE
+         WHERE room_id = ?1 AND body LIKE ?2 ESCAPE '\\' COLLATE NOCASE
          ORDER BY sent_at DESC LIMIT ?3",
     )?;
     let rows = stmt.query_map(params![room_id, pattern, limit], |row| {
@@ -524,6 +550,10 @@ pub struct StoredAttachment {
     pub wrapped_key: Option<String>,
     pub nonce: Option<String>,
     pub megolm_session_id: Option<String>,
+    /// SHA-256 of the plaintext (hex), for encrypted attachments. Bound
+    /// as AEAD associated data so the wrapped key + nonce + ciphertext
+    /// can't be replayed against different content.
+    pub content_hash: Option<String>,
     pub created_at: i64,
 }
 
@@ -534,8 +564,9 @@ pub fn upsert_attachment(db: &Db, a: &StoredAttachment) -> Result<()> {
         "INSERT INTO room_attachments
             (room_id, message_id, sender_fingerprint, file_id, name, mime,
              size_bytes, status, cache_path, saved_path, error,
-             encrypted, wrapped_key, nonce, megolm_session_id, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+             encrypted, wrapped_key, nonce, megolm_session_id, created_at,
+             content_hash)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
          ON CONFLICT(room_id, file_id) DO UPDATE SET
             name = excluded.name,
             mime = excluded.mime,
@@ -552,7 +583,8 @@ pub fn upsert_attachment(db: &Db, a: &StoredAttachment) -> Result<()> {
             error      = excluded.error,
             wrapped_key = COALESCE(excluded.wrapped_key, room_attachments.wrapped_key),
             nonce       = COALESCE(excluded.nonce, room_attachments.nonce),
-            megolm_session_id = COALESCE(excluded.megolm_session_id, room_attachments.megolm_session_id)",
+            megolm_session_id = COALESCE(excluded.megolm_session_id, room_attachments.megolm_session_id),
+            content_hash = COALESCE(excluded.content_hash, room_attachments.content_hash)",
         params![
             a.room_id,
             a.message_id,
@@ -570,6 +602,7 @@ pub fn upsert_attachment(db: &Db, a: &StoredAttachment) -> Result<()> {
             a.nonce,
             a.megolm_session_id,
             a.created_at,
+            a.content_hash,
         ],
     )?;
     Ok(())
@@ -596,6 +629,7 @@ fn row_to_attachment(row: &rusqlite::Row) -> rusqlite::Result<StoredAttachment> 
         nonce: row.get(14)?,
         megolm_session_id: row.get(15)?,
         created_at: row.get(16)?,
+        content_hash: row.get(17)?,
     })
 }
 
@@ -604,7 +638,8 @@ pub fn get_attachment(db: &Db, room_id: &str, file_id: &str) -> Result<Option<St
     let mut stmt = conn.prepare(
         "SELECT id, room_id, message_id, sender_fingerprint, file_id, name, mime,
                 size_bytes, status, cache_path, saved_path, error,
-                encrypted, wrapped_key, nonce, megolm_session_id, created_at
+                encrypted, wrapped_key, nonce, megolm_session_id, created_at,
+                content_hash
          FROM room_attachments WHERE room_id = ?1 AND file_id = ?2",
     )?;
     let mut rows = stmt.query_map(params![room_id, file_id], row_to_attachment)?;
@@ -619,7 +654,8 @@ pub fn list_room_attachments(db: &Db, room_id: &str) -> Result<Vec<StoredAttachm
     let mut stmt = conn.prepare(
         "SELECT id, room_id, message_id, sender_fingerprint, file_id, name, mime,
                 size_bytes, status, cache_path, saved_path, error,
-                encrypted, wrapped_key, nonce, megolm_session_id, created_at
+                encrypted, wrapped_key, nonce, megolm_session_id, created_at,
+                content_hash
          FROM room_attachments WHERE room_id = ?1 ORDER BY created_at ASC",
     )?;
     let rows = stmt.query_map(params![room_id], row_to_attachment)?;
@@ -823,6 +859,7 @@ mod tests {
             wrapped_key: None,
             nonce: None,
             megolm_session_id: None,
+            content_hash: None,
             created_at: 100,
         }
     }
@@ -936,5 +973,23 @@ mod tests {
         assert_eq!(msgs[0].body, "hi");
         assert_eq!(msgs[1].body, "hello");
         assert_eq!(msgs[2].body, "bye");
+    }
+
+    #[test]
+    fn search_escapes_like_wildcards() {
+        let db = open_db_in_memory().unwrap();
+        let room = make_room("r");
+        insert_room(&db, &room).unwrap();
+        insert_room_message(&db, &room.id, "fp", "in", "literal percent: 50%", 100).unwrap();
+        insert_room_message(&db, &room.id, "fp", "in", "no special chars here", 101).unwrap();
+
+        // "%" must match a literal "%", not act as a wildcard-matches-all.
+        let pct = search_room_messages(&db, &room.id, "%", 10).unwrap();
+        assert_eq!(pct.len(), 1);
+        assert!(pct[0].body.contains("50%"));
+
+        // "_" likewise must not match an arbitrary single character.
+        let underscore = search_room_messages(&db, &room.id, "_", 10).unwrap();
+        assert!(underscore.is_empty());
     }
 }

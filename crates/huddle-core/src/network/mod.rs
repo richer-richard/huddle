@@ -160,6 +160,9 @@ pub fn start_network_with(
             let gossipsub_config = gossipsub::ConfigBuilder::default()
                 .heartbeat_interval(Duration::from_secs(1))
                 .validation_mode(gossipsub::ValidationMode::Strict)
+                // Default is 64 KiB. Raise it so base64-encoded file
+                // chunks (see files::CHUNK_SIZE) keep ample headroom.
+                .max_transmit_size(256 * 1024)
                 .build()
                 .expect("valid gossipsub config");
 
@@ -388,7 +391,15 @@ impl NetworkTask {
             NetworkCommand::PublishRoomMessage { room_id, payload } => {
                 let topic = gossipsub::IdentTopic::new(room_topic(&room_id));
                 if let Err(e) = self.swarm.behaviour_mut().gossipsub.publish(topic, payload) {
-                    debug!(%e, %room_id, "publish room message failed (no peers yet?)");
+                    // No subscribed peers is expected before the mesh
+                    // forms; anything else (MessageTooLarge, full queues)
+                    // is a real bug worth surfacing.
+                    match e {
+                        gossipsub::PublishError::NoPeersSubscribedToTopic => {
+                            debug!(%room_id, "publish skipped: no peers subscribed to topic yet");
+                        }
+                        e => warn!(%e, %room_id, "publish room message failed"),
+                    }
                 }
             }
             NetworkCommand::AnnounceRoom(ann) => {

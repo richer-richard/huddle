@@ -59,6 +59,10 @@ async fn main() -> Result<()> {
         .with_ansi(false)
         .init();
 
+    // Restore the terminal on panic before the message prints, so a crash
+    // inside the TUI doesn't leave the shell in raw mode / alt screen.
+    app::install_panic_hook();
+
     let mode = cli.mode.unwrap_or(NetworkMode::Mdns);
 
     // Skip the welcome card if a mode was given explicitly — power users
@@ -77,7 +81,22 @@ async fn main() -> Result<()> {
         (None, None)
     } else {
         let salt_path = keychain::keychain_salt_path();
-        let is_new = !salt_path.exists();
+        let salt_exists = salt_path.exists();
+        // A database with no keychain salt was created by a previous
+        // `--no-master-passphrase` run and is unencrypted. Taking the
+        // normal (encrypted) path here would derive a fresh key, fail to
+        // unlock that DB, and trap the user behind a cryptic SQLCipher
+        // error. Refuse early with actionable guidance instead.
+        if !salt_exists && huddle_core::config::db_path().exists() {
+            anyhow::bail!(
+                "found an existing database with no keychain salt — it was \
+                 created with --no-master-passphrase and is unencrypted. \
+                 Re-run with --no-master-passphrase, or move {} aside to \
+                 start fresh.",
+                huddle_core::config::db_path().display()
+            );
+        }
+        let is_new = !salt_exists;
         let prompt = app::prompt_master_passphrase(is_new)?;
         if prompt.passphrase.is_empty() {
             return Ok(());

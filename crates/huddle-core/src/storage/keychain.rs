@@ -12,8 +12,10 @@
 use std::fs;
 use std::path::PathBuf;
 
-use argon2::Argon2;
+use argon2::{Algorithm, Argon2, Params, Version};
+use hkdf::Hkdf;
 use rand::RngCore;
+use sha2::Sha256;
 
 use crate::config;
 use crate::error::{HuddleError, Result};
@@ -45,11 +47,16 @@ pub fn load_or_create_salt() -> Result<[u8; KEYCHAIN_SALT_LEN]> {
 }
 
 /// Derive a 32-byte master key from passphrase + salt via Argon2id.
+/// Parameters follow the strong RFC 9106 / OWASP profile (64 MiB memory,
+/// 3 iterations, 4 lanes) and must stay in sync with the room-passphrase
+/// KDF in `crypto::passphrase::derive_key`.
 pub fn derive_master_key(
     passphrase: &str,
     salt: &[u8; KEYCHAIN_SALT_LEN],
 ) -> Result<[u8; MASTER_KEY_LEN]> {
-    let argon = Argon2::default();
+    let params = Params::new(65_536, 3, 4, Some(MASTER_KEY_LEN))
+        .map_err(|e| HuddleError::Other(format!("argon2 params: {e}")))?;
+    let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut out = [0u8; MASTER_KEY_LEN];
     argon
         .hash_password_into(passphrase.as_bytes(), salt, &mut out)
@@ -57,18 +64,15 @@ pub fn derive_master_key(
     Ok(out)
 }
 
-/// Returns a 32-byte subkey for `purpose` (e.g. "megolm-persist") derived
-/// from the master key via SHA-256. Good enough for our use since the
-/// master key is already cryptographically random.
+/// Return a 32-byte subkey for `purpose` (e.g. "megolm-persist") derived
+/// from the master key via HKDF-SHA256. The master key is the input key
+/// material and `purpose` is the HKDF `info` parameter — proper domain
+/// separation, no ad-hoc separator ambiguity.
 pub fn derive_subkey(master_key: &[u8; MASTER_KEY_LEN], purpose: &[u8]) -> [u8; 32] {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(master_key);
-    hasher.update(b"|");
-    hasher.update(purpose);
-    let h = hasher.finalize();
+    let hk = Hkdf::<Sha256>::new(None, master_key);
     let mut out = [0u8; 32];
-    out.copy_from_slice(&h);
+    hk.expand(purpose, &mut out)
+        .expect("32 bytes is well within HKDF-SHA256's output limit");
     out
 }
 
