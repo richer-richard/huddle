@@ -1227,6 +1227,71 @@ pub fn render_confirm_invite(f: &mut Frame, s: &ConfirmInviteState) {
     f.render_widget(para, area);
 }
 
+/// Phase H: first-launch onboarding. Three pages; dismiss on last
+/// page or Esc marks `identity.onboarding_seen = 1`.
+pub fn render_onboarding(f: &mut Frame, page: usize) {
+    let pages = crate::app::ONBOARDING_PAGES;
+    let page = page.min(pages.len() - 1);
+    let (title, lines_src) = pages[page];
+    let total = pages.len();
+
+    let height = (lines_src.len() as u16) + 9;
+    let area = centered_rect(72, height.min(22), f.area());
+    f.render_widget(Clear, area);
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!("  {}", title),
+        Style::default().fg(Color::Yellow).bold(),
+    )));
+    lines.push(Line::from(""));
+    for body in lines_src.iter() {
+        lines.push(Line::from(Span::styled(
+            format!("  {}", body),
+            Style::default().fg(Color::White),
+        )));
+    }
+    lines.push(Line::from(""));
+    let dots: String = (0..total)
+        .map(|i| if i == page { '●' } else { '○' })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .map(|c| c.to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+    lines.push(Line::from(Span::styled(
+        format!("  {} ({}/{})", dots, page + 1, total),
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines.push(Line::from(""));
+    let nav_hint = if page + 1 == total {
+        " Enter dismiss   ← back   Esc skip"
+    } else if page == 0 {
+        " Enter / → next   Esc skip"
+    } else {
+        " Enter / → next   ← back   Esc skip"
+    };
+    lines.push(Line::from(Span::styled(
+        nav_hint,
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let para = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan))
+                .padding(Padding::uniform(1))
+                .title(Span::styled(
+                    " welcome to huddle ",
+                    Style::default().fg(Color::Cyan).bold(),
+                )),
+        );
+    f.render_widget(para, area);
+}
+
 pub fn render_error(f: &mut Frame, msg: &str) {
     let area = centered_rect(56, 8, f.area());
     f.render_widget(Clear, area);

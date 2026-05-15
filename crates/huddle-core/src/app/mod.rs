@@ -2272,6 +2272,15 @@ impl AppHandle {
         repo::set_room_verified_only(&self.db, room_id, on)
     }
 
+    /// Phase H: first-launch onboarding flag.
+    pub fn onboarding_seen(&self) -> bool {
+        repo::is_onboarding_seen(&self.db).unwrap_or(true)
+    }
+
+    pub fn mark_onboarding_seen(&self) -> Result<()> {
+        repo::mark_onboarding_seen(&self.db)
+    }
+
     /// Phase B: promote `target_fingerprint` to owner. Builds a signed
     /// `OwnerGrant`, broadcasts it, and applies it locally. Returns an
     /// error if we ourselves aren't an owner — only owners can grant.

@@ -25,6 +25,53 @@ use crate::input::{self, Action};
 /// Default lifetime for transient status-bar messages.
 const STATUS_TTL: Duration = Duration::from_secs(6);
 
+/// Phase H: first-launch onboarding pages. Three cards explaining the
+/// mental model + key shortcuts. Kept inline as a const so any change
+/// only needs `cargo build` to refresh — no runtime config plumbing.
+pub const ONBOARDING_PAGES: &[(&str, &[&str])] = &[
+    (
+        "huddle is not iMessage",
+        &[
+            "every member is a peer — no host, no central server.",
+            "rooms outlive whoever created them.",
+            "anyone with the room passphrase can join, send, rotate the key.",
+            "leaderless + persistent mesh; the protocol has no admin tier",
+            "by default, only the soft 'owner' role you can grant per room.",
+            "",
+            "press → / Tab / Enter / Space to continue.",
+        ],
+    ),
+    (
+        "passphrase ≠ password",
+        &[
+            "the master passphrase encrypts your LOCAL database (rooms,",
+            "messages, members, Megolm sessions, attachments).",
+            "room passphrases are the access keys to encrypted rooms.",
+            "neither is recoverable — there's no reset, by design.",
+            "",
+            "for sharing access without leaking your passphrase, use",
+            "  ^J  generate a 10-min single-use join code",
+            "  ^V→s  SAS-verify a member's fingerprint",
+            "  ^I  produce an invite link (passphrase still OOB)",
+        ],
+    ),
+    (
+        "what's new in 0.3",
+        &[
+            "  ^K   kick a member (signed ban + key rotation)",
+            "  ^G   grant another member the owner role",
+            "  ^J   generate a 10-minute join code (owner only)",
+            "  ^V   verify fingerprints; press s inside for SAS",
+            "  ^I   show an invite link for the current room",
+            "  v    paste an invite link from the lobby",
+            "  ,    settings (verified-peer-only inbound)",
+            "  o    toggle 'only verified members may join' (in room)",
+            "",
+            "press Enter to dismiss.",
+        ],
+    ),
+];
+
 /// Top-level screen — the lobby or the in-room view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -79,6 +126,11 @@ pub enum Modal {
     PasteInvite(PasteInviteState),
     /// Phase C: parsed invite — confirm before dialing.
     ConfirmInvite(ConfirmInviteState),
+    /// Phase H: first-launch onboarding card. Three pages, dismissed
+    /// once and persisted on the identity row.
+    Onboarding {
+        page: usize,
+    },
     QuitConfirm,
     Help,
     Error(String),
@@ -412,12 +464,20 @@ impl TuiApp {
         } else {
             LobbyFocus::Rooms
         };
+        // Phase H: surface the onboarding card on first launch via the
+        // existing pending_modal slot. main_loop's promote-when-idle
+        // step opens it on the first frame.
+        let pending_modal = if !handle.onboarding_seen() {
+            Some(Modal::Onboarding { page: 0 })
+        } else {
+            None
+        };
         Self {
             handle,
             mode,
             screen: Screen::Lobby,
             modal: Modal::None,
-            pending_modal: None,
+            pending_modal,
             discovered_rooms: Vec::new(),
             known_peers,
             lobby_focus,
@@ -2019,6 +2079,30 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             if let Err(e) = app.handle.set_member_verified(&room_id, &fp, new_state) {
                 app.modal = Modal::Error(format!("verify failed: {e}"));
             }
+            Ok(false)
+        }
+        Action::OnboardingNext => {
+            if let Modal::Onboarding { page } = &mut app.modal {
+                if *page + 1 < ONBOARDING_PAGES.len() {
+                    *page += 1;
+                } else {
+                    let _ = app.handle.mark_onboarding_seen();
+                    app.modal = Modal::None;
+                }
+            }
+            Ok(false)
+        }
+        Action::OnboardingPrev => {
+            if let Modal::Onboarding { page } = &mut app.modal {
+                if *page > 0 {
+                    *page -= 1;
+                }
+            }
+            Ok(false)
+        }
+        Action::OnboardingDismiss => {
+            let _ = app.handle.mark_onboarding_seen();
+            app.modal = Modal::None;
             Ok(false)
         }
         Action::GenerateInvite => {

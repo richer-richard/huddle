@@ -120,6 +120,10 @@ pub enum Action {
     PasteInviteBackspace,
     PasteInviteConfirm,
     ConfirmInviteAccept,
+    // Phase H: first-launch onboarding card
+    OnboardingNext,
+    OnboardingPrev,
+    OnboardingDismiss,
 }
 
 pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
@@ -243,6 +247,18 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
             KeyCode::Enter | KeyCode::Char('d') | KeyCode::Char('D') => {
                 Action::ConfirmInviteAccept
             }
+            _ => Action::Nothing,
+        },
+        Modal::Onboarding { .. } => match key.code {
+            // Esc dismisses early; the user can re-read the README. We
+            // still mark seen so it doesn't re-pop next launch.
+            KeyCode::Esc => Action::OnboardingDismiss,
+            KeyCode::Char('h') | KeyCode::Left | KeyCode::Backspace => Action::OnboardingPrev,
+            KeyCode::Enter
+            | KeyCode::Char(' ')
+            | KeyCode::Char('l')
+            | KeyCode::Right
+            | KeyCode::Tab => Action::OnboardingNext,
             _ => Action::Nothing,
         },
         Modal::Search(_) => match key.code {

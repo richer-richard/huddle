@@ -34,6 +34,7 @@ pub fn render(f: &mut Frame, app: &TuiApp) {
         Modal::ShowInvite(s) => modal::render_show_invite(f, s),
         Modal::PasteInvite(s) => modal::render_paste_invite(f, s),
         Modal::ConfirmInvite(s) => modal::render_confirm_invite(f, s),
+        Modal::Onboarding { page } => modal::render_onboarding(f, *page),
         Modal::QuitConfirm => modal::render_quit_confirm(f),
         Modal::Help => modal::render_help(f),
         Modal::Error(msg) => modal::render_error(f, msg),

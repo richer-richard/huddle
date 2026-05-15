@@ -734,6 +734,28 @@ pub fn is_globally_verified(db: &Db, fingerprint: &str) -> Result<bool> {
     Ok(count > 0)
 }
 
+/// Phase H: has the first-launch onboarding card been dismissed?
+pub fn is_onboarding_seen(db: &Db) -> Result<bool> {
+    let conn = db.lock().unwrap();
+    let v: i64 = conn
+        .query_row(
+            "SELECT onboarding_seen FROM identity WHERE id = 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    Ok(v != 0)
+}
+
+pub fn mark_onboarding_seen(db: &Db) -> Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "UPDATE identity SET onboarding_seen = 1 WHERE id = 1",
+        [],
+    )?;
+    Ok(())
+}
+
 pub fn is_peer_blocked(db: &Db, fingerprint: &str) -> Result<bool> {
     let conn = db.lock().unwrap();
     let count: i64 = conn

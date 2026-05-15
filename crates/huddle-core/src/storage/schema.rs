@@ -147,4 +147,8 @@ pub const MIGRATIONS: &[&str] = &[
     // `JoinRefused` so the joiner sees an explanation instead of a
     // silent hang.
     "ALTER TABLE rooms ADD COLUMN verified_only_join INTEGER NOT NULL DEFAULT 0;",
+    // Phase H: a flag for "we've shown the welcome-and-key-concepts
+    // onboarding card to this user". Persisted on identity (single
+    // row) so it doesn't reappear next launch.
+    "ALTER TABLE identity ADD COLUMN onboarding_seen INTEGER NOT NULL DEFAULT 0;",
 ];
