@@ -2,8 +2,8 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
 
 use crate::app::{
-    AcceptRotationState, AttachPickerState, DialPeerState, JoinRoomState, RotateRoomState,
-    SearchState, StartField, StartRoomState, VerifyState,
+    AcceptRotationState, AttachPickerState, DialPeerState, InboundDialState, JoinRoomState,
+    RotateRoomState, SearchState, StartField, StartRoomState, VerifyState,
 };
 use crate::ui::centered_rect;
 
@@ -699,6 +699,66 @@ pub fn render_info(f: &mut Frame, msg: &str) {
             .border_style(Style::default().fg(Color::Cyan))
             .padding(Padding::uniform(1)),
     );
+    f.render_widget(para, area);
+}
+
+/// Phase A: an unknown peer dialed us. Show their fingerprint and let
+/// the user pick accept (this session only), reject (block forever), or
+/// trust+accept (remember for next time). The 15s countdown is informa-
+/// tional — the `main_loop` auto-rejects on expiry.
+pub fn render_inbound_dial(f: &mut Frame, s: &InboundDialState) {
+    let area = centered_rect(64, 14, f.area());
+    f.render_widget(Clear, area);
+
+    let elapsed = s.opened_at.elapsed();
+    let remaining = 15_u64.saturating_sub(elapsed.as_secs());
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "  an unknown peer wants to connect.",
+            Style::default().fg(Color::White),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  fingerprint: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                s.fingerprint.clone(),
+                Style::default().fg(Color::Yellow).bold(),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  address:     ", Style::default().fg(Color::DarkGray)),
+            Span::styled(s.address.clone(), Style::default().fg(Color::White)),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" [a]", Style::default().fg(Color::Green).bold()),
+            Span::styled(" accept    ", Style::default().fg(Color::DarkGray)),
+            Span::styled(" [r]", Style::default().fg(Color::Red).bold()),
+            Span::styled(" reject    ", Style::default().fg(Color::DarkGray)),
+            Span::styled(" [t]", Style::default().fg(Color::Cyan).bold()),
+            Span::styled(" trust+accept", Style::default().fg(Color::DarkGray)),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("  auto-reject in {}s", remaining),
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+
+    let para = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow))
+                .padding(Padding::uniform(1))
+                .title(Span::styled(
+                    " inbound connection ",
+                    Style::default().fg(Color::Yellow).bold(),
+                )),
+        );
     f.render_widget(para, area);
 }
 

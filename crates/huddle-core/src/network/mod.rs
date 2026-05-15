@@ -42,7 +42,7 @@ impl NetworkMode {
     }
 }
 
-use crate::identity::Identity;
+use crate::identity::{compute_fingerprint, Identity};
 use crate::network::behavior::{HuddleBehavior, HuddleBehaviorEvent};
 use crate::network::events::NetworkEvent;
 use crate::network::protocol::{room_topic, RoomAnnouncement, ROOMS_TOPIC};
@@ -60,6 +60,13 @@ pub enum NetworkCommand {
     /// User-initiated dial of an explicit address. Used for cross-network
     /// reach when mDNS isn't enough.
     Dial { address: Multiaddr },
+    /// Phase A: user accepted an inbound dial — promote the peer to
+    /// explicit-peer status so room announcements flow.
+    AcceptInbound { peer_id: PeerId },
+    /// Phase A: user rejected an inbound dial — disconnect them and
+    /// add the peer_id to the in-memory blocklist for this session
+    /// (caller is responsible for the persistent blocked_peers row).
+    RejectInbound { peer_id: PeerId },
     Shutdown,
 }
 
@@ -98,9 +105,34 @@ impl NetworkHandle {
         let _ = self.cmd_tx.send(NetworkCommand::Dial { address }).await;
     }
 
+    pub async fn accept_inbound(&self, peer_id: PeerId) {
+        let _ = self
+            .cmd_tx
+            .send(NetworkCommand::AcceptInbound { peer_id })
+            .await;
+    }
+
+    pub async fn reject_inbound(&self, peer_id: PeerId) {
+        let _ = self
+            .cmd_tx
+            .send(NetworkCommand::RejectInbound { peer_id })
+            .await;
+    }
+
     pub async fn shutdown(&self) {
         let _ = self.cmd_tx.send(NetworkCommand::Shutdown).await;
     }
+}
+
+/// What kind of connection we're holding open until Identify gives us
+/// the remote's Ed25519 fingerprint. Quarantined inbound dials are NOT
+/// added to the gossipsub mesh until the user accepts; outbound user-
+/// dials add to the mesh on connection but still wait on Identify so
+/// the eventual `DialSucceeded` can carry the fingerprint.
+#[derive(Debug)]
+enum PendingPeer {
+    /// Inbound dial from an unknown peer — modal-pending in the app.
+    InboundUnknown { address: Multiaddr },
 }
 
 struct NetworkTask {
@@ -112,6 +144,18 @@ struct NetworkTask {
     /// `ConnectionEstablished` / `OutgoingConnectionError` back to a
     /// specific address the user asked us to dial.
     dial_attempts: HashMap<ConnectionId, Multiaddr>,
+    /// Phase A: peers connected but not yet promoted to the gossipsub
+    /// mesh (inbound) — waiting either for `Identify` to land so we
+    /// know their fingerprint, or for the user's accept/reject decision.
+    /// On `ConnectionClosed` we drop entries here so a peer disconnecting
+    /// mid-prompt doesn't leak state.
+    pending_inbound: HashMap<PeerId, PendingPeer>,
+    /// Phase A: peers the user has explicitly rejected this session —
+    /// auto-disconnect every reconnect attempt without re-prompting.
+    /// Persistent across runs via `blocked_peers`; this in-memory copy
+    /// is loaded at startup (TODO: not yet wired; falls back to the DB
+    /// check in the app layer for now) and updated on `RejectInbound`.
+    session_blocklist: HashSet<PeerId>,
 }
 
 pub fn start_network(
@@ -211,6 +255,8 @@ pub fn start_network_with(
         event_tx,
         discovered_peers: HashSet::new(),
         dial_attempts: HashMap::new(),
+        pending_inbound: HashMap::new(),
+        session_blocklist: HashSet::new(),
     };
     tokio::spawn(task.run());
 
@@ -276,6 +322,33 @@ impl NetworkTask {
                         .behaviour_mut()
                         .gossipsub
                         .add_explicit_peer(&peer_id);
+                } else {
+                    // Inbound dial from an unknown peer (Phase A). We
+                    // hold the connection but do NOT add them to the
+                    // explicit-peer set yet — wait for Identify so we
+                    // can show the user the peer's fingerprint, then
+                    // either AcceptInbound (promote to mesh) or
+                    // RejectInbound (disconnect + persist blocklist).
+                    //
+                    // Known limitation: gossipsub's score-based mesh
+                    // formation may still forward topic messages to
+                    // this peer via other peers we have in common.
+                    // True hard-quarantine would need a custom
+                    // ConnectionHandler — out of scope for v1.
+                    if self.session_blocklist.contains(&peer_id) {
+                        info!(%peer_id, "rejecting inbound from session-blocked peer");
+                        let _ = self.swarm.disconnect_peer_id(peer_id);
+                    } else {
+                        let address = match &endpoint {
+                            ConnectedPoint::Listener { send_back_addr, .. } => {
+                                send_back_addr.clone()
+                            }
+                            _ => Multiaddr::empty(),
+                        };
+                        debug!(%peer_id, %address, "inbound peer pending decision");
+                        self.pending_inbound
+                            .insert(peer_id, PendingPeer::InboundUnknown { address });
+                    }
                 }
             }
             libp2p::swarm::SwarmEvent::OutgoingConnectionError {
@@ -293,6 +366,13 @@ impl NetworkTask {
                         })
                         .await;
                 }
+            }
+            libp2p::swarm::SwarmEvent::ConnectionClosed { peer_id, .. } => {
+                // Drop any pending-inbound entry for this peer — they
+                // disconnected before we could prompt the user (or
+                // before the user accepted). Lets a re-connect start
+                // fresh rather than reusing stale state.
+                self.pending_inbound.remove(&peer_id);
             }
             libp2p::swarm::SwarmEvent::Behaviour(be) => self.handle_behavior_event(be).await,
             _ => {}
@@ -341,6 +421,48 @@ impl NetworkTask {
                 peer_id, info, ..
             }) => {
                 debug!(%peer_id, agent = %info.agent_version, "identify received");
+                // Decode the remote's Ed25519 pubkey and derive our
+                // 24-char fingerprint from it. Non-Ed25519 keys (Secp,
+                // Rsa, Ecdsa) shouldn't appear in practice — huddle
+                // only generates Ed25519 identities — so we just log
+                // and skip if the cast fails.
+                let fingerprint = match info.public_key.clone().try_into_ed25519() {
+                    Ok(ed_pk) => {
+                        let bytes = ed_pk.to_bytes();
+                        compute_fingerprint(&bytes)
+                    }
+                    Err(_) => {
+                        warn!(%peer_id, "identify pubkey isn't Ed25519; skipping fingerprint");
+                        return;
+                    }
+                };
+                // Always notify the app layer so it can populate
+                // `known_peers.fingerprint` and detect that an
+                // outbound peer we dialed has fully identified.
+                let _ = self
+                    .event_tx
+                    .send(NetworkEvent::PeerIdentified {
+                        peer_id,
+                        fingerprint: fingerprint.clone(),
+                    })
+                    .await;
+                // If the peer is in pending_inbound, Identify completing
+                // is the cue to surface the user prompt. Keep them in
+                // pending_inbound until Accept or Reject — we don't
+                // know yet which way the user will decide.
+                if let Some(PendingPeer::InboundUnknown { address }) =
+                    self.pending_inbound.get(&peer_id)
+                {
+                    let address = address.clone();
+                    let _ = self
+                        .event_tx
+                        .send(NetworkEvent::InboundDial {
+                            peer_id,
+                            fingerprint,
+                            address,
+                        })
+                        .await;
+                }
             }
             _ => {}
         }
@@ -414,6 +536,24 @@ impl NetworkTask {
                     }
                     Err(e) => warn!(%e, "encode room announcement"),
                 }
+            }
+            NetworkCommand::AcceptInbound { peer_id } => {
+                if self.pending_inbound.remove(&peer_id).is_some() {
+                    info!(%peer_id, "inbound dial accepted — promoting to mesh");
+                    self.swarm
+                        .behaviour_mut()
+                        .gossipsub
+                        .add_explicit_peer(&peer_id);
+                    self.discovered_peers.insert(peer_id);
+                } else {
+                    debug!(%peer_id, "AcceptInbound for unknown peer (already promoted or disconnected)");
+                }
+            }
+            NetworkCommand::RejectInbound { peer_id } => {
+                self.pending_inbound.remove(&peer_id);
+                self.session_blocklist.insert(peer_id);
+                info!(%peer_id, "inbound dial rejected — disconnecting");
+                let _ = self.swarm.disconnect_peer_id(peer_id);
             }
             NetworkCommand::Dial { address } => {
                 let opts: DialOpts = address.clone().into();

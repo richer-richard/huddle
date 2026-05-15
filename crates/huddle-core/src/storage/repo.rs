@@ -484,23 +484,42 @@ pub struct KnownPeer {
     pub last_connected_at: Option<i64>,
     pub last_attempt_at: Option<i64>,
     pub created_at: i64,
+    /// Phase A: the peer's Ed25519 fingerprint, learned from Identify
+    /// after the first successful connection. `None` for rows from
+    /// pre-Phase-A and for peers that haven't been reached yet.
+    pub fingerprint: Option<String>,
+    /// Phase A: `true` once the user explicitly trusted this peer
+    /// ("Trust + Accept" on the inbound-dial modal, or any successful
+    /// user-initiated outbound dial). Trusted peers bypass the inbound
+    /// prompt on reconnect.
+    pub trusted: bool,
 }
 
 pub fn upsert_known_peer(db: &Db, peer: &KnownPeer) -> Result<()> {
     let conn = db.lock().unwrap();
     conn.execute(
-        "INSERT INTO known_peers (address, label, last_connected_at, last_attempt_at, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)
+        "INSERT INTO known_peers (address, label, last_connected_at, last_attempt_at, created_at, fingerprint, trusted)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(address) DO UPDATE SET
            label = COALESCE(excluded.label, known_peers.label),
            last_connected_at = COALESCE(excluded.last_connected_at, known_peers.last_connected_at),
-           last_attempt_at = COALESCE(excluded.last_attempt_at, known_peers.last_attempt_at)",
+           last_attempt_at = COALESCE(excluded.last_attempt_at, known_peers.last_attempt_at),
+           fingerprint = COALESCE(excluded.fingerprint, known_peers.fingerprint),
+           -- trusted is sticky-once-true: a fresh upsert with trusted=false
+           -- (the default on auto-reconnect) must not demote a previously
+           -- trusted row.
+           trusted = CASE
+             WHEN excluded.trusted = 1 THEN 1
+             ELSE known_peers.trusted
+           END",
         params![
             peer.address,
             peer.label,
             peer.last_connected_at,
             peer.last_attempt_at,
             peer.created_at,
+            peer.fingerprint,
+            peer.trusted as i64,
         ],
     )?;
     Ok(())
@@ -509,7 +528,7 @@ pub fn upsert_known_peer(db: &Db, peer: &KnownPeer) -> Result<()> {
 pub fn list_known_peers(db: &Db) -> Result<Vec<KnownPeer>> {
     let conn = db.lock().unwrap();
     let mut stmt = conn.prepare(
-        "SELECT address, label, last_connected_at, last_attempt_at, created_at
+        "SELECT address, label, last_connected_at, last_attempt_at, created_at, fingerprint, trusted
          FROM known_peers ORDER BY COALESCE(last_connected_at, 0) DESC, created_at DESC",
     )?;
     let rows = stmt.query_map([], |row| {
@@ -519,6 +538,8 @@ pub fn list_known_peers(db: &Db) -> Result<Vec<KnownPeer>> {
             last_connected_at: row.get(2)?,
             last_attempt_at: row.get(3)?,
             created_at: row.get(4)?,
+            fingerprint: row.get(5).ok().flatten(),
+            trusted: row.get::<_, i64>(6).unwrap_or(0) != 0,
         })
     })?;
     Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -527,6 +548,56 @@ pub fn list_known_peers(db: &Db) -> Result<Vec<KnownPeer>> {
 pub fn forget_known_peer(db: &Db, address: &str) -> Result<()> {
     let conn = db.lock().unwrap();
     conn.execute("DELETE FROM known_peers WHERE address = ?1", params![address])?;
+    Ok(())
+}
+
+/// Phase A: look up whether we've already trusted a peer by fingerprint.
+/// Used by the network task when an inbound connection's Identify lands —
+/// trusted fingerprints bypass the user-prompt modal.
+pub fn is_fingerprint_trusted(db: &Db, fingerprint: &str) -> Result<bool> {
+    let conn = db.lock().unwrap();
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM known_peers WHERE fingerprint = ?1 AND trusted = 1",
+            params![fingerprint],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    Ok(count > 0)
+}
+
+/// Phase A: persistent blocklist. A fingerprint here means we explicitly
+/// rejected an inbound dial from this peer — every subsequent connection
+/// attempt is auto-disconnected without raising the modal.
+pub fn block_peer(db: &Db, fingerprint: &str, now: i64) -> Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "INSERT INTO blocked_peers (fingerprint, blocked_at) VALUES (?1, ?2)
+         ON CONFLICT(fingerprint) DO UPDATE SET blocked_at = excluded.blocked_at",
+        params![fingerprint, now],
+    )?;
+    Ok(())
+}
+
+pub fn is_peer_blocked(db: &Db, fingerprint: &str) -> Result<bool> {
+    let conn = db.lock().unwrap();
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM blocked_peers WHERE fingerprint = ?1",
+            params![fingerprint],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    Ok(count > 0)
+}
+
+#[allow(dead_code)]
+pub fn unblock_peer(db: &Db, fingerprint: &str) -> Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "DELETE FROM blocked_peers WHERE fingerprint = ?1",
+        params![fingerprint],
+    )?;
     Ok(())
 }
 

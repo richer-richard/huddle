@@ -89,6 +89,10 @@ pub enum Action {
     SearchSubmit,
     SearchNext,
     SearchPrev,
+    // Phase A: inbound-dial accept gate
+    InboundDialAccept,
+    InboundDialReject,
+    InboundDialTrust,
 }
 
 pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
@@ -188,6 +192,14 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
         },
         Modal::QrIdentity => match key.code {
             _ => Action::CloseModal,
+        },
+        Modal::InboundDial(_) => match key.code {
+            // Esc = reject. Anything more permissive would defeat the
+            // gate — we always require a positive decision.
+            KeyCode::Esc | KeyCode::Char('r') | KeyCode::Char('R') => Action::InboundDialReject,
+            KeyCode::Char('a') | KeyCode::Char('A') | KeyCode::Enter => Action::InboundDialAccept,
+            KeyCode::Char('t') | KeyCode::Char('T') => Action::InboundDialTrust,
+            _ => Action::Nothing,
         },
         Modal::None => map_normal(key, app),
     }

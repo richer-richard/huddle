@@ -94,4 +94,17 @@ pub const MIGRATIONS: &[&str] = &[
     // and persist them here so `SignedRoomMessage` envelopes can be
     // verified without re-asking the network on every message.
     "ALTER TABLE room_members ADD COLUMN ed25519_pubkey TEXT;",
+    // Phase A (v0.3.0): inbound-dial accept. Trusted=1 means an inbound
+    // connection from a peer with this fingerprint bypasses the prompt.
+    // Fingerprint is learned from Identify after the dial completes, so
+    // it's nullable on pre-Phase-A rows.
+    "ALTER TABLE known_peers ADD COLUMN fingerprint TEXT;",
+    "ALTER TABLE known_peers ADD COLUMN trusted INTEGER NOT NULL DEFAULT 0;",
+    // Phase A: a fingerprint the user has explicitly rejected. Inbound
+    // connections from a blocked fingerprint are auto-disconnected on
+    // every restart (the in-memory blocklist on its own would reset).
+    "CREATE TABLE IF NOT EXISTS blocked_peers (
+        fingerprint TEXT PRIMARY KEY,
+        blocked_at INTEGER NOT NULL
+    );",
 ];

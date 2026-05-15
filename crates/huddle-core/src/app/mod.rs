@@ -661,6 +661,11 @@ impl AppHandle {
                 last_connected_at: None,
                 last_attempt_at: Some(now_unix()),
                 created_at: now_unix(),
+                // Fingerprint isn't known until Identify lands after the
+                // dial completes; the connection-success handler upserts
+                // again with the fingerprint and trusted=true.
+                fingerprint: None,
+                trusted: false,
             },
         )?;
 
@@ -697,6 +702,59 @@ impl AppHandle {
     /// Re-dial a stored address — used by the lobby's "reconnect" action.
     pub async fn redial(&self, address: &str) -> Result<()> {
         self.dial(address).await
+    }
+
+    /// Phase A: user pressed Accept on the inbound-dial modal. Promotes
+    /// the peer to the gossipsub mesh. Does NOT mark them trusted —
+    /// that's `trust_inbound`, the explicit "remember and bypass next
+    /// time" path.
+    pub async fn accept_inbound(&self, peer_id: PeerId, address: &str) {
+        self.network.accept_inbound(peer_id).await;
+        self.connected_dial_addrs
+            .lock()
+            .unwrap()
+            .insert(address.to_string(), peer_id);
+    }
+
+    /// Phase A: user pressed Reject on the inbound-dial modal. Disconnects
+    /// the peer, adds them to the persistent blocklist, and ensures every
+    /// subsequent connection attempt from this fingerprint is auto-
+    /// dropped without re-prompting.
+    pub async fn reject_inbound(&self, peer_id: PeerId, fingerprint: &str) -> Result<()> {
+        self.network.reject_inbound(peer_id).await;
+        repo::block_peer(&self.db, fingerprint, now_unix())?;
+        Ok(())
+    }
+
+    /// Phase A: user pressed Trust+Accept — accept the connection AND
+    /// remember the peer so subsequent connections bypass the modal.
+    pub async fn trust_inbound(
+        &self,
+        peer_id: PeerId,
+        fingerprint: &str,
+        address: &str,
+    ) -> Result<()> {
+        self.network.accept_inbound(peer_id).await;
+        self.connected_dial_addrs
+            .lock()
+            .unwrap()
+            .insert(address.to_string(), peer_id);
+        // Persist the row with trusted=true so future inbound from
+        // this fingerprint short-circuits the modal in
+        // `process_network_event`'s InboundDial handler.
+        repo::upsert_known_peer(
+            &self.db,
+            &KnownPeer {
+                address: address.to_string(),
+                label: None,
+                last_connected_at: Some(now_unix()),
+                last_attempt_at: Some(now_unix()),
+                created_at: now_unix(),
+                fingerprint: Some(fingerprint.to_string()),
+                trusted: true,
+            },
+        )?;
+        Ok(())
     }
 
     fn spawn_known_peer_reconnector(&self) {
@@ -954,6 +1012,9 @@ impl AppHandle {
                     .lock()
                     .unwrap()
                     .insert(addr_s.clone(), peer_id);
+                // Fingerprint isn't known yet (Identify hasn't landed);
+                // the PeerIdentified handler below upserts again to add
+                // the fingerprint and flip trusted=true once it does.
                 let _ = repo::upsert_known_peer(
                     &self.db,
                     &KnownPeer {
@@ -962,6 +1023,8 @@ impl AppHandle {
                         last_connected_at: Some(now_unix()),
                         last_attempt_at: Some(now_unix()),
                         created_at: now_unix(),
+                        fingerprint: None,
+                        trusted: false,
                     },
                 );
                 let _ = self.app_event_tx.send(AppEvent::DialSucceeded {
@@ -974,6 +1037,80 @@ impl AppHandle {
                 let _ = self.app_event_tx.send(AppEvent::DialFailed {
                     address: addr_s,
                     error,
+                });
+            }
+            NetworkEvent::PeerIdentified { peer_id, fingerprint } => {
+                // For any address we user-dialed for this peer, retroactively
+                // backfill the fingerprint and flip trusted=true. The
+                // upsert's COALESCE preserves fingerprint once set and
+                // its trusted-is-sticky-once-true clause means we don't
+                // accidentally demote a row that was already trusted.
+                let matched_addrs: Vec<String> = {
+                    let map = self.connected_dial_addrs.lock().unwrap();
+                    map.iter()
+                        .filter_map(|(addr, pid)| {
+                            if *pid == peer_id {
+                                Some(addr.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
+                };
+                for addr in matched_addrs {
+                    let _ = repo::upsert_known_peer(
+                        &self.db,
+                        &KnownPeer {
+                            address: addr,
+                            label: None,
+                            last_connected_at: Some(now_unix()),
+                            last_attempt_at: Some(now_unix()),
+                            created_at: now_unix(),
+                            fingerprint: Some(fingerprint.clone()),
+                            trusted: true,
+                        },
+                    );
+                }
+            }
+            NetworkEvent::InboundDial {
+                peer_id,
+                fingerprint,
+                address,
+            } => {
+                // First: cheap server-side filters before bothering the user.
+                if repo::is_peer_blocked(&self.db, &fingerprint).unwrap_or(false) {
+                    info!(%fingerprint, "inbound dial auto-rejected: peer is blocked");
+                    self.network.reject_inbound(peer_id).await;
+                    return;
+                }
+                if repo::is_fingerprint_trusted(&self.db, &fingerprint).unwrap_or(false) {
+                    info!(%fingerprint, "inbound dial auto-accepted: peer is trusted");
+                    // Persist the address → peer_id mapping just as a
+                    // user-dial would, so the lobby's online dot lights up.
+                    self.connected_dial_addrs
+                        .lock()
+                        .unwrap()
+                        .insert(address.to_string(), peer_id);
+                    let _ = repo::upsert_known_peer(
+                        &self.db,
+                        &KnownPeer {
+                            address: address.to_string(),
+                            label: None,
+                            last_connected_at: Some(now_unix()),
+                            last_attempt_at: Some(now_unix()),
+                            created_at: now_unix(),
+                            fingerprint: Some(fingerprint),
+                            trusted: true,
+                        },
+                    );
+                    self.network.accept_inbound(peer_id).await;
+                    return;
+                }
+                // Unknown peer — surface the modal in the TUI.
+                let _ = self.app_event_tx.send(AppEvent::InboundDial {
+                    peer_id,
+                    fingerprint,
+                    address: address.to_string(),
                 });
             }
         }

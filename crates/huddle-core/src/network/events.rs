@@ -23,4 +23,19 @@ pub enum NetworkEvent {
     DialSucceeded { peer_id: PeerId, address: Multiaddr },
     /// A user-initiated dial failed before establishing a connection.
     DialFailed { address: Multiaddr, error: String },
+    /// Phase A: Identify has completed for `peer_id` and we've decoded
+    /// their Ed25519 fingerprint. Fired for every peer (inbound or
+    /// outbound) so the app layer can populate `known_peers.fingerprint`
+    /// and mark previously-dialed peers as `trusted=1`.
+    PeerIdentified { peer_id: PeerId, fingerprint: String },
+    /// Phase A: an unknown peer has dialed us (listener side) and their
+    /// Identify just landed. The peer is NOT yet in our gossipsub
+    /// explicit-peers set — the app layer must respond with either
+    /// `AcceptInbound` or `RejectInbound` (or let the 15s TUI timeout
+    /// auto-reject).
+    InboundDial {
+        peer_id: PeerId,
+        fingerprint: String,
+        address: Multiaddr,
+    },
 }

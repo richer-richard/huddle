@@ -99,4 +99,19 @@ pub enum AppEvent {
     /// form). The TUI uses this to ring the terminal bell, even in
     /// muted rooms.
     MentionReceived { room_id: String, body: String },
+    /// Phase A: an unknown peer has dialed us and Identify has
+    /// completed. The TUI shows an accept/reject/trust modal with the
+    /// peer's short fingerprint. Routed through `replace_modal_if_idle`
+    /// so it doesn't clobber whatever the user is typing.
+    InboundDial {
+        peer_id: PeerId,
+        /// 24-char fingerprint, freshly derived from the peer's Ed25519
+        /// pubkey via Identify — proves they hold the matching key.
+        fingerprint: String,
+        /// String form of the listener-side multiaddr (the address as
+        /// seen from our side of the connection). Mostly informational
+        /// for the user; we persist it on accept so the lobby online
+        /// dot tracks the peer.
+        address: String,
+    },
 }

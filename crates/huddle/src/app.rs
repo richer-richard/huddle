@@ -17,6 +17,7 @@ use huddle_core::app::events::{AppEvent, DiscoveredRoom};
 use huddle_core::app::{AppHandle, KnownPeerStatus};
 use huddle_core::network::NetworkMode;
 use huddle_core::storage::repo::{StoredAttachment, StoredRoomMessage};
+use libp2p::PeerId;
 
 use crate::input::{self, Action};
 
@@ -49,11 +50,27 @@ pub enum Modal {
     Search(SearchState),
     /// QR code of our identity, scannable for fingerprint comparison.
     QrIdentity,
+    /// Phase A: an unknown peer dialed us. User chooses accept/reject/
+    /// trust-and-accept. Dismiss without choosing (Esc, 15s timeout) =
+    /// auto-reject — anything more permissive would defeat the gate.
+    InboundDial(InboundDialState),
     QuitConfirm,
     Help,
     Error(String),
     #[allow(dead_code)]
     Info(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct InboundDialState {
+    pub peer_id: PeerId,
+    pub fingerprint: String,
+    pub address: String,
+    /// When the modal opened. Used to auto-reject after 15s — the
+    /// network connection stays in our `pending_inbound` map all that
+    /// time, so a user who never sees the modal won't accidentally
+    /// keep an unknown peer attached forever.
+    pub opened_at: Instant,
 }
 
 #[derive(Debug, Clone)]
@@ -584,6 +601,18 @@ impl TuiApp {
                     passphrase: String::new(),
                 }));
             }
+            AppEvent::InboundDial {
+                peer_id,
+                fingerprint,
+                address,
+            } => {
+                self.replace_modal_if_idle(Modal::InboundDial(InboundDialState {
+                    peer_id,
+                    fingerprint,
+                    address,
+                    opened_at: Instant::now(),
+                }));
+            }
         }
     }
 
@@ -591,6 +620,13 @@ impl TuiApp {
 
 fn short_room(room_id: &str) -> String {
     room_id.chars().take(8).collect()
+}
+
+/// First chunk of a fingerprint for compact display — the first 4-4
+/// groups of the `xxxx-xxxx-xxxx-...` form, which gives ~32 bits of
+/// collision resistance, plenty for a status line.
+fn short_fp(fp: &str) -> String {
+    fp.split('-').take(2).collect::<Vec<_>>().join("-")
 }
 
 /// Scroll the active room by `delta` lines (negative = up). Maintains
@@ -998,6 +1034,25 @@ async fn main_loop(
 
         // Drop expired status-bar messages.
         app.tick_status();
+
+        // Phase A: auto-reject an inbound-dial modal that's been
+        // ignored for 15s. We don't want to leave an unknown peer
+        // connected just because the user walked away.
+        let auto_reject_state: Option<InboundDialState> =
+            if let Modal::InboundDial(s) = &app.modal {
+                if s.opened_at.elapsed() >= Duration::from_secs(15) {
+                    Some(s.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+        if let Some(s) = auto_reject_state {
+            let _ = app.handle.reject_inbound(s.peer_id, &s.fingerprint).await;
+            app.set_status(format!("auto-rejected {} (timeout)", short_fp(&s.fingerprint)));
+            app.modal = Modal::None;
+        }
 
         if poll(Duration::from_millis(33))? {
             match event::read()? {
@@ -1764,6 +1819,42 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             };
             if let Err(e) = app.handle.set_member_verified(&room_id, &fp, new_state) {
                 app.modal = Modal::Error(format!("verify failed: {e}"));
+            }
+            Ok(false)
+        }
+        Action::InboundDialAccept => {
+            if let Modal::InboundDial(s) = app.modal.clone() {
+                app.handle.accept_inbound(s.peer_id, &s.address).await;
+                app.set_status(format!("connected to {}", short_fp(&s.fingerprint)));
+                app.modal = Modal::None;
+                app.refresh_known_peers();
+            }
+            Ok(false)
+        }
+        Action::InboundDialReject => {
+            if let Modal::InboundDial(s) = app.modal.clone() {
+                if let Err(e) = app.handle.reject_inbound(s.peer_id, &s.fingerprint).await {
+                    app.modal = Modal::Error(format!("reject failed: {e}"));
+                    return Ok(false);
+                }
+                app.set_status(format!("rejected {}", short_fp(&s.fingerprint)));
+                app.modal = Modal::None;
+            }
+            Ok(false)
+        }
+        Action::InboundDialTrust => {
+            if let Modal::InboundDial(s) = app.modal.clone() {
+                if let Err(e) = app
+                    .handle
+                    .trust_inbound(s.peer_id, &s.fingerprint, &s.address)
+                    .await
+                {
+                    app.modal = Modal::Error(format!("trust failed: {e}"));
+                    return Ok(false);
+                }
+                app.set_status(format!("trusted {} — won't ask again", short_fp(&s.fingerprint)));
+                app.modal = Modal::None;
+                app.refresh_known_peers();
             }
             Ok(false)
         }
