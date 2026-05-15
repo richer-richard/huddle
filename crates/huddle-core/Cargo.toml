@@ -14,6 +14,13 @@ categories = ["network-programming", "cryptography"]
 libp2p = { version = "0.56", features = [
     "mdns", "identify", "ping", "request-response",
     "tcp", "noise", "yamux", "tokio", "ed25519", "macros", "gossipsub",
+    # Phase D — internet reach. relay-client lets us register with a
+    # public relay so peers behind NAT can dial us through it; autonat
+    # tells us whether we're NAT'd; dcutr (Direct Connection Upgrade
+    # through Relay) attempts to hole-punch to a direct connection
+    # once a relayed connection forms, dropping the relay hop when it
+    # succeeds.
+    "relay", "autonat", "dcutr",
 ] }
 vodozemac = "0.10"
 ed25519-dalek = { version = "2", features = ["rand_core"] }

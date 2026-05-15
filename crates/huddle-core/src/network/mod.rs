@@ -10,7 +10,8 @@ use libp2p::core::ConnectedPoint;
 use libp2p::swarm::dial_opts::DialOpts;
 use libp2p::swarm::ConnectionId;
 use libp2p::{
-    gossipsub, identify, mdns, noise, ping, tcp, yamux, Multiaddr, PeerId, Swarm, SwarmBuilder,
+    autonat, dcutr, gossipsub, identify, mdns, noise, ping, tcp, yamux, Multiaddr, PeerId, Swarm,
+    SwarmBuilder,
 };
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -156,22 +157,34 @@ struct NetworkTask {
     /// is loaded at startup (TODO: not yet wired; falls back to the DB
     /// check in the app layer for now) and updated on `RejectInbound`.
     session_blocklist: HashSet<PeerId>,
+    /// Phase D: configured relay multiaddrs. When Identify lands for a
+    /// peer whose multiaddr matches one of these, we call
+    /// `listen_on("<addr>/p2p-circuit")` to register a reservation.
+    /// Tracked as multiaddr strings (no PeerId yet — we don't know it
+    /// until Identify) plus a set of peer_ids of confirmed relays so
+    /// we only register once per relay.
+    configured_relays: Vec<Multiaddr>,
+    relay_peer_ids: HashSet<PeerId>,
 }
 
 pub fn start_network(
     identity: &Identity,
     event_tx: mpsc::Sender<NetworkEvent>,
 ) -> crate::error::Result<NetworkHandle> {
-    start_network_with(identity, event_tx, NetworkMode::Mdns, 0)
+    start_network_with(identity, event_tx, NetworkMode::Mdns, 0, Vec::new())
 }
 
-/// Start the network task with explicit mode and TCP listen port.
-/// `listen_port = 0` requests a random port.
+/// Start the network task with explicit mode, TCP listen port, and any
+/// pre-configured relay multiaddrs. `listen_port = 0` requests a
+/// random port. Relays are dialed on startup; once `Identify` lands
+/// from a relay peer, we call `listen_on("<relay>/p2p-circuit")` to
+/// register a reservation so peers behind NAT can dial us through it.
 pub fn start_network_with(
     identity: &Identity,
     event_tx: mpsc::Sender<NetworkEvent>,
     mode: NetworkMode,
     listen_port: u16,
+    relays: Vec<Multiaddr>,
 ) -> crate::error::Result<NetworkHandle> {
     let keypair = identity.keypair().clone();
     let local_peer_id = identity.peer_id();
@@ -184,7 +197,13 @@ pub fn start_network_with(
             yamux::Config::default,
         )
         .map_err(|e| crate::error::HuddleError::Network(e.to_string()))?
-        .with_behaviour(|key| {
+        // Phase D: wrap the transport with relay-client. This both
+        // composes the transport (so we can dial `/p2p-circuit/`
+        // addresses) and surfaces a `relay::client::Behaviour` into
+        // the `with_behaviour` closure as the second argument.
+        .with_relay_client(noise::Config::new, yamux::Config::default)
+        .map_err(|e| crate::error::HuddleError::Network(e.to_string()))?
+        .with_behaviour(|key, relay_client| {
             let mdns_opt = match mode {
                 NetworkMode::Mdns => Some(
                     mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)
@@ -196,7 +215,7 @@ pub fn start_network_with(
 
             let identify = identify::Behaviour::new(
                 identify::Config::new("/huddle/1.0.0".into(), key.public())
-                    .with_agent_version("huddle/0.2".into()),
+                    .with_agent_version("huddle/0.3".into()),
             );
 
             let ping = ping::Behaviour::default();
@@ -223,11 +242,17 @@ pub fn start_network_with(
                 .subscribe(&rooms_topic)
                 .expect("subscribe rooms topic");
 
+            let autonat = autonat::v1::Behaviour::new(local_peer_id, Default::default());
+            let dcutr = dcutr::Behaviour::new(local_peer_id);
+
             HuddleBehavior {
                 mdns,
                 identify,
                 ping,
                 gossipsub,
+                relay_client,
+                autonat,
+                dcutr,
             }
         })
         .map_err(|e| crate::error::HuddleError::Network(e.to_string()))?
@@ -249,7 +274,7 @@ pub fn start_network_with(
     }
 
     let (cmd_tx, cmd_rx) = mpsc::channel(256);
-    let task = NetworkTask {
+    let mut task = NetworkTask {
         swarm,
         cmd_rx,
         event_tx,
@@ -257,7 +282,23 @@ pub fn start_network_with(
         dial_attempts: HashMap::new(),
         pending_inbound: HashMap::new(),
         session_blocklist: HashSet::new(),
+        configured_relays: relays.clone(),
+        relay_peer_ids: HashSet::new(),
     };
+    // Phase D: dial each configured relay so Identify can complete and
+    // we can register a `/p2p-circuit` reservation. Failures here are
+    // non-fatal — the user can still chat on LAN.
+    for relay_addr in relays {
+        info!(addr = %relay_addr, "dialing configured relay");
+        let opts: libp2p::swarm::dial_opts::DialOpts = relay_addr.clone().into();
+        let conn_id = opts.connection_id();
+        match task.swarm.dial(opts) {
+            Ok(()) => {
+                task.dial_attempts.insert(conn_id, relay_addr);
+            }
+            Err(e) => warn!(%e, "dial relay failed"),
+        }
+    }
     tokio::spawn(task.run());
 
     Ok(NetworkHandle { cmd_tx })
@@ -288,6 +329,21 @@ impl NetworkTask {
         match event {
             libp2p::swarm::SwarmEvent::NewListenAddr { address, .. } => {
                 info!(%address, "listening");
+                // Phase D: a relay-circuit address is a reachability
+                // milestone — surface it as its own event so the lobby
+                // can show "reachable via N relays" status.
+                use libp2p::multiaddr::Protocol;
+                let is_circuit = address
+                    .iter()
+                    .any(|p| matches!(p, Protocol::P2pCircuit));
+                if is_circuit {
+                    let _ = self
+                        .event_tx
+                        .send(NetworkEvent::RelayReservationEstablished {
+                            address: address.clone(),
+                        })
+                        .await;
+                }
                 let _ = self
                     .event_tx
                     .send(NetworkEvent::ListeningOn { address })
@@ -300,21 +356,33 @@ impl NetworkTask {
                 ..
             } => {
                 if let Some(addr) = self.dial_attempts.remove(&connection_id) {
-                    info!(%peer_id, %addr, "user-dialed peer connected");
-                    // Treat dialed peers like mDNS-discovered: add to
-                    // gossipsub explicit peers so room announcements flow.
-                    self.swarm
-                        .behaviour_mut()
-                        .gossipsub
-                        .add_explicit_peer(&peer_id);
-                    self.discovered_peers.insert(peer_id);
-                    let _ = self
-                        .event_tx
-                        .send(NetworkEvent::DialSucceeded {
-                            peer_id,
-                            address: addr,
-                        })
-                        .await;
+                    // Phase D: a connection that was for a configured
+                    // relay shouldn't pollute the lobby with a normal
+                    // DialSucceeded — relays aren't chat peers. We just
+                    // remember the peer_id and wait for Identify, then
+                    // register a /p2p-circuit reservation.
+                    let is_relay = self.configured_relays.iter().any(|r| r == &addr);
+                    if is_relay {
+                        info!(%peer_id, %addr, "connected to configured relay");
+                        self.relay_peer_ids.insert(peer_id);
+                    } else {
+                        info!(%peer_id, %addr, "user-dialed peer connected");
+                        // Treat dialed peers like mDNS-discovered: add
+                        // to gossipsub explicit peers so room
+                        // announcements flow.
+                        self.swarm
+                            .behaviour_mut()
+                            .gossipsub
+                            .add_explicit_peer(&peer_id);
+                        self.discovered_peers.insert(peer_id);
+                        let _ = self
+                            .event_tx
+                            .send(NetworkEvent::DialSucceeded {
+                                peer_id,
+                                address: addr,
+                            })
+                            .await;
+                    }
                 } else if let ConnectedPoint::Dialer { .. } = endpoint {
                     // Outgoing connection we didn't track (e.g. mDNS auto-dial)
                     // — still add to mesh; no user-visible event needed.
@@ -421,6 +489,30 @@ impl NetworkTask {
                 peer_id, info, ..
             }) => {
                 debug!(%peer_id, agent = %info.agent_version, "identify received");
+                // Phase D: if this peer is a configured relay, register
+                // a `/p2p-circuit` reservation on first identify. Idem-
+                // potent — only fire if we haven't listened on this
+                // relay already (identify fires periodically).
+                if self.relay_peer_ids.contains(&peer_id) {
+                    use libp2p::multiaddr::Protocol;
+                    if let Some(relay_addr) = self
+                        .configured_relays
+                        .iter()
+                        .find(|a| {
+                            // Match by /p2p/<peer-id> suffix when
+                            // present, else by the addr we dialed.
+                            a.iter().any(|p| matches!(p, Protocol::P2p(pid) if pid == peer_id))
+                                || self.dial_attempts.values().any(|d| d == *a)
+                        })
+                        .cloned()
+                    {
+                        let circuit = relay_addr.with(Protocol::P2pCircuit);
+                        match self.swarm.listen_on(circuit.clone()) {
+                            Ok(_) => info!(%circuit, "listening on relay circuit"),
+                            Err(e) => warn!(%e, %circuit, "relay listen_on failed"),
+                        }
+                    }
+                }
                 // Decode the remote's Ed25519 pubkey and derive our
                 // 24-char fingerprint from it. Non-Ed25519 keys (Secp,
                 // Rsa, Ecdsa) shouldn't appear in practice — huddle

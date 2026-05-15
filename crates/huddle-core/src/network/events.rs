@@ -38,4 +38,9 @@ pub enum NetworkEvent {
         fingerprint: String,
         address: Multiaddr,
     },
+    /// Phase D: a `/p2p-circuit` reservation on a configured relay
+    /// succeeded — peers across the internet can now dial us via this
+    /// circuit address. Fires when libp2p emits `NewListenAddr` for an
+    /// address with `/p2p-circuit/` in its path.
+    RelayReservationEstablished { address: Multiaddr },
 }

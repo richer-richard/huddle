@@ -157,13 +157,14 @@ pub struct AppHandle {
 
 impl AppHandle {
     pub async fn start() -> Result<Self> {
-        Self::start_with_options(NetworkMode::Mdns, 0, None).await
+        Self::start_with_options(NetworkMode::Mdns, 0, None, Vec::new()).await
     }
 
     pub async fn start_with_options(
         mode: NetworkMode,
         port: u16,
         master_key: Option<&[u8; 32]>,
+        relays: Vec<Multiaddr>,
     ) -> Result<Self> {
         config::ensure_data_dir()?;
         // Megolm session state is encrypted at rest with an HKDF subkey
@@ -175,11 +176,11 @@ impl AppHandle {
             None => [0u8; 32],
         };
         let db = storage::open_db(&config::db_path(), master_key)?;
-        Self::start_with_db_and_options(db, mode, port, session_persist_key).await
+        Self::start_with_db_and_options(db, mode, port, session_persist_key, relays).await
     }
 
     pub async fn start_with_db(db: Db) -> Result<Self> {
-        Self::start_with_db_and_options(db, NetworkMode::Mdns, 0, [0u8; 32]).await
+        Self::start_with_db_and_options(db, NetworkMode::Mdns, 0, [0u8; 32], Vec::new()).await
     }
 
     pub async fn start_with_db_and_options(
@@ -187,14 +188,16 @@ impl AppHandle {
         mode: NetworkMode,
         port: u16,
         session_persist_key: [u8; 32],
+        relays: Vec<Multiaddr>,
     ) -> Result<Self> {
         let identity = Self::load_or_create_identity(&db)?;
         let identity = Arc::new(identity);
-        info!(fingerprint = %identity.fingerprint(), peer_id = %identity.peer_id(), mode = %mode.as_str(), port, "identity loaded");
+        info!(fingerprint = %identity.fingerprint(), peer_id = %identity.peer_id(), mode = %mode.as_str(), port, relay_count = relays.len(), "identity loaded");
 
         let (net_event_tx, net_event_rx) = tokio::sync::mpsc::channel::<NetworkEvent>(256);
         let (app_event_tx, _) = broadcast::channel::<AppEvent>(256);
-        let network = network::start_network_with(&identity, net_event_tx, mode, port)?;
+        let network =
+            network::start_network_with(&identity, net_event_tx, mode, port, relays)?;
 
         let active_rooms = Arc::new(Mutex::new(HashMap::new()));
         let discovered_rooms = Arc::new(Mutex::new(HashMap::new()));
@@ -1138,6 +1141,16 @@ impl AppHandle {
                         },
                     );
                 }
+            }
+            NetworkEvent::RelayReservationEstablished { address } => {
+                // Treat the circuit address like any other listen
+                // address — the TUI's ListeningOn handler dedups + adds
+                // it to the addresses pane. Also emit a status hint via
+                // ListeningOn so the lobby's reachability line updates.
+                info!(addr = %address, "relay reservation established");
+                let _ = self.app_event_tx.send(AppEvent::ListeningOn {
+                    address: address.to_string(),
+                });
             }
             NetworkEvent::InboundDial {
                 peer_id,

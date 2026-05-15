@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 use clap::Parser;
+use libp2p::Multiaddr;
 use tracing_appender::rolling;
 use tracing_subscriber::EnvFilter;
 
@@ -35,6 +36,19 @@ struct Cli {
     /// at-rest database (Phase 1 behavior). For testing only.
     #[arg(long)]
     no_master_passphrase: bool,
+
+    /// Phase D: register with a libp2p Circuit Relay v2 server so peers
+    /// behind NAT can dial us via `<this-addr>/p2p-circuit/p2p/<our-id>`.
+    /// Repeat to register with multiple relays. The multiaddr MUST
+    /// include `/p2p/<peer-id>` so the dial enforces pubkey match.
+    /// No defaults — you opt in.
+    #[arg(long = "relay", value_name = "MULTIADDR")]
+    relays: Vec<String>,
+
+    /// Phase D: opt out of relay registration even if `config.toml` has
+    /// entries. LAN-only operation.
+    #[arg(long)]
+    no_relay: bool,
 }
 
 fn parse_mode(s: &str) -> std::result::Result<NetworkMode, String> {
@@ -111,10 +125,31 @@ async fn main() -> Result<()> {
         (Some(key), prompt.username)
     };
 
+    // Phase D: assemble the relay multiaddr list. CLI flags override
+    // config.toml. `--no-relay` wins over everything else.
+    let relays: Vec<Multiaddr> = if cli.no_relay {
+        Vec::new()
+    } else {
+        let mut from_cli: Vec<String> = cli.relays.clone();
+        if from_cli.is_empty() {
+            from_cli = huddle_core::config::load_relays()
+                .unwrap_or_default();
+        }
+        let mut parsed = Vec::new();
+        for s in &from_cli {
+            match s.parse::<Multiaddr>() {
+                Ok(m) => parsed.push(m),
+                Err(e) => tracing::warn!(%e, addr = %s, "ignoring invalid --relay addr"),
+            }
+        }
+        parsed
+    };
+
     let handle = huddle_core::app::AppHandle::start_with_options(
         mode,
         cli.port,
         master_key.as_ref(),
+        relays,
     )
     .await
     .map_err(|e| anyhow!(e))?;
