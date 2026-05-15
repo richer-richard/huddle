@@ -54,11 +54,29 @@ pub enum Modal {
     /// trust-and-accept. Dismiss without choosing (Esc, 15s timeout) =
     /// auto-reject — anything more permissive would defeat the gate.
     InboundDial(InboundDialState),
+    /// Phase B: owner-only picker for kick / grant-owner on a member.
+    MemberAction(MemberActionState),
     QuitConfirm,
     Help,
     Error(String),
     #[allow(dead_code)]
     Info(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberActionKind {
+    Kick,
+    Grant,
+}
+
+#[derive(Debug, Clone)]
+pub struct MemberActionState {
+    pub room_id: String,
+    pub kind: MemberActionKind,
+    /// (fingerprint, is_already_owner). For Grant, owners are filtered
+    /// out at open-time so the list only shows promotable members.
+    pub members: Vec<(String, bool)>,
+    pub selected: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -627,6 +645,45 @@ fn short_room(room_id: &str) -> String {
 /// collision resistance, plenty for a status line.
 fn short_fp(fp: &str) -> String {
     fp.split('-').take(2).collect::<Vec<_>>().join("-")
+}
+
+/// Phase B: gather a member list for the kick / grant picker. Filters:
+/// - excludes ourselves (you can't kick yourself, granting yourself is
+///   a no-op since `start_room` already made you an owner)
+/// - for Grant, hides current owners so the picker only shows
+///   promotable members
+/// - returns None if we aren't an owner of the active room (gates the
+///   feature in one place)
+fn owner_action_members(
+    app: &TuiApp,
+    kind: MemberActionKind,
+) -> Option<(String, Vec<(String, bool)>)> {
+    let room_id = app.active_room()?.room_id.clone();
+    let our_fp = app.handle.fingerprint().to_string();
+    if !app.handle.is_owner(&room_id, &our_fp) {
+        // Status message is set by the caller's wrapper if we'd like;
+        // returning None here just makes the keybinding a no-op for
+        // non-owners, which is the intended UX.
+        return None;
+    }
+    let owners: std::collections::HashSet<String> =
+        app.handle.room_owners(&room_id).into_iter().collect();
+    let members: Vec<(String, bool)> = app
+        .active_room()?
+        .members
+        .iter()
+        .filter(|fp| *fp != &our_fp)
+        .filter(|fp| match kind {
+            MemberActionKind::Kick => true,
+            // Already an owner → nothing to grant
+            MemberActionKind::Grant => !owners.contains(*fp),
+        })
+        .map(|fp| (fp.clone(), owners.contains(fp)))
+        .collect();
+    if members.is_empty() {
+        return None;
+    }
+    Some((room_id, members))
 }
 
 /// Scroll the active room by `delta` lines (negative = up). Maintains
@@ -1819,6 +1876,89 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             };
             if let Err(e) = app.handle.set_member_verified(&room_id, &fp, new_state) {
                 app.modal = Modal::Error(format!("verify failed: {e}"));
+            }
+            Ok(false)
+        }
+        Action::OpenKickPicker => {
+            let (room_id, members) = match owner_action_members(app, MemberActionKind::Kick) {
+                Some(t) => t,
+                None => return Ok(false),
+            };
+            app.modal = Modal::MemberAction(MemberActionState {
+                room_id,
+                kind: MemberActionKind::Kick,
+                members,
+                selected: 0,
+            });
+            Ok(false)
+        }
+        Action::OpenGrantPicker => {
+            let (room_id, members) = match owner_action_members(app, MemberActionKind::Grant) {
+                Some(t) => t,
+                None => return Ok(false),
+            };
+            app.modal = Modal::MemberAction(MemberActionState {
+                room_id,
+                kind: MemberActionKind::Grant,
+                members,
+                selected: 0,
+            });
+            Ok(false)
+        }
+        Action::MemberActionNext => {
+            if let Modal::MemberAction(s) = &mut app.modal {
+                if s.selected + 1 < s.members.len() {
+                    s.selected += 1;
+                }
+            }
+            Ok(false)
+        }
+        Action::MemberActionPrev => {
+            if let Modal::MemberAction(s) = &mut app.modal {
+                if s.selected > 0 {
+                    s.selected -= 1;
+                }
+            }
+            Ok(false)
+        }
+        Action::MemberActionConfirm => {
+            let snapshot = if let Modal::MemberAction(s) = &app.modal {
+                s.members
+                    .get(s.selected)
+                    .map(|(fp, _)| (s.room_id.clone(), s.kind, fp.clone()))
+            } else {
+                None
+            };
+            let (room_id, kind, target_fp) = match snapshot {
+                Some(t) => t,
+                None => return Ok(false),
+            };
+            app.modal = Modal::None;
+            match kind {
+                MemberActionKind::Grant => {
+                    match app.handle.grant_owner(&room_id, &target_fp).await {
+                        Ok(()) => app.set_status(format!("granted owner to {}", short_fp(&target_fp))),
+                        Err(e) => app.modal = Modal::Error(format!("grant failed: {e}")),
+                    }
+                }
+                MemberActionKind::Kick => {
+                    match app.handle.kick_member(&room_id, &target_fp).await {
+                        Ok(new_pp) if new_pp.is_empty() => {
+                            app.set_status(format!("kicked {}", short_fp(&target_fp)));
+                        }
+                        Ok(new_pp) => {
+                            // Show the new passphrase prominently so the
+                            // owner can copy + share OOB with remaining
+                            // members. Modal::Info dismisses on any key.
+                            app.modal = Modal::Info(format!(
+                                "kicked {}. new passphrase (share OOB with remaining members):\n\n  {}",
+                                short_fp(&target_fp),
+                                new_pp
+                            ));
+                        }
+                        Err(e) => app.modal = Modal::Error(format!("kick failed: {e}")),
+                    }
+                }
             }
             Ok(false)
         }

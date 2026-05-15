@@ -219,20 +219,26 @@ pub struct StoredRoomMember {
     /// to verify `SignedRoomMessage` envelopes from this fingerprint.
     /// `None` for pre-Phase-0 rows or for peers running older builds.
     pub ed25519_pubkey: Option<String>,
+    /// Phase B: `"owner"` or `"member"`. Set on first insert
+    /// (`start_room` sets the creator to `"owner"`); never overwritten
+    /// by re-announcements so OwnerGrant is the only way to promote
+    /// after the fact.
+    pub role: String,
 }
 
 /// Insert a member, or update in place on (room_id, fingerprint) collision.
-/// `verified` is set only on first insert and is intentionally absent from
-/// the conflict-update clause: a re-announcement can never silently reset
-/// a member's verified flag, and a genuinely new fingerprint is a new
-/// (unverified) row. `peer_id` and `ed25519_pubkey` are only overwritten
-/// when the incoming value is non-null/non-empty — a re-announce that
-/// drops the pubkey field must not erase the one we already learned.
+/// `verified` and `role` are set only on first insert and intentionally
+/// absent from the conflict-update clause: a re-announcement can never
+/// silently reset a member's verified flag or demote an owner to member.
+/// A genuinely new fingerprint is a new (unverified, member) row.
+/// `peer_id` and `ed25519_pubkey` are only overwritten when the incoming
+/// value is non-null/non-empty — a re-announce that drops the pubkey
+/// field must not erase the one we already learned.
 pub fn upsert_room_member(db: &Db, member: &StoredRoomMember) -> Result<()> {
     let conn = db.lock().unwrap();
     conn.execute(
-        "INSERT INTO room_members (room_id, peer_id, fingerprint, last_seen, verified, ed25519_pubkey)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        "INSERT INTO room_members (room_id, peer_id, fingerprint, last_seen, verified, ed25519_pubkey, role)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(room_id, fingerprint) DO UPDATE SET
             last_seen = excluded.last_seen,
             peer_id = CASE
@@ -247,6 +253,7 @@ pub fn upsert_room_member(db: &Db, member: &StoredRoomMember) -> Result<()> {
             member.last_seen,
             member.verified as i64,
             member.ed25519_pubkey,
+            member.role,
         ],
     )?;
     Ok(())
@@ -255,7 +262,7 @@ pub fn upsert_room_member(db: &Db, member: &StoredRoomMember) -> Result<()> {
 pub fn list_room_members(db: &Db, room_id: &str) -> Result<Vec<StoredRoomMember>> {
     let conn = db.lock().unwrap();
     let mut stmt = conn.prepare(
-        "SELECT room_id, peer_id, fingerprint, last_seen, verified, ed25519_pubkey FROM room_members WHERE room_id = ?1",
+        "SELECT room_id, peer_id, fingerprint, last_seen, verified, ed25519_pubkey, role FROM room_members WHERE room_id = ?1",
     )?;
     let rows = stmt.query_map(params![room_id], |row| {
         Ok(StoredRoomMember {
@@ -265,8 +272,85 @@ pub fn list_room_members(db: &Db, room_id: &str) -> Result<Vec<StoredRoomMember>
             last_seen: row.get(3)?,
             verified: row.get::<_, i64>(4).unwrap_or(0) != 0,
             ed25519_pubkey: row.get(5).ok().flatten(),
+            role: row.get(6).unwrap_or_else(|_| "member".to_string()),
         })
     })?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+/// Phase B: promote / demote a member's role. Used by the `OwnerGrant`
+/// handler. Callers must verify the grant signature came from an owner
+/// before invoking — the repo function trusts its inputs.
+pub fn set_member_role(db: &Db, room_id: &str, fingerprint: &str, role: &str) -> Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "UPDATE room_members SET role = ?1 WHERE room_id = ?2 AND fingerprint = ?3",
+        params![role, room_id, fingerprint],
+    )?;
+    Ok(())
+}
+
+/// Phase B: list owners of a room — fingerprints with role = 'owner'.
+/// Used for `RoomAnnouncement.owner_fingerprints` and for verifying
+/// that an incoming `OwnerGrant` / `BanMember` came from a current owner.
+pub fn list_room_owners(db: &Db, room_id: &str) -> Result<Vec<String>> {
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare(
+        "SELECT fingerprint FROM room_members WHERE room_id = ?1 AND role = 'owner'",
+    )?;
+    let rows = stmt.query_map(params![room_id], |row| row.get::<_, String>(0))?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+/// Phase B: persistent room-level ban. Banned members are ignored on
+/// receive (MemberAnnounce dropped, messages skipped) and excluded from
+/// future session-key wraps. Idempotent.
+pub fn add_room_ban(
+    db: &Db,
+    room_id: &str,
+    banned_fingerprint: &str,
+    banned_by_fingerprint: &str,
+    signature_b64: &str,
+    banned_at: i64,
+) -> Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "INSERT INTO room_bans (room_id, banned_fingerprint, banned_by_fingerprint, signature_b64, banned_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(room_id, banned_fingerprint) DO UPDATE SET
+            banned_by_fingerprint = excluded.banned_by_fingerprint,
+            signature_b64 = excluded.signature_b64,
+            banned_at = excluded.banned_at",
+        params![
+            room_id,
+            banned_fingerprint,
+            banned_by_fingerprint,
+            signature_b64,
+            banned_at,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn is_member_banned(db: &Db, room_id: &str, fingerprint: &str) -> Result<bool> {
+    let conn = db.lock().unwrap();
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM room_bans WHERE room_id = ?1 AND banned_fingerprint = ?2",
+            params![room_id, fingerprint],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    Ok(count > 0)
+}
+
+#[allow(dead_code)]
+pub fn list_room_bans(db: &Db, room_id: &str) -> Result<Vec<String>> {
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare(
+        "SELECT banned_fingerprint FROM room_bans WHERE room_id = ?1",
+    )?;
+    let rows = stmt.query_map(params![room_id], |row| row.get::<_, String>(0))?;
     Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
 }
 
@@ -897,6 +981,7 @@ mod tests {
                 last_seen: Some(500),
                 verified: false,
                 ed25519_pubkey: None,
+                role: "member".into(),
             },
         )
         .unwrap();
@@ -920,6 +1005,7 @@ mod tests {
                 last_seen: None,
                 verified: false,
                 ed25519_pubkey: None,
+                role: "member".into(),
             },
         )
         .unwrap();

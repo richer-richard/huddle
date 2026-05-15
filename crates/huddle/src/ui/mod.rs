@@ -26,6 +26,7 @@ pub fn render(f: &mut Frame, app: &TuiApp) {
         Modal::Search(s) => modal::render_search(f, s),
         Modal::QrIdentity => modal::render_qr_identity(f, app),
         Modal::InboundDial(s) => modal::render_inbound_dial(f, s),
+        Modal::MemberAction(s) => modal::render_member_action(f, s),
         Modal::QuitConfirm => modal::render_quit_confirm(f),
         Modal::Help => modal::render_help(f),
         Modal::Error(msg) => modal::render_error(f, msg),

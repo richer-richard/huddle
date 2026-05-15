@@ -107,4 +107,23 @@ pub const MIGRATIONS: &[&str] = &[
         fingerprint TEXT PRIMARY KEY,
         blocked_at INTEGER NOT NULL
     );",
+    // Phase B: soft owner role. 'owner' = can grant other owners and
+    // ban members; 'member' = vanilla participant. The creator of a
+    // room is auto-promoted at start_room time; subsequent grants
+    // come from `RoomMessage::OwnerGrant` (signed envelopes).
+    "ALTER TABLE room_members ADD COLUMN role TEXT NOT NULL DEFAULT 'member';",
+    // Phase B: per-room ban list. A banned fingerprint is ignored by
+    // honest clients — their MemberAnnounce is dropped, their messages
+    // skipped. The cryptographic enforcement is the immediate
+    // RotateRoomKey that follows a ban: the banned peer can't unwrap
+    // the new session key without the new passphrase.
+    "CREATE TABLE IF NOT EXISTS room_bans (
+        room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+        banned_fingerprint TEXT NOT NULL,
+        banned_by_fingerprint TEXT NOT NULL,
+        signature_b64 TEXT NOT NULL,
+        banned_at INTEGER NOT NULL,
+        PRIMARY KEY (room_id, banned_fingerprint)
+    );",
+    "CREATE INDEX IF NOT EXISTS idx_room_bans_room ON room_bans(room_id);",
 ];

@@ -80,6 +80,12 @@ pub struct RoomAnnouncement {
     pub creator_fingerprint: String,
     /// Seconds since UNIX_EPOCH when this announcement was emitted.
     pub announced_at: i64,
+    /// Phase B: fingerprints with role = 'owner' — the soft moderator
+    /// set. Newcomers learn from this who's authorized to grant other
+    /// owners and to issue bans (signed via `SignedRoomMessage`).
+    /// `#[serde(default)]` for forward-compat with pre-0.3 senders.
+    #[serde(default)]
+    pub owner_fingerprints: Vec<String>,
 }
 
 /// All messages on a room's per-room topic.
@@ -165,6 +171,23 @@ pub enum RoomMessage {
         /// rooms, ChaCha20-Poly1305 ciphertext for encrypted).
         data_b64: String,
     },
+    /// Phase B: an existing owner promotes `target_fingerprint` to
+    /// owner. MUST be sent inside `WireMessage::Signed` — the signer
+    /// must be on the room's current `owner_fingerprints` list for
+    /// honest receivers to apply the change.
+    OwnerGrant {
+        room_id: String,
+        target_fingerprint: String,
+    },
+    /// Phase B: an existing owner bans `target_fingerprint` from the
+    /// room. MUST be sent inside `WireMessage::Signed`. Honest clients
+    /// then ignore the banned fingerprint's MemberAnnounce + messages.
+    /// The cryptographic enforcement is the immediate `RotateRoomKey`
+    /// that the banning owner sends right after.
+    BanMember {
+        room_id: String,
+        target_fingerprint: String,
+    },
 }
 
 #[cfg(test)]
@@ -181,6 +204,7 @@ mod tests {
             member_count: 3,
             creator_fingerprint: "creator-fp".into(),
             announced_at: 100,
+            owner_fingerprints: vec!["creator-fp".into()],
         };
         let json = serde_json::to_vec(&ann).unwrap();
         let back: RoomAnnouncement = serde_json::from_slice(&json).unwrap();

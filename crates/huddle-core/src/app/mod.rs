@@ -356,6 +356,22 @@ impl AppHandle {
         let mut members = HashSet::new();
         members.insert(creator_fp.clone());
 
+        // Phase B: the room creator is the first owner. Persisted now so
+        // the very first announcement includes our fingerprint in
+        // `owner_fingerprints`, letting joiners know who's authorized.
+        repo::upsert_room_member(
+            &self.db,
+            &StoredRoomMember {
+                room_id: room_id.clone(),
+                peer_id: String::new(),
+                fingerprint: creator_fp.clone(),
+                last_seen: Some(created_at),
+                verified: true, // we trust ourselves
+                ed25519_pubkey: Some(B64.encode(self.identity.public_bytes())),
+                role: "owner".into(),
+            },
+        )?;
+
         self.active_rooms.lock().unwrap().insert(
             room_id.clone(),
             ActiveRoom {
@@ -814,6 +830,8 @@ impl AppHandle {
     }
 
     async fn announce_room_now(&self, info: &StoredRoom, member_count: u32) {
+        let owner_fingerprints =
+            repo::list_room_owners(&self.db, &info.id).unwrap_or_default();
         let ann = RoomAnnouncement {
             room_id: info.id.clone(),
             name: info.name.clone(),
@@ -822,6 +840,7 @@ impl AppHandle {
             member_count,
             creator_fingerprint: info.creator_fingerprint.clone(),
             announced_at: now_unix(),
+            owner_fingerprints,
         };
         self.network.announce_room(ann).await;
     }
@@ -992,11 +1011,11 @@ impl AppHandle {
                         return;
                     }
                 };
-                let msg = match wire {
-                    WireMessage::Plain(m) => m,
+                let (msg, verified_signer) = match wire {
+                    WireMessage::Plain(m) => (m, None),
                     WireMessage::Signed(env) => {
                         match crate::crypto::verify_signed(&env) {
-                            Ok((m, _verified_fp)) => m,
+                            Ok((m, fp)) => (m, Some(fp)),
                             Err(e) => {
                                 warn!(%e, fp = %env.fingerprint, "signed envelope verify failed");
                                 return;
@@ -1004,7 +1023,7 @@ impl AppHandle {
                         }
                     }
                 };
-                self.handle_room_message(&room_id, msg).await;
+                self.handle_room_message(&room_id, msg, verified_signer).await;
             }
             NetworkEvent::DialSucceeded { peer_id, address } => {
                 let addr_s = address.to_string();
@@ -1116,7 +1135,17 @@ impl AppHandle {
         }
     }
 
-    async fn handle_room_message(&self, room_id: &str, msg: RoomMessage) {
+    /// `verified_signer` is `Some(fp)` if this message arrived inside a
+    /// successfully-verified `WireMessage::Signed` envelope — in which
+    /// case the inner sender_fingerprint *must* match. `None` for
+    /// `WireMessage::Plain`. Phase B's `OwnerGrant`/`BanMember` arms
+    /// require it to be `Some` AND the signer to be a current owner.
+    async fn handle_room_message(
+        &self,
+        room_id: &str,
+        msg: RoomMessage,
+        verified_signer: Option<String>,
+    ) {
         let our_fp = self.identity.fingerprint().to_string();
         match msg {
             RoomMessage::MemberAnnounce {
@@ -1126,6 +1155,14 @@ impl AppHandle {
                 sender_ed25519_pubkey,
             } => {
                 if sender_fingerprint == our_fp {
+                    return;
+                }
+                // Drop announcements from banned fingerprints — they
+                // can't rejoin until an owner unbans them (Phase B).
+                if repo::is_member_banned(&self.db, room_id, &sender_fingerprint)
+                    .unwrap_or(false)
+                {
+                    info!(%sender_fingerprint, %room_id, "dropping MemberAnnounce from banned peer");
                     return;
                 }
                 let need_inbound = {
@@ -1154,6 +1191,12 @@ impl AppHandle {
                             last_seen: Some(now_unix()),
                             verified: false,
                             ed25519_pubkey: sender_ed25519_pubkey.clone(),
+                            // Role is set on first insert only — the
+                            // upsert ON CONFLICT clause preserves an
+                            // existing 'owner' on re-announce. A genuine
+                            // new fingerprint is a 'member' until an
+                            // OwnerGrant lands.
+                            role: "member".into(),
                         },
                     );
                     if let Some(name) = display_name.as_deref() {
@@ -1374,6 +1417,81 @@ impl AppHandle {
                     total_chunks,
                     data_b64,
                 );
+            }
+            RoomMessage::OwnerGrant {
+                room_id: announced_room_id,
+                target_fingerprint,
+            } => {
+                // Both: payload room_id must match the topic's room_id
+                // (no cross-room replay), AND the signer must be a
+                // current owner of this room. Unsigned forgeries land in
+                // `verified_signer = None` and are dropped here.
+                if announced_room_id != room_id {
+                    warn!(payload_room = %announced_room_id, topic_room = %room_id, "OwnerGrant room mismatch");
+                    return;
+                }
+                let signer = match verified_signer {
+                    Some(fp) => fp,
+                    None => {
+                        warn!(%room_id, "OwnerGrant arrived unsigned; dropping");
+                        return;
+                    }
+                };
+                if !self.is_owner(room_id, &signer) {
+                    warn!(%signer, %room_id, "OwnerGrant signer isn't an owner; dropping");
+                    return;
+                }
+                info!(%signer, %target_fingerprint, %room_id, "OwnerGrant applied");
+                if let Err(e) =
+                    repo::set_member_role(&self.db, room_id, &target_fingerprint, "owner")
+                {
+                    warn!(%e, "OwnerGrant: set_member_role failed");
+                }
+            }
+            RoomMessage::BanMember {
+                room_id: announced_room_id,
+                target_fingerprint,
+            } => {
+                if announced_room_id != room_id {
+                    warn!(payload_room = %announced_room_id, topic_room = %room_id, "BanMember room mismatch");
+                    return;
+                }
+                let signer = match verified_signer {
+                    Some(fp) => fp,
+                    None => {
+                        warn!(%room_id, "BanMember arrived unsigned; dropping");
+                        return;
+                    }
+                };
+                if !self.is_owner(room_id, &signer) {
+                    warn!(%signer, %room_id, "BanMember signer isn't an owner; dropping");
+                    return;
+                }
+                if target_fingerprint == our_fp {
+                    // We've been kicked. Locally evict ourselves so the
+                    // TUI tabs close; the kicker's subsequent
+                    // RotateRoomKey will arrive separately and we
+                    // simply won't be able to decrypt the new key,
+                    // matching the "soft kick" semantics.
+                    info!(%room_id, %signer, "we were kicked from this room");
+                    self.active_rooms.lock().unwrap().remove(room_id);
+                    let _ = self.app_event_tx.send(AppEvent::RoomLeft {
+                        room_id: room_id.to_string(),
+                    });
+                    return;
+                }
+                info!(%signer, %target_fingerprint, %room_id, "BanMember applied");
+                if let Err(e) = repo::add_room_ban(
+                    &self.db,
+                    room_id,
+                    &target_fingerprint,
+                    &signer,
+                    "", // signature lives in the envelope, not the row
+                    now_unix(),
+                ) {
+                    warn!(%e, "BanMember: add_room_ban failed");
+                }
+                self.evict_banned_member(room_id, &target_fingerprint);
             }
         }
     }
@@ -1625,6 +1743,7 @@ impl AppHandle {
                     last_seen: Some(now_unix()),
                     verified,
                     ed25519_pubkey: None,
+                    role: "member".into(),
                 },
             )?;
         }
@@ -1633,6 +1752,142 @@ impl AppHandle {
 
     pub fn verified_fingerprints(&self, room_id: &str) -> Vec<String> {
         repo::list_verified_fingerprints(&self.db, room_id).unwrap_or_default()
+    }
+
+    /// Phase B: is `fingerprint` an owner of `room_id`? Used by the TUI
+    /// to gate `^K` / `^G` and the kick/grant member-picker actions.
+    pub fn is_owner(&self, room_id: &str, fingerprint: &str) -> bool {
+        repo::list_room_owners(&self.db, room_id)
+            .unwrap_or_default()
+            .iter()
+            .any(|fp| fp == fingerprint)
+    }
+
+    pub fn we_are_owner(&self, room_id: &str) -> bool {
+        self.is_owner(room_id, &self.identity.fingerprint().to_string())
+    }
+
+    /// Phase B: list current owner fingerprints for `room_id` — used to
+    /// render an owner badge in the member panel.
+    pub fn room_owners(&self, room_id: &str) -> Vec<String> {
+        repo::list_room_owners(&self.db, room_id).unwrap_or_default()
+    }
+
+    /// Phase B: promote `target_fingerprint` to owner. Builds a signed
+    /// `OwnerGrant`, broadcasts it, and applies it locally. Returns an
+    /// error if we ourselves aren't an owner — only owners can grant.
+    pub async fn grant_owner(&self, room_id: &str, target_fingerprint: &str) -> Result<()> {
+        let our_fp = self.identity.fingerprint().to_string();
+        if !self.is_owner(room_id, &our_fp) {
+            return Err(HuddleError::Other(
+                "only an owner can grant owner".into(),
+            ));
+        }
+        let msg = RoomMessage::OwnerGrant {
+            room_id: room_id.to_string(),
+            target_fingerprint: target_fingerprint.to_string(),
+        };
+        let env = crate::crypto::sign_message(&self.identity, &msg)?;
+        let bytes = crate::network::protocol::encode_wire_signed(&env)?;
+        self.network
+            .publish_room_message(room_id.to_string(), bytes)
+            .await;
+        // Apply locally too — peers will converge on the next announce.
+        repo::set_member_role(&self.db, room_id, target_fingerprint, "owner")?;
+        Ok(())
+    }
+
+    /// Phase B: kick `target_fingerprint` from `room_id`. Broadcasts a
+    /// signed `BanMember`, records the ban locally, then immediately
+    /// rotates the room key under a freshly-generated passphrase. Returns
+    /// the new passphrase so the caller can show it to the owner for
+    /// out-of-band sharing with remaining members.
+    ///
+    /// The rotation is the cryptographic enforcement: a banned peer can
+    /// still subscribe to the gossipsub topic and see the ciphertext,
+    /// but they can't unwrap the new session key without the new
+    /// passphrase, so they can't decrypt anything sent after the kick.
+    pub async fn kick_member(
+        &self,
+        room_id: &str,
+        target_fingerprint: &str,
+    ) -> Result<String> {
+        let our_fp = self.identity.fingerprint().to_string();
+        if !self.is_owner(room_id, &our_fp) {
+            return Err(HuddleError::Other("only an owner can kick".into()));
+        }
+        if target_fingerprint == our_fp {
+            return Err(HuddleError::Other("can't kick yourself".into()));
+        }
+        let info = self
+            .active_rooms
+            .lock()
+            .unwrap()
+            .get(room_id)
+            .map(|r| r.info.clone())
+            .ok_or_else(|| HuddleError::Other(format!("not in room {room_id}")))?;
+        if !info.encrypted {
+            // Without a key to rotate, a "kick" is purely advisory —
+            // ban only. Honest clients drop their messages, but anyone
+            // can still read the room. Honest in v1; documented.
+            let msg = RoomMessage::BanMember {
+                room_id: room_id.to_string(),
+                target_fingerprint: target_fingerprint.to_string(),
+            };
+            let env = crate::crypto::sign_message(&self.identity, &msg)?;
+            let bytes = crate::network::protocol::encode_wire_signed(&env)?;
+            self.network
+                .publish_room_message(room_id.to_string(), bytes)
+                .await;
+            repo::add_room_ban(
+                &self.db,
+                room_id,
+                target_fingerprint,
+                &our_fp,
+                &env.signature_b64,
+                now_unix(),
+            )?;
+            self.evict_banned_member(room_id, target_fingerprint);
+            return Ok(String::new());
+        }
+        // Encrypted room — full kick path.
+        let new_passphrase = generate_join_passphrase();
+        let msg = RoomMessage::BanMember {
+            room_id: room_id.to_string(),
+            target_fingerprint: target_fingerprint.to_string(),
+        };
+        let env = crate::crypto::sign_message(&self.identity, &msg)?;
+        let bytes = crate::network::protocol::encode_wire_signed(&env)?;
+        self.network
+            .publish_room_message(room_id.to_string(), bytes)
+            .await;
+        repo::add_room_ban(
+            &self.db,
+            room_id,
+            target_fingerprint,
+            &our_fp,
+            &env.signature_b64,
+            now_unix(),
+        )?;
+        self.evict_banned_member(room_id, target_fingerprint);
+        // Reuse the existing rotation flow so all the existing salt /
+        // session / persistence logic stays in one place.
+        self.rotate_room(room_id, &new_passphrase).await?;
+        Ok(new_passphrase)
+    }
+
+    /// Phase B internal: drop a banned member's in-memory presence in a
+    /// room. Persistent ban already went to `room_bans`. Called from
+    /// `kick_member` (locally banning ourselves) and from the
+    /// `RoomMessage::BanMember` receive arm (peer-initiated ban).
+    fn evict_banned_member(&self, room_id: &str, fingerprint: &str) {
+        if let Some(room) = self.active_rooms.lock().unwrap().get_mut(room_id) {
+            room.members.remove(fingerprint);
+        }
+        let _ = self.app_event_tx.send(AppEvent::MemberLeft {
+            room_id: room_id.to_string(),
+            fingerprint: fingerprint.to_string(),
+        });
     }
 
     pub fn display_name(&self) -> Option<String> {
@@ -2016,6 +2271,20 @@ fn now_unix() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64
+}
+
+/// Phase B: generate a fresh 24-char base64-ish passphrase for the
+/// rotation that follows a kick. Sourced from `OsRng` directly so the
+/// kicker doesn't have to think up a strong one on the spot. Returned
+/// to the owner via the kick-result modal for OOB sharing with the
+/// remaining members.
+fn generate_join_passphrase() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    // Use URL-safe-no-pad so the user can read aloud / paste without
+    // worrying about `=` padding or `+` getting URL-escaped.
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
 #[cfg(test)]

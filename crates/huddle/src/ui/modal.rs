@@ -3,7 +3,8 @@ use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
 
 use crate::app::{
     AcceptRotationState, AttachPickerState, DialPeerState, InboundDialState, JoinRoomState,
-    RotateRoomState, SearchState, StartField, StartRoomState, VerifyState,
+    MemberActionKind, MemberActionState, RotateRoomState, SearchState, StartField, StartRoomState,
+    VerifyState,
 };
 use crate::ui::centered_rect;
 
@@ -757,6 +758,86 @@ pub fn render_inbound_dial(f: &mut Frame, s: &InboundDialState) {
                 .title(Span::styled(
                     " inbound connection ",
                     Style::default().fg(Color::Yellow).bold(),
+                )),
+        );
+    f.render_widget(para, area);
+}
+
+/// Phase B: kick / grant member picker. Owner-only — the action handler
+/// gates the open via `owner_action_members`. List of (fingerprint,
+/// is_owner) so the picker can badge existing owners (for the Kick
+/// flavor — Grant filters them out at open time).
+pub fn render_member_action(f: &mut Frame, s: &MemberActionState) {
+    let title = match s.kind {
+        MemberActionKind::Kick => " kick member ",
+        MemberActionKind::Grant => " grant owner ",
+    };
+    let border_color = match s.kind {
+        MemberActionKind::Kick => Color::Red,
+        MemberActionKind::Grant => Color::Cyan,
+    };
+    let action_word = match s.kind {
+        MemberActionKind::Kick => "kick",
+        MemberActionKind::Grant => "grant owner to",
+    };
+
+    let height = 8 + s.members.len() as u16;
+    let area = centered_rect(64, height.min(20), f.area());
+    f.render_widget(Clear, area);
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!("  pick a member to {}:", action_word),
+        Style::default().fg(Color::White),
+    )));
+    lines.push(Line::from(""));
+    for (idx, (fp, is_owner)) in s.members.iter().enumerate() {
+        let selected = idx == s.selected;
+        let marker = if selected { "▶" } else { " " };
+        let badge = if *is_owner { " (owner)" } else { "" };
+        let style = if selected {
+            Style::default().fg(Color::Yellow).bold()
+        } else {
+            Style::default().fg(Color::White)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {} ", marker), style),
+            Span::styled(fp.clone(), style),
+            Span::styled(badge, Style::default().fg(Color::DarkGray)),
+        ]));
+    }
+    if s.kind == MemberActionKind::Kick {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  kick = ban + rotate room key. you'll get the new",
+            Style::default().fg(Color::DarkGray),
+        )));
+        lines.push(Line::from(Span::styled(
+            "  passphrase to share with remaining members.",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled(" j/k", Style::default().fg(Color::Yellow)),
+        Span::styled(" move  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Enter", Style::default().fg(Color::Yellow)),
+        Span::styled(" confirm  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Esc", Style::default().fg(Color::Yellow)),
+        Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
+    ]));
+
+    let para = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(border_color))
+                .padding(Padding::uniform(1))
+                .title(Span::styled(
+                    title,
+                    Style::default().fg(border_color).bold(),
                 )),
         );
     f.render_widget(para, area);

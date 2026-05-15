@@ -93,6 +93,12 @@ pub enum Action {
     InboundDialAccept,
     InboundDialReject,
     InboundDialTrust,
+    // Phase B: soft owner role
+    OpenKickPicker,
+    OpenGrantPicker,
+    MemberActionNext,
+    MemberActionPrev,
+    MemberActionConfirm,
 }
 
 pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
@@ -201,6 +207,13 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
             KeyCode::Char('t') | KeyCode::Char('T') => Action::InboundDialTrust,
             _ => Action::Nothing,
         },
+        Modal::MemberAction(_) => match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => Action::CloseModal,
+            KeyCode::Char('j') | KeyCode::Down => Action::MemberActionNext,
+            KeyCode::Char('k') | KeyCode::Up => Action::MemberActionPrev,
+            KeyCode::Enter => Action::MemberActionConfirm,
+            _ => Action::Nothing,
+        },
         Modal::None => map_normal(key, app),
     }
 }
@@ -258,6 +271,8 @@ fn map_in_room(key: KeyEvent, app: &TuiApp) -> Action {
             KeyCode::Char('v') if !input_active => Action::OpenVerify,
             KeyCode::Char('f') if !input_active => Action::OpenSearch,
             KeyCode::Char('m') if !input_active => Action::ToggleMute,
+            KeyCode::Char('k') if !input_active => Action::OpenKickPicker,
+            KeyCode::Char('g') if !input_active => Action::OpenGrantPicker,
             _ => Action::Nothing,
         };
     }
