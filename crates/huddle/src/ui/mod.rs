@@ -29,6 +29,8 @@ pub fn render(f: &mut Frame, app: &TuiApp) {
         Modal::MemberAction(s) => modal::render_member_action(f, s),
         Modal::Sas(s) => modal::render_sas(f, s),
         Modal::Settings(s) => modal::render_settings(f, s),
+        Modal::ShowJoinCode(s) => modal::render_show_join_code(f, s),
+        Modal::JoinWithCode(s) => modal::render_join_with_code(f, s),
         Modal::QuitConfirm => modal::render_quit_confirm(f),
         Modal::Help => modal::render_help(f),
         Modal::Error(msg) => modal::render_error(f, msg),

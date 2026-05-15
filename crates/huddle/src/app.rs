@@ -63,6 +63,14 @@ pub enum Modal {
     /// Phase E: app-wide settings (currently just the global
     /// verified-only inbound toggle). Opened with `,` from lobby.
     Settings(SettingsState),
+    /// Phase F: an owner just generated a short-lived join code for
+    /// the current encrypted room. The modal shows it big so the
+    /// owner can read it aloud / copy it / pass it OOB.
+    ShowJoinCode(ShowJoinCodeState),
+    /// Phase F: joiner enters a code shared by an owner of an
+    /// encrypted room. On confirm, sends a signed CodeJoinRequest;
+    /// the room opens read-only on the owner's response.
+    JoinWithCode(JoinWithCodeState),
     QuitConfirm,
     Help,
     Error(String),
@@ -73,6 +81,21 @@ pub enum Modal {
 #[derive(Debug, Clone)]
 pub struct SettingsState {
     pub verified_only_inbound: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ShowJoinCodeState {
+    #[allow(dead_code)]
+    pub room_id: String,
+    pub room_name: String,
+    pub code: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct JoinWithCodeState {
+    pub room_id: String,
+    pub room_name: String,
+    pub code: String,
 }
 
 /// Phase G: stages of an in-flight SAS verification. The state advances
@@ -1971,6 +1994,71 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             };
             if let Err(e) = app.handle.set_member_verified(&room_id, &fp, new_state) {
                 app.modal = Modal::Error(format!("verify failed: {e}"));
+            }
+            Ok(false)
+        }
+        Action::OpenGenerateJoinCode => {
+            let (room_id, room_name) = match app.active_room() {
+                Some(r) => (r.room_id.clone(), r.name.clone()),
+                None => return Ok(false),
+            };
+            match app.handle.generate_join_code(&room_id) {
+                Ok(code) => {
+                    app.modal = Modal::ShowJoinCode(ShowJoinCodeState {
+                        room_id,
+                        room_name,
+                        code,
+                    });
+                }
+                Err(e) => app.set_status(format!("can't generate code: {e}")),
+            }
+            Ok(false)
+        }
+        Action::OpenJoinWithCode => {
+            // Only meaningful on the Rooms focus + encrypted selection.
+            if !matches!(app.lobby_focus, LobbyFocus::Rooms) {
+                return Ok(false);
+            }
+            let room = match app.discovered_rooms.get(app.selected_room_idx).cloned() {
+                Some(r) => r,
+                None => return Ok(false),
+            };
+            if !room.encrypted {
+                app.set_status("code-join only applies to encrypted rooms");
+                return Ok(false);
+            }
+            app.modal = Modal::JoinWithCode(JoinWithCodeState {
+                room_id: room.room_id,
+                room_name: room.name,
+                code: String::new(),
+            });
+            Ok(false)
+        }
+        Action::JoinWithCodeTypeChar(c) => {
+            if let Modal::JoinWithCode(s) = &mut app.modal {
+                s.code.push(c);
+            }
+            Ok(false)
+        }
+        Action::JoinWithCodeBackspace => {
+            if let Modal::JoinWithCode(s) = &mut app.modal {
+                s.code.pop();
+            }
+            Ok(false)
+        }
+        Action::JoinWithCodeConfirm => {
+            let (room_id, code) = match &app.modal {
+                Modal::JoinWithCode(s) => (s.room_id.clone(), s.code.clone()),
+                _ => return Ok(false),
+            };
+            if code.trim().is_empty() {
+                return Ok(false);
+            }
+            app.modal = Modal::None;
+            if let Err(e) = app.handle.join_room_with_code(&room_id, code.trim()).await {
+                app.modal = Modal::Error(format!("code join failed: {e}"));
+            } else {
+                app.set_status("code join request sent — waiting for owner");
             }
             Ok(false)
         }

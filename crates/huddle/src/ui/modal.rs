@@ -3,8 +3,8 @@ use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
 
 use crate::app::{
     AcceptRotationState, AttachPickerState, DialPeerState, InboundDialState, JoinRoomState,
-    MemberActionKind, MemberActionState, RotateRoomState, SasStage, SasState, SearchState,
-    SettingsState, StartField, StartRoomState, VerifyState,
+    JoinWithCodeState, MemberActionKind, MemberActionState, RotateRoomState, SasStage, SasState,
+    SearchState, SettingsState, ShowJoinCodeState, StartField, StartRoomState, VerifyState,
 };
 use crate::ui::centered_rect;
 
@@ -980,6 +980,107 @@ pub fn render_settings(f: &mut Frame, s: &SettingsState) {
                 .padding(Padding::uniform(1))
                 .title(Span::styled(
                     " settings ",
+                    Style::default().fg(Color::Cyan).bold(),
+                )),
+        );
+    f.render_widget(para, area);
+}
+
+/// Phase F: an owner-side modal showing the freshly-generated 8-char
+/// join code (with a single `-` separator for readability). 10-minute
+/// expiry, single-use; once a joiner consumes it the slot opens again.
+pub fn render_show_join_code(f: &mut Frame, s: &ShowJoinCodeState) {
+    let area = centered_rect(64, 13, f.area());
+    f.render_widget(Clear, area);
+    let lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  room: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(s.room_name.clone(), Style::default().fg(Color::White).bold()),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("    "),
+            Span::styled(
+                s.code.clone(),
+                Style::default().fg(Color::Yellow).bold(),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  share this OOB with the prospective joiner.",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(Span::styled(
+            "  valid for 10 minutes, single use.",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  press any key to dismiss",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+    let para = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan))
+                .padding(Padding::uniform(1))
+                .title(Span::styled(
+                    " join code ",
+                    Style::default().fg(Color::Cyan).bold(),
+                )),
+        );
+    f.render_widget(para, area);
+}
+
+/// Phase F: joiner-side modal — paste / type the code shared OOB by an
+/// owner of the encrypted room they're joining.
+pub fn render_join_with_code(f: &mut Frame, s: &JoinWithCodeState) {
+    let area = centered_rect(64, 12, f.area());
+    f.render_widget(Clear, area);
+    let lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  joining: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(s.room_name.clone(), Style::default().fg(Color::White).bold()),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" code:  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("[ {}_ ]", s.code),
+                Style::default().fg(Color::Yellow),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  read-only: you'll be able to read messages but not",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(Span::styled(
+            "  send until an owner shares the room passphrase.",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" Enter", Style::default().fg(Color::Yellow)),
+            Span::styled(" submit  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Esc", Style::default().fg(Color::Yellow)),
+            Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
+        ]),
+    ];
+    let para = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan))
+                .padding(Padding::uniform(1))
+                .title(Span::styled(
+                    " join with code ",
                     Style::default().fg(Color::Cyan).bold(),
                 )),
         );

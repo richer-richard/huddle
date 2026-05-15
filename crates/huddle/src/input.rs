@@ -107,6 +107,12 @@ pub enum Action {
     OpenSettings,
     SettingsToggleGlobalVerifiedOnly,
     ToggleRoomVerifiedOnly,
+    // Phase F: short-lived join codes
+    OpenGenerateJoinCode,
+    OpenJoinWithCode,
+    JoinWithCodeTypeChar(char),
+    JoinWithCodeBackspace,
+    JoinWithCodeConfirm,
 }
 
 pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
@@ -205,6 +211,16 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
             }
             _ => Action::Nothing,
         },
+        Modal::ShowJoinCode(_) => match key.code {
+            _ => Action::CloseModal,
+        },
+        Modal::JoinWithCode(_) => match key.code {
+            KeyCode::Esc => Action::CloseModal,
+            KeyCode::Enter => Action::JoinWithCodeConfirm,
+            KeyCode::Backspace => Action::JoinWithCodeBackspace,
+            KeyCode::Char(c) => Action::JoinWithCodeTypeChar(c),
+            _ => Action::Nothing,
+        },
         Modal::Search(_) => match key.code {
             KeyCode::Esc => Action::CloseModal,
             KeyCode::Enter => Action::SearchSubmit,
@@ -254,6 +270,7 @@ fn map_lobby(key: KeyEvent, app: &TuiApp) -> Action {
         KeyCode::Char('d') => Action::OpenDialPeer,
         KeyCode::Char('i') => Action::OpenQrIdentity,
         KeyCode::Char(',') => Action::OpenSettings,
+        KeyCode::Char('c') => Action::OpenJoinWithCode,
         KeyCode::Tab => Action::LobbyFocusToggle,
         KeyCode::Char('j') | KeyCode::Down => Action::LobbyNavigateDown,
         KeyCode::Char('k') | KeyCode::Up => Action::LobbyNavigateUp,
@@ -296,6 +313,7 @@ fn map_in_room(key: KeyEvent, app: &TuiApp) -> Action {
             KeyCode::Char('k') if !input_active => Action::OpenKickPicker,
             KeyCode::Char('g') if !input_active => Action::OpenGrantPicker,
             KeyCode::Char('o') if !input_active => Action::ToggleRoomVerifiedOnly,
+            KeyCode::Char('j') if !input_active => Action::OpenGenerateJoinCode,
             _ => Action::Nothing,
         };
     }

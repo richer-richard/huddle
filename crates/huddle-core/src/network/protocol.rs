@@ -228,6 +228,28 @@ pub enum RoomMessage {
         target_fingerprint: String,
         reason: String,
     },
+    /// Phase F: a joiner is asking to enter a room using a short-lived
+    /// owner-issued code (no passphrase). Includes the joiner's
+    /// ephemeral X25519 pubkey for ECDH key delivery. Signed (so the
+    /// owner knows who's asking).
+    CodeJoinRequest {
+        room_id: String,
+        joiner_x25519_pubkey_b64: String,
+        code: String,
+    },
+    /// Phase F: an issuing owner's response to a valid `CodeJoinRequest`.
+    /// Carries the owner's ephemeral X25519 pubkey + the current Megolm
+    /// session key wrapped under the ECDH-derived key. Joiner does
+    /// X25519 the other direction, derives the same wrap key, unwraps
+    /// the session key. Signed.
+    CodeJoinResponse {
+        room_id: String,
+        target_fingerprint: String,
+        owner_x25519_pubkey_b64: String,
+        owner_session_id: String,
+        wrapped_session_key_b64: String,
+        nonce_b64: String,
+    },
 }
 
 #[cfg(test)]

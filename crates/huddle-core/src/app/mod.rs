@@ -90,6 +90,18 @@ struct ActiveRoom {
     /// Ephemeral typing indicators: fingerprint → unix expiry. Pruned
     /// on read; never persisted.
     typers: HashMap<String, i64>,
+    /// Phase F: we joined via a short-lived code rather than the
+    /// passphrase. We have other members' session keys (delivered via
+    /// the CodeJoinResponse ECDH handshake) so we can decrypt; but
+    /// without the passphrase we can't wrap our own outbound session
+    /// key for other members. Read-only until an owner re-onboards us
+    /// with the full passphrase. Defaults false for passphrase joins.
+    #[allow(dead_code)]
+    read_only: bool,
+    /// Phase F: owner-issued join codes for this room (owner side
+    /// only). Pairs of (code, expires_at_unix). Single-use; entries
+    /// removed after a successful CodeJoinResponse goes out.
+    issued_codes: Vec<(String, i64)>,
 }
 
 const TYPING_TTL_SECS: i64 = 3;
@@ -136,6 +148,10 @@ pub struct AppHandle {
     /// Phase G: active SAS verifications. Keyed by tx_id (the random
     /// 16-byte salt picked by the initiator + base64'd).
     sas_flows: Arc<Mutex<HashMap<String, SasFlow>>>,
+    /// Phase F: ephemeral X25519 secrets the joiner is holding while
+    /// they wait for the owner's `CodeJoinResponse`. Keyed by room_id
+    /// — we only have one in-flight code join per room at a time.
+    pending_code_secrets: Arc<Mutex<HashMap<String, x25519_dalek::StaticSecret>>>,
     app_event_tx: broadcast::Sender<AppEvent>,
 }
 
@@ -198,6 +214,7 @@ impl AppHandle {
             db,
             session_persist_key,
             sas_flows: Arc::new(Mutex::new(HashMap::new())),
+            pending_code_secrets: Arc::new(Mutex::new(HashMap::new())),
             app_event_tx,
         };
 
@@ -397,6 +414,8 @@ impl AppHandle {
                 passphrase_key,
                 members,
                 typers: HashMap::new(),
+                read_only: false,
+                issued_codes: Vec::new(),
             },
         );
 
@@ -510,6 +529,8 @@ impl AppHandle {
                 passphrase_key,
                 members,
                 typers: HashMap::new(),
+                read_only: false,
+                issued_codes: Vec::new(),
             },
         );
         // No longer "restorable" now that we've rejoined.
@@ -578,6 +599,8 @@ impl AppHandle {
                     passphrase_key: None,
                     members,
                     typers: HashMap::new(),
+                    read_only: false,
+                    issued_codes: Vec::new(),
                 },
             );
             self.network.subscribe_room(info.id.clone()).await;
@@ -627,6 +650,12 @@ impl AppHandle {
             let room = rooms
                 .get_mut(room_id)
                 .ok_or_else(|| HuddleError::Other(format!("not in room {room_id}")))?;
+
+            if room.read_only {
+                return Err(HuddleError::Other(
+                    "this room is read-only — you joined via code without the passphrase. Ask an owner for the passphrase or wait for a key rotation that includes you.".into(),
+                ));
+            }
 
             if room.info.encrypted {
                 let crypto = room
@@ -1703,6 +1732,174 @@ impl AppHandle {
                     decimal: emit.decimal,
                 });
             }
+            RoomMessage::CodeJoinRequest {
+                room_id: announced_room_id,
+                joiner_x25519_pubkey_b64,
+                code,
+            } => {
+                if announced_room_id != room_id {
+                    return;
+                }
+                let joiner_fp = match verified_signer {
+                    Some(fp) => fp,
+                    None => {
+                        warn!("CodeJoinRequest unsigned; dropping");
+                        return;
+                    }
+                };
+                // Only owners with an active code are interested in
+                // responding. Other peers (incl. non-issuing owners)
+                // simply ignore.
+                let our_fp = self.identity.fingerprint().to_string();
+                if !self.is_owner(room_id, &our_fp) {
+                    return;
+                }
+                // Match + consume the code. Single use.
+                let now = now_unix();
+                let (code_ok, our_session_id, wrap_input) = {
+                    let mut rooms = self.active_rooms.lock().unwrap();
+                    let room = match rooms.get_mut(room_id) {
+                        Some(r) => r,
+                        None => return,
+                    };
+                    if room.passphrase_key.is_none() {
+                        warn!("CodeJoinRequest: no passphrase key locally; can't respond");
+                        return;
+                    }
+                    let original_len = room.issued_codes.len();
+                    room.issued_codes.retain(|(c, exp)| !(c == &code && *exp > now));
+                    let matched = room.issued_codes.len() < original_len;
+                    if !matched {
+                        info!(%joiner_fp, "CodeJoinRequest: code invalid or expired; ignoring");
+                        return;
+                    }
+                    let crypto = room.crypto.as_ref().unwrap();
+                    (
+                        true,
+                        crypto.our_session_id(),
+                        crypto.our_session_key_b64(),
+                    )
+                };
+                let _ = code_ok;
+                // ECDH with the joiner's ephemeral pubkey.
+                let their_pub = match crate::crypto::sas::parse_pubkey(&joiner_x25519_pubkey_b64) {
+                    Ok(pk) => pk,
+                    Err(e) => {
+                        warn!(%e, "CodeJoinRequest: bad pubkey");
+                        return;
+                    }
+                };
+                use x25519_dalek::{PublicKey, StaticSecret};
+                let our_secret = StaticSecret::random_from_rng(rand::thread_rng());
+                let our_pub = PublicKey::from(&our_secret);
+                let shared = our_secret.diffie_hellman(&their_pub);
+                // HKDF the shared secret into a 32-byte wrap key.
+                let hk = hkdf::Hkdf::<sha2::Sha256>::new(None, shared.as_bytes());
+                let mut wrap_key = [0u8; passphrase::KEY_LEN];
+                hk.expand(b"huddle-code-join-v1", &mut wrap_key)
+                    .expect("32 bytes is within HKDF limits");
+                // Wrap our session key under the ECDH-derived key,
+                // reusing the existing AEAD primitives.
+                let wrapped = match passphrase::wrap(wrap_input.as_bytes(), &wrap_key) {
+                    Ok(w) => w,
+                    Err(e) => {
+                        warn!(%e, "CodeJoinRequest: wrap failed");
+                        return;
+                    }
+                };
+                let response = RoomMessage::CodeJoinResponse {
+                    room_id: room_id.to_string(),
+                    target_fingerprint: joiner_fp.clone(),
+                    owner_x25519_pubkey_b64: B64.encode(our_pub.as_bytes()),
+                    owner_session_id: our_session_id,
+                    wrapped_session_key_b64: wrapped,
+                    nonce_b64: String::new(), // nonce is embedded in `wrapped` per passphrase::wrap
+                };
+                if let Ok(env) = crate::crypto::sign_message(&self.identity, &response) {
+                    if let Ok(bytes) = crate::network::protocol::encode_wire_signed(&env) {
+                        self.network
+                            .publish_room_message(room_id.to_string(), bytes)
+                            .await;
+                    }
+                }
+                info!(%joiner_fp, %room_id, "issued CodeJoinResponse");
+            }
+            RoomMessage::CodeJoinResponse {
+                room_id: announced_room_id,
+                target_fingerprint,
+                owner_x25519_pubkey_b64,
+                owner_session_id,
+                wrapped_session_key_b64,
+                nonce_b64: _,
+            } => {
+                if announced_room_id != room_id || target_fingerprint != our_fp {
+                    return;
+                }
+                let owner_fp = match verified_signer {
+                    Some(fp) => fp,
+                    None => {
+                        warn!("CodeJoinResponse unsigned; dropping");
+                        return;
+                    }
+                };
+                let our_secret = match self
+                    .pending_code_secrets
+                    .lock()
+                    .unwrap()
+                    .remove(room_id)
+                {
+                    Some(s) => s,
+                    None => {
+                        warn!(%room_id, "CodeJoinResponse with no pending code-join state");
+                        return;
+                    }
+                };
+                let owner_pub = match crate::crypto::sas::parse_pubkey(&owner_x25519_pubkey_b64) {
+                    Ok(pk) => pk,
+                    Err(e) => {
+                        warn!(%e, "CodeJoinResponse: bad owner pubkey");
+                        return;
+                    }
+                };
+                let shared = our_secret.diffie_hellman(&owner_pub);
+                let hk = hkdf::Hkdf::<sha2::Sha256>::new(None, shared.as_bytes());
+                let mut wrap_key = [0u8; passphrase::KEY_LEN];
+                hk.expand(b"huddle-code-join-v1", &mut wrap_key)
+                    .expect("32 bytes within HKDF limits");
+                let session_key_bytes =
+                    match passphrase::unwrap(&wrapped_session_key_b64, &wrap_key) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            warn!(%e, "CodeJoinResponse: unwrap failed");
+                            return;
+                        }
+                    };
+                let session_key_str = match String::from_utf8(session_key_bytes) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        warn!(%e, "CodeJoinResponse: session key wasn't valid utf8");
+                        return;
+                    }
+                };
+                // Install as an inbound session keyed by the owner's fp.
+                let mut rooms = self.active_rooms.lock().unwrap();
+                if let Some(room) = rooms.get_mut(room_id) {
+                    if let Some(crypto) = room.crypto.as_mut() {
+                        if let Err(e) =
+                            crypto.add_inbound_session(&owner_fp, &session_key_str)
+                        {
+                            warn!(%e, "CodeJoinResponse: add_inbound_session failed");
+                        } else {
+                            info!(%room_id, %owner_fp, %owner_session_id, "code-join completed; can decrypt owner's messages");
+                            room.members.insert(owner_fp.clone());
+                            let _ = self.app_event_tx.send(AppEvent::MemberJoined {
+                                room_id: room_id.to_string(),
+                                fingerprint: owner_fp,
+                            });
+                        }
+                    }
+                }
+            }
             RoomMessage::JoinRefused {
                 room_id: announced_room_id,
                 target_fingerprint,
@@ -2163,6 +2360,123 @@ impl AppHandle {
         // session / persistence logic stays in one place.
         self.rotate_room(room_id, &new_passphrase).await?;
         Ok(new_passphrase)
+    }
+
+    /// Phase F: generate an 8-char alphanumeric join code for `room_id`,
+    /// good for 10 minutes. Stored in memory only on the issuing owner's
+    /// machine — a single use clears it. Caller is responsible for
+    /// sharing the code OOB with the prospective joiner.
+    ///
+    /// Owner-only. Errors if `room_id` isn't active or we're not an owner.
+    pub fn generate_join_code(&self, room_id: &str) -> Result<String> {
+        let our_fp = self.identity.fingerprint().to_string();
+        if !self.is_owner(room_id, &our_fp) {
+            return Err(HuddleError::Other(
+                "only an owner can issue join codes".into(),
+            ));
+        }
+        let code = generate_alphanumeric_code(8);
+        let expires_at = now_unix() + 10 * 60;
+        let mut rooms = self.active_rooms.lock().unwrap();
+        let room = rooms
+            .get_mut(room_id)
+            .ok_or_else(|| HuddleError::Other(format!("not in room {room_id}")))?;
+        // Prune expired entries while we're here so the list doesn't grow.
+        let now = now_unix();
+        room.issued_codes.retain(|(_, exp)| *exp > now);
+        room.issued_codes.push((code.clone(), expires_at));
+        Ok(code)
+    }
+
+    /// Phase F: join `room_id` using a short-lived code instead of the
+    /// passphrase. Generates an ephemeral X25519 keypair, broadcasts a
+    /// signed `CodeJoinRequest`, and waits for the owner's
+    /// `CodeJoinResponse`. The receive arm builds an `ActiveRoom`
+    /// flagged read-only (no passphrase = can't share our outbound
+    /// session key with others).
+    pub async fn join_room_with_code(
+        &self,
+        room_id: &str,
+        code: &str,
+    ) -> Result<()> {
+        // Resolve discovered metadata so we know name/encrypted/etc.
+        let info = {
+            let d = self.discovered_rooms.lock().unwrap().get(room_id).cloned();
+            match d {
+                Some(d) => StoredRoom {
+                    id: room_id.to_string(),
+                    name: d.name,
+                    creator_fingerprint: d.creator_fingerprint,
+                    encrypted: d.encrypted,
+                    passphrase_salt: None, // unused on code-join path
+                    created_at: now_unix(),
+                    last_active: Some(now_unix()),
+                },
+                None => {
+                    return Err(HuddleError::Other(format!(
+                        "room {room_id} not visible — wait for an announcement"
+                    )))
+                }
+            }
+        };
+        if !info.encrypted {
+            return Err(HuddleError::Other(
+                "code-join only applies to encrypted rooms".into(),
+            ));
+        }
+        let our_fp = self.identity.fingerprint().to_string();
+        // Generate ephemeral X25519 keypair; remember the secret so the
+        // CodeJoinResponse receive arm can complete ECDH on this peer.
+        use x25519_dalek::{PublicKey, StaticSecret};
+        let our_secret = StaticSecret::random_from_rng(rand::thread_rng());
+        let our_pub = PublicKey::from(&our_secret);
+        // Stash the secret keyed by room_id; the response handler
+        // matches on target_fingerprint=our_fp + room_id.
+        self.pending_code_secrets
+            .lock()
+            .unwrap()
+            .insert(room_id.to_string(), our_secret);
+        // Create a placeholder ActiveRoom with no crypto yet; we'll
+        // fill in the inbound session in the response handler.
+        self.active_rooms.lock().unwrap().insert(
+            room_id.to_string(),
+            ActiveRoom {
+                info: info.clone(),
+                crypto: Some(RoomCrypto::new_for_room(
+                    self.db.clone(),
+                    room_id.to_string(),
+                    our_fp.clone(),
+                    self.session_persist_key,
+                )?),
+                passphrase_key: None,
+                members: {
+                    let mut s = HashSet::new();
+                    s.insert(our_fp.clone());
+                    s
+                },
+                typers: HashMap::new(),
+                read_only: true,
+                issued_codes: Vec::new(),
+            },
+        );
+        self.network.subscribe_room(room_id.to_string()).await;
+        // Broadcast the request.
+        let req = RoomMessage::CodeJoinRequest {
+            room_id: room_id.to_string(),
+            joiner_x25519_pubkey_b64: B64.encode(our_pub.as_bytes()),
+            code: code.to_string(),
+        };
+        let env = crate::crypto::sign_message(&self.identity, &req)?;
+        let bytes = crate::network::protocol::encode_wire_signed(&env)?;
+        self.network
+            .publish_room_message(room_id.to_string(), bytes)
+            .await;
+        // Emit RoomJoined so the TUI opens the tab. Subsequent ability
+        // to read messages depends on receiving the owner's response.
+        let _ = self.app_event_tx.send(AppEvent::RoomJoined {
+            room_id: room_id.to_string(),
+        });
+        Ok(())
     }
 
     /// Phase G: start an SAS verification with `target_fingerprint` in
@@ -2662,6 +2976,25 @@ fn generate_join_passphrase() -> String {
     // Use URL-safe-no-pad so the user can read aloud / paste without
     // worrying about `=` padding or `+` getting URL-escaped.
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+/// Phase F: short human-readable join code. 8 chars from a 32-symbol
+/// alphabet (no easily-confused chars like 0/O/I/1) ≈ 40 bits — plenty
+/// for a 10-minute online gate since the owner's client checks
+/// exact-match (not brute-force-able offline).
+fn generate_alphanumeric_code(len: usize) -> String {
+    use rand::Rng;
+    const ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+    let mut rng = rand::thread_rng();
+    let mut out = String::with_capacity(len + 1);
+    for i in 0..len {
+        if i == 4 && len == 8 {
+            out.push('-'); // pretty: XXXX-XXXX
+        }
+        let idx = rng.gen_range(0..ALPHABET.len());
+        out.push(ALPHABET[idx] as char);
+    }
+    out
 }
 
 #[cfg(test)]
