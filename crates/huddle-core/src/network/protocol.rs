@@ -17,6 +17,55 @@ pub fn room_topic(room_id: &str) -> String {
     format!("{ROOM_TOPIC_PREFIX}{room_id}")
 }
 
+/// Application-level signed envelope around a `RoomMessage`. Used for
+/// any message whose authenticity matters beyond gossipsub's transport-
+/// level signing — `RotateRoomKey`, `OwnerGrant`, `BanMember`, SAS
+/// handshakes, code-join requests/responses, `JoinRefused`.
+///
+/// Verification happens via `crate::crypto::verify_signed`: it re-derives
+/// the fingerprint from `ed25519_pubkey_b64`, asserts equality with
+/// `fingerprint`, then `Ed25519::verify` over `payload_b64` decoded.
+///
+/// Format choice: payload is base64'd serialized `RoomMessage` JSON
+/// (not the JSON bytes directly) so the envelope itself is plain JSON
+/// without escaping nightmares.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SignedRoomMessage {
+    pub fingerprint: String,
+    pub ed25519_pubkey_b64: String,
+    pub payload_b64: String,
+    pub signature_b64: String,
+}
+
+/// What actually gets serialized onto a per-room gossipsub topic. New
+/// in v0.3.0 — previously, the raw `RoomMessage` JSON went on the wire.
+/// All outgoing messages now flow through this envelope so the receiver
+/// can tell signed from unsigned at the outer layer without trial-
+/// parsing. Tagged so future variants don't silently misparse.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+pub enum WireMessage {
+    /// Unsigned — equivalent to the old wire format. Used for messages
+    /// whose authenticity isn't security-critical: `Plain`, `Typing`,
+    /// `MemberAnnounce` (the wrapped key in encrypted rooms is itself
+    /// AEAD-authenticated), `FileChunk`, etc.
+    Plain(RoomMessage),
+    /// App-level Ed25519-signed envelope.
+    Signed(SignedRoomMessage),
+}
+
+/// Serialize an unsigned `RoomMessage` to its on-wire bytes inside the
+/// new `WireMessage::Plain` envelope. The single helper keeps every send
+/// site in `app/mod.rs` from open-coding the wrap.
+pub fn encode_wire(msg: &RoomMessage) -> serde_json::Result<Vec<u8>> {
+    serde_json::to_vec(&WireMessage::Plain(msg.clone()))
+}
+
+/// Serialize a `SignedRoomMessage` envelope to its on-wire bytes.
+pub fn encode_wire_signed(env: &SignedRoomMessage) -> serde_json::Result<Vec<u8>> {
+    serde_json::to_vec(&WireMessage::Signed(env.clone()))
+}
+
 /// Broadcast on the global ROOMS_TOPIC. Each peer republishes the rooms
 /// they're currently in, periodically. Listeners maintain a cache with TTL.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,6 +97,14 @@ pub enum RoomMessage {
         /// `None` for forward compat with older peers.
         #[serde(default)]
         display_name: Option<String>,
+        /// Base64 of the sender's 32-byte Ed25519 public key. Lets every
+        /// existing member learn the new member's pubkey on first contact,
+        /// so they can verify future `SignedRoomMessage` envelopes from
+        /// this fingerprint. `#[serde(default)]` for forward compat: a
+        /// pre-0.3.0 peer that doesn't send this still works, but its
+        /// signed messages can't be verified until it re-announces.
+        #[serde(default)]
+        sender_ed25519_pubkey: Option<String>,
     },
     /// A request from a recently-joined member: "I need session keys".
     /// Existing members respond with MemberAnnounce.
@@ -138,6 +195,7 @@ mod tests {
                 sender_fingerprint: "fp".into(),
                 wrapped_session_key: Some("base64data".into()),
                 display_name: Some("Daisy".into()),
+                sender_ed25519_pubkey: Some("AAA=".into()),
             },
             RoomMessage::Plain {
                 sender_fingerprint: "fp".into(),

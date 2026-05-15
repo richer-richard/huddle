@@ -19,7 +19,7 @@ use crate::files::encryption::{self as file_encryption, EncryptedFileMeta};
 use crate::files::FileManager;
 use crate::identity::Identity;
 use crate::network::events::NetworkEvent;
-use crate::network::protocol::{RoomAnnouncement, RoomMessage};
+use crate::network::protocol::{encode_wire, RoomAnnouncement, RoomMessage, WireMessage};
 use crate::network::{self, NetworkHandle, NetworkMode};
 use crate::storage::repo::{
     self, derive_room_id, AttachmentStatus, KnownPeer, StoredAttachment, StoredRoom,
@@ -495,7 +495,7 @@ impl AppHandle {
             let req = RoomMessage::SessionKeyRequest {
                 requester_fingerprint: app.identity.fingerprint().to_string(),
             };
-            if let Ok(bytes) = serde_json::to_vec(&req) {
+            if let Ok(bytes) = encode_wire(&req) {
                 app.network.publish_room_message(rid.clone(), bytes).await;
             }
         });
@@ -565,7 +565,7 @@ impl AppHandle {
         let leave_msg = RoomMessage::MemberLeave {
             sender_fingerprint: self.identity.fingerprint().to_string(),
         };
-        let dispatched = match serde_json::to_vec(&leave_msg) {
+        let dispatched = match encode_wire(&leave_msg) {
             Ok(bytes) => {
                 self.network
                     .publish_room_message(room_id.to_string(), bytes)
@@ -617,7 +617,7 @@ impl AppHandle {
             }
         };
 
-        let bytes = serde_json::to_vec(&msg)?;
+        let bytes = encode_wire(&msg)?;
         self.network
             .publish_room_message(room_id.to_string(), bytes)
             .await;
@@ -792,8 +792,9 @@ impl AppHandle {
             sender_fingerprint: our_fp,
             wrapped_session_key: wrapped,
             display_name,
+            sender_ed25519_pubkey: Some(B64.encode(self.identity.public_bytes())),
         };
-        let bytes = serde_json::to_vec(&msg)?;
+        let bytes = encode_wire(&msg)?;
         self.network
             .publish_room_message(room_id.to_string(), bytes)
             .await;
@@ -920,11 +921,29 @@ impl AppHandle {
                 payload,
                 from_peer: _,
             } => {
-                let msg: RoomMessage = match serde_json::from_slice(&payload) {
-                    Ok(m) => m,
+                // v0.3.0+: every wire message is a `WireMessage` envelope.
+                // `Plain` carries an unsigned `RoomMessage`; `Signed` is an
+                // app-level Ed25519 envelope that we verify before
+                // unwrapping. A failed verify is logged and dropped — we
+                // never dispatch unverified-but-claiming-to-be-signed
+                // messages.
+                let wire: WireMessage = match serde_json::from_slice(&payload) {
+                    Ok(w) => w,
                     Err(e) => {
-                        warn!(%e, "bad room message");
+                        warn!(%e, "bad wire envelope");
                         return;
+                    }
+                };
+                let msg = match wire {
+                    WireMessage::Plain(m) => m,
+                    WireMessage::Signed(env) => {
+                        match crate::crypto::verify_signed(&env) {
+                            Ok((m, _verified_fp)) => m,
+                            Err(e) => {
+                                warn!(%e, fp = %env.fingerprint, "signed envelope verify failed");
+                                return;
+                            }
+                        }
                     }
                 };
                 self.handle_room_message(&room_id, msg).await;
@@ -967,6 +986,7 @@ impl AppHandle {
                 sender_fingerprint,
                 wrapped_session_key,
                 display_name,
+                sender_ed25519_pubkey,
             } => {
                 if sender_fingerprint == our_fp {
                     return;
@@ -984,7 +1004,10 @@ impl AppHandle {
                             fingerprint: sender_fingerprint.clone(),
                         });
                     }
-                    // Persist member with optional display name.
+                    // Persist member with optional display name + pubkey.
+                    // `ed25519_pubkey` is `None` for pre-0.3 peers; the
+                    // upsert COALESCEs so once we learn it we never lose
+                    // it on a later announce that drops the field.
                     let _ = repo::upsert_room_member(
                         &self.db,
                         &StoredRoomMember {
@@ -993,6 +1016,7 @@ impl AppHandle {
                             fingerprint: sender_fingerprint.clone(),
                             last_seen: Some(now_unix()),
                             verified: false,
+                            ed25519_pubkey: sender_ed25519_pubkey.clone(),
                         },
                     );
                     if let Some(name) = display_name.as_deref() {
@@ -1299,7 +1323,7 @@ impl AppHandle {
             chunk_count: total,
             encrypted_meta: encrypted_meta_opt,
         };
-        if let Ok(bytes) = serde_json::to_vec(&offer) {
+        if let Ok(bytes) = encode_wire(&offer) {
             self.network
                 .publish_room_message(room_id.to_string(), bytes)
                 .await;
@@ -1321,7 +1345,7 @@ impl AppHandle {
                     total_chunks: total,
                     data_b64: B64.encode(data),
                 };
-                if let Ok(bytes) = serde_json::to_vec(&msg) {
+                if let Ok(bytes) = encode_wire(&msg) {
                     net.publish_room_message(room.clone(), bytes).await;
                 }
                 tokio::time::sleep(Duration::from_millis(40)).await;
@@ -1463,6 +1487,7 @@ impl AppHandle {
                     fingerprint: fingerprint.to_string(),
                     last_seen: Some(now_unix()),
                     verified,
+                    ed25519_pubkey: None,
                 },
             )?;
         }
@@ -1503,7 +1528,7 @@ impl AppHandle {
         let msg = RoomMessage::Typing {
             sender_fingerprint: self.identity.fingerprint().to_string(),
         };
-        if let Ok(bytes) = serde_json::to_vec(&msg) {
+        if let Ok(bytes) = encode_wire(&msg) {
             self.network
                 .publish_room_message(room_id.to_string(), bytes)
                 .await;
@@ -1573,7 +1598,7 @@ impl AppHandle {
             rotator_fingerprint: self.identity.fingerprint().to_string(),
             new_salt: new_salt.to_vec(),
         };
-        if let Ok(bytes) = serde_json::to_vec(&rot) {
+        if let Ok(bytes) = encode_wire(&rot) {
             self.network
                 .publish_room_message(room_id.to_string(), bytes)
                 .await;
@@ -1613,7 +1638,7 @@ impl AppHandle {
         let req = RoomMessage::SessionKeyRequest {
             requester_fingerprint: self.identity.fingerprint().to_string(),
         };
-        if let Ok(bytes) = serde_json::to_vec(&req) {
+        if let Ok(bytes) = encode_wire(&req) {
             self.network
                 .publish_room_message(room_id.to_string(), bytes)
                 .await;

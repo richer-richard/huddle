@@ -89,4 +89,9 @@ pub const MIGRATIONS: &[&str] = &[
     // of other members.
     "ALTER TABLE identity ADD COLUMN display_name TEXT;",
     "ALTER TABLE room_members ADD COLUMN display_name TEXT;",
+    // Phase 0 (v0.3.0): app-level signed message envelopes. Members learn
+    // each others' pubkeys from `MemberAnnounce.sender_ed25519_pubkey`
+    // and persist them here so `SignedRoomMessage` envelopes can be
+    // verified without re-asking the network on every message.
+    "ALTER TABLE room_members ADD COLUMN ed25519_pubkey TEXT;",
 ];

@@ -214,31 +214,39 @@ pub struct StoredRoomMember {
     pub fingerprint: String,
     pub last_seen: Option<i64>,
     pub verified: bool,
+    /// Base64-encoded Ed25519 public key. Populated from the member's
+    /// `MemberAnnounce.sender_ed25519_pubkey` on first contact; required
+    /// to verify `SignedRoomMessage` envelopes from this fingerprint.
+    /// `None` for pre-Phase-0 rows or for peers running older builds.
+    pub ed25519_pubkey: Option<String>,
 }
 
 /// Insert a member, or update in place on (room_id, fingerprint) collision.
 /// `verified` is set only on first insert and is intentionally absent from
 /// the conflict-update clause: a re-announcement can never silently reset
 /// a member's verified flag, and a genuinely new fingerprint is a new
-/// (unverified) row. `peer_id` is only overwritten when the incoming value
-/// is non-empty, since the app layer often doesn't know it.
+/// (unverified) row. `peer_id` and `ed25519_pubkey` are only overwritten
+/// when the incoming value is non-null/non-empty — a re-announce that
+/// drops the pubkey field must not erase the one we already learned.
 pub fn upsert_room_member(db: &Db, member: &StoredRoomMember) -> Result<()> {
     let conn = db.lock().unwrap();
     conn.execute(
-        "INSERT INTO room_members (room_id, peer_id, fingerprint, last_seen, verified)
-         VALUES (?1, ?2, ?3, ?4, ?5)
+        "INSERT INTO room_members (room_id, peer_id, fingerprint, last_seen, verified, ed25519_pubkey)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
          ON CONFLICT(room_id, fingerprint) DO UPDATE SET
             last_seen = excluded.last_seen,
             peer_id = CASE
                 WHEN excluded.peer_id != '' THEN excluded.peer_id
                 ELSE room_members.peer_id
-            END",
+            END,
+            ed25519_pubkey = COALESCE(excluded.ed25519_pubkey, room_members.ed25519_pubkey)",
         params![
             member.room_id,
             member.peer_id,
             member.fingerprint,
             member.last_seen,
             member.verified as i64,
+            member.ed25519_pubkey,
         ],
     )?;
     Ok(())
@@ -247,7 +255,7 @@ pub fn upsert_room_member(db: &Db, member: &StoredRoomMember) -> Result<()> {
 pub fn list_room_members(db: &Db, room_id: &str) -> Result<Vec<StoredRoomMember>> {
     let conn = db.lock().unwrap();
     let mut stmt = conn.prepare(
-        "SELECT room_id, peer_id, fingerprint, last_seen, verified FROM room_members WHERE room_id = ?1",
+        "SELECT room_id, peer_id, fingerprint, last_seen, verified, ed25519_pubkey FROM room_members WHERE room_id = ?1",
     )?;
     let rows = stmt.query_map(params![room_id], |row| {
         Ok(StoredRoomMember {
@@ -256,9 +264,38 @@ pub fn list_room_members(db: &Db, room_id: &str) -> Result<Vec<StoredRoomMember>
             fingerprint: row.get(2)?,
             last_seen: row.get(3)?,
             verified: row.get::<_, i64>(4).unwrap_or(0) != 0,
+            ed25519_pubkey: row.get(5).ok().flatten(),
         })
     })?;
     Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+/// Look up the persisted Ed25519 pubkey (base64) for a member by their
+/// fingerprint. Used by signed-envelope verification: when a peer's
+/// `SignedRoomMessage` arrives, the receiver checks the envelope's
+/// pubkey against this stored one (defense in depth, in case the
+/// envelope's self-asserted pubkey is fresh / unfamiliar).
+///
+/// Returns `Ok(None)` if the member exists but pre-dates Phase 0 and
+/// hasn't re-announced with their pubkey yet — caller should still
+/// accept the envelope's claimed pubkey on TOFU and persist it via
+/// `upsert_room_member`.
+#[allow(dead_code)]
+pub fn get_member_ed25519_pubkey(
+    db: &Db,
+    room_id: &str,
+    fingerprint: &str,
+) -> Result<Option<String>> {
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare(
+        "SELECT ed25519_pubkey FROM room_members WHERE room_id = ?1 AND fingerprint = ?2",
+    )?;
+    let row = stmt
+        .query_row(params![room_id, fingerprint], |row| {
+            row.get::<_, Option<String>>(0)
+        })
+        .ok();
+    Ok(row.flatten())
 }
 
 pub fn remove_room_member(db: &Db, room_id: &str, fingerprint: &str) -> Result<()> {
@@ -788,6 +825,7 @@ mod tests {
                 fingerprint: "fp-x".into(),
                 last_seen: Some(500),
                 verified: false,
+                ed25519_pubkey: None,
             },
         )
         .unwrap();
@@ -810,6 +848,7 @@ mod tests {
                 fingerprint: "fp-1".into(),
                 last_seen: None,
                 verified: false,
+                ed25519_pubkey: None,
             },
         )
         .unwrap();

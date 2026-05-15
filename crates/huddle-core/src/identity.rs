@@ -1,4 +1,4 @@
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{Signer, SigningKey};
 use libp2p::identity::{self, Keypair};
 use libp2p::PeerId;
 use sha2::{Digest, Sha256};
@@ -64,9 +64,22 @@ impl Identity {
     pub fn public_bytes(&self) -> [u8; 32] {
         self.signing_key.verifying_key().to_bytes()
     }
+
+    /// Ed25519-sign `msg` with our identity key. The signature binds
+    /// arbitrary bytes to this fingerprint; used by protocol envelopes
+    /// (`SignedRoomMessage`) so receivers can prove the sender's identity
+    /// at the application layer (gossipsub only proves transport-level).
+    pub fn sign(&self, msg: &[u8]) -> [u8; 64] {
+        self.signing_key.sign(msg).to_bytes()
+    }
 }
 
-fn compute_fingerprint(public_key: &[u8; 32]) -> String {
+/// Derive the human-facing 24-char fingerprint from an Ed25519 public key.
+/// Format: `xxxx-xxxx-xxxx-xxxx-xxxx-xxxx` (6 groups of 4 hex chars, 24 hex
+/// chars total = 12 bytes = 96 bits of SHA-256 over the pubkey). Public so
+/// `crypto::verify_signed` can re-derive it from a signed envelope's pubkey
+/// and check that it matches the asserted fingerprint.
+pub fn compute_fingerprint(public_key: &[u8; 32]) -> String {
     let hash = Sha256::digest(public_key);
     let hex_str = hex::encode(&hash[..12]);
     hex_str
