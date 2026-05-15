@@ -13,6 +13,7 @@ use crossterm::{
 use ratatui::prelude::*;
 use ratatui::Terminal;
 
+use base64::Engine;
 use huddle_core::app::events::{AppEvent, DiscoveredRoom};
 use huddle_core::app::{AppHandle, KnownPeerStatus};
 use huddle_core::network::NetworkMode;
@@ -71,6 +72,13 @@ pub enum Modal {
     /// encrypted room. On confirm, sends a signed CodeJoinRequest;
     /// the room opens read-only on the owner's response.
     JoinWithCode(JoinWithCodeState),
+    /// Phase C: show a freshly-generated invite link (URL form),
+    /// optionally room-scoped, so the user can copy + share.
+    ShowInvite(ShowInviteState),
+    /// Phase C: paste-an-invite text field.
+    PasteInvite(PasteInviteState),
+    /// Phase C: parsed invite — confirm before dialing.
+    ConfirmInvite(ConfirmInviteState),
     QuitConfirm,
     Help,
     Error(String),
@@ -96,6 +104,22 @@ pub struct JoinWithCodeState {
     pub room_id: String,
     pub room_name: String,
     pub code: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ShowInviteState {
+    pub url: String,
+    pub includes_room: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PasteInviteState {
+    pub url: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConfirmInviteState {
+    pub invite: huddle_core::invite::InviteLink,
 }
 
 /// Phase G: stages of an in-flight SAS verification. The state advances
@@ -1994,6 +2018,129 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             };
             if let Err(e) = app.handle.set_member_verified(&room_id, &fp, new_state) {
                 app.modal = Modal::Error(format!("verify failed: {e}"));
+            }
+            Ok(false)
+        }
+        Action::GenerateInvite => {
+            // Build an invite payload from what we know. host_multiaddr
+            // comes from the first listen address + our peer_id. Room
+            // section is included iff we're in a room view.
+            let our_peer = app.handle.peer_id().to_string();
+            let our_fp = app.handle.fingerprint().to_string();
+            let listen = match app.listen_addresses.first() {
+                Some(a) => a.clone(),
+                None => {
+                    app.set_status("no listen address yet — try again in a sec");
+                    return Ok(false);
+                }
+            };
+            // libp2p multiaddrs need /p2p/<peer-id> appended so the
+            // dialer's pubkey check fires. Listen addr is usually
+            // /ip4/0.0.0.0/tcp/<port> — substitute a real host on the
+            // receiver's end isn't ideal but the IP is what the user
+            // shared OOB anyway. For LAN we leave the 0.0.0.0 as-is;
+            // the user can fix the URL before sharing if their auto-
+            // detected addr isn't reachable from outside.
+            let host_multiaddr = format!("{}/p2p/{}", listen, our_peer);
+
+            let room = match (app.screen, app.active_room()) {
+                (Screen::InRoom, Some(r)) => {
+                    if let Some(info) = app.handle.active_room_info(&r.room_id) {
+                        let salt_b64 = info.passphrase_salt.as_ref().map(|s| {
+                            base64::engine::general_purpose::STANDARD.encode(s)
+                        });
+                        Some(huddle_core::invite::InviteRoom {
+                            id: info.id.clone(),
+                            name: info.name.clone(),
+                            encrypted: info.encrypted,
+                            salt_b64,
+                            creator_fingerprint: info.creator_fingerprint.clone(),
+                            owner_fingerprints: app.handle.room_owners(&info.id),
+                        })
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+
+            let invite = huddle_core::invite::InviteLink {
+                v: 1,
+                host_multiaddr,
+                fingerprint: our_fp,
+                room: room.clone(),
+            };
+            match huddle_core::invite::encode(&invite) {
+                Ok(url) => {
+                    app.modal = Modal::ShowInvite(ShowInviteState {
+                        url,
+                        includes_room: room.map(|r| r.name),
+                    });
+                }
+                Err(e) => app.modal = Modal::Error(format!("encode invite: {e}")),
+            }
+            Ok(false)
+        }
+        Action::OpenPasteInvite => {
+            app.modal = Modal::PasteInvite(PasteInviteState { url: String::new() });
+            Ok(false)
+        }
+        Action::PasteInviteTypeChar(c) => {
+            if let Modal::PasteInvite(s) = &mut app.modal {
+                s.url.push(c);
+            }
+            Ok(false)
+        }
+        Action::PasteInviteBackspace => {
+            if let Modal::PasteInvite(s) = &mut app.modal {
+                s.url.pop();
+            }
+            Ok(false)
+        }
+        Action::PasteInviteConfirm => {
+            let url = match &app.modal {
+                Modal::PasteInvite(s) => s.url.clone(),
+                _ => return Ok(false),
+            };
+            match huddle_core::invite::decode(url.trim()) {
+                Ok(invite) => {
+                    app.modal = Modal::ConfirmInvite(ConfirmInviteState { invite });
+                }
+                Err(e) => {
+                    app.modal = Modal::Error(format!("bad invite link: {e}"));
+                }
+            }
+            Ok(false)
+        }
+        Action::ConfirmInviteAccept => {
+            let invite = match &app.modal {
+                Modal::ConfirmInvite(s) => s.invite.clone(),
+                _ => return Ok(false),
+            };
+            app.modal = Modal::None;
+            // Dial. libp2p enforces the embedded /p2p/<peer-id> check
+            // on its end (structural MITM defense). If a room was
+            // included, we open Join modal speculatively — the joiner
+            // types the passphrase, and the actual join_room call will
+            // succeed once the room announcement arrives.
+            match app.handle.dial(&invite.host_multiaddr).await {
+                Ok(()) => app.set_status(format!("dialing {} via invite…", short_fp(&invite.fingerprint))),
+                Err(e) => {
+                    app.modal = Modal::Error(format!("dial failed: {e}"));
+                    return Ok(false);
+                }
+            }
+            if let Some(room) = invite.room {
+                if room.encrypted {
+                    app.modal = Modal::JoinRoom(JoinRoomState {
+                        room_id: room.id.clone(),
+                        room_name: room.name.clone(),
+                        encrypted: true,
+                        passphrase: String::new(),
+                    });
+                } else if let Err(e) = app.handle.join_room(&room.id, None).await {
+                    app.modal = Modal::Error(format!("join failed: {e}"));
+                }
             }
             Ok(false)
         }

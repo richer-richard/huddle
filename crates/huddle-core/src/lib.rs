@@ -4,5 +4,6 @@ pub mod crypto;
 pub mod error;
 pub mod files;
 pub mod identity;
+pub mod invite;
 pub mod network;
 pub mod storage;

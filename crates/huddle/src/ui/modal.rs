@@ -2,9 +2,10 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
 
 use crate::app::{
-    AcceptRotationState, AttachPickerState, DialPeerState, InboundDialState, JoinRoomState,
-    JoinWithCodeState, MemberActionKind, MemberActionState, RotateRoomState, SasStage, SasState,
-    SearchState, SettingsState, ShowJoinCodeState, StartField, StartRoomState, VerifyState,
+    AcceptRotationState, AttachPickerState, ConfirmInviteState, DialPeerState, InboundDialState,
+    JoinRoomState, JoinWithCodeState, MemberActionKind, MemberActionState, PasteInviteState,
+    RotateRoomState, SasStage, SasState, SearchState, SettingsState, ShowInviteState,
+    ShowJoinCodeState, StartField, StartRoomState, VerifyState,
 };
 use crate::ui::centered_rect;
 
@@ -1081,6 +1082,145 @@ pub fn render_join_with_code(f: &mut Frame, s: &JoinWithCodeState) {
                 .padding(Padding::uniform(1))
                 .title(Span::styled(
                     " join with code ",
+                    Style::default().fg(Color::Cyan).bold(),
+                )),
+        );
+    f.render_widget(para, area);
+}
+
+/// Phase C: show a freshly-built invite URL to copy + share.
+pub fn render_show_invite(f: &mut Frame, s: &ShowInviteState) {
+    let area = centered_rect(80, 14, f.area());
+    f.render_widget(Clear, area);
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(""));
+    let scope_line = match &s.includes_room {
+        Some(name) => format!("  invite to: {} (room scoped)", name),
+        None => "  peer-only invite (no room attached)".to_string(),
+    };
+    lines.push(Line::from(Span::styled(
+        scope_line,
+        Style::default().fg(Color::White),
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        s.url.clone(),
+        Style::default().fg(Color::Yellow),
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  copy + share with the joiner. passphrase (if any) must be",
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines.push(Line::from(Span::styled(
+        "  shared separately — it's never in the link.",
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  press any key to dismiss",
+        Style::default().fg(Color::DarkGray),
+    )));
+    let para = Paragraph::new(lines)
+        .wrap(Wrap { trim: true })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan))
+                .padding(Padding::uniform(1))
+                .title(Span::styled(
+                    " invite link ",
+                    Style::default().fg(Color::Cyan).bold(),
+                )),
+        );
+    f.render_widget(para, area);
+}
+
+/// Phase C: paste-an-invite text field. On Enter, decodes to a
+/// ConfirmInvite modal showing what we'll dial.
+pub fn render_paste_invite(f: &mut Frame, s: &PasteInviteState) {
+    let area = centered_rect(80, 11, f.area());
+    f.render_widget(Clear, area);
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "  paste a huddle://invite#... link:",
+            Style::default().fg(Color::White),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!(" {}_", s.url),
+            Style::default().fg(Color::Yellow),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" Enter", Style::default().fg(Color::Yellow)),
+            Span::styled(" parse  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Esc", Style::default().fg(Color::Yellow)),
+            Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
+        ]),
+    ];
+    let para = Paragraph::new(lines)
+        .wrap(Wrap { trim: true })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan))
+                .padding(Padding::uniform(1))
+                .title(Span::styled(
+                    " paste invite ",
+                    Style::default().fg(Color::Cyan).bold(),
+                )),
+        );
+    f.render_widget(para, area);
+}
+
+/// Phase C: parsed invite — confirm before dialing.
+pub fn render_confirm_invite(f: &mut Frame, s: &ConfirmInviteState) {
+    let area = centered_rect(72, 14, f.area());
+    f.render_widget(Clear, area);
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("  fingerprint: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            s.invite.fingerprint.clone(),
+            Style::default().fg(Color::Yellow).bold(),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  dial:        ", Style::default().fg(Color::DarkGray)),
+        Span::styled(s.invite.host_multiaddr.clone(), Style::default().fg(Color::White)),
+    ]));
+    if let Some(room) = &s.invite.room {
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("  room:        ", Style::default().fg(Color::DarkGray)),
+            Span::styled(room.name.clone(), Style::default().fg(Color::White).bold()),
+            Span::styled(
+                if room.encrypted { "  (encrypted)" } else { "  (public)" },
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled(" [d]", Style::default().fg(Color::Green).bold()),
+        Span::styled("ial  ", Style::default().fg(Color::DarkGray)),
+        Span::styled(" [c]", Style::default().fg(Color::Red).bold()),
+        Span::styled("ancel  ", Style::default().fg(Color::DarkGray)),
+        Span::styled(" Esc", Style::default().fg(Color::Red)),
+        Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
+    ]));
+    let para = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan))
+                .padding(Padding::uniform(1))
+                .title(Span::styled(
+                    " accept invite? ",
                     Style::default().fg(Color::Cyan).bold(),
                 )),
         );

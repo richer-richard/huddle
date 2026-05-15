@@ -113,6 +113,13 @@ pub enum Action {
     JoinWithCodeTypeChar(char),
     JoinWithCodeBackspace,
     JoinWithCodeConfirm,
+    // Phase C: invite links
+    GenerateInvite,
+    OpenPasteInvite,
+    PasteInviteTypeChar(char),
+    PasteInviteBackspace,
+    PasteInviteConfirm,
+    ConfirmInviteAccept,
 }
 
 pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
@@ -221,6 +228,23 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
             KeyCode::Char(c) => Action::JoinWithCodeTypeChar(c),
             _ => Action::Nothing,
         },
+        Modal::ShowInvite(_) => match key.code {
+            _ => Action::CloseModal,
+        },
+        Modal::PasteInvite(_) => match key.code {
+            KeyCode::Esc => Action::CloseModal,
+            KeyCode::Enter => Action::PasteInviteConfirm,
+            KeyCode::Backspace => Action::PasteInviteBackspace,
+            KeyCode::Char(c) => Action::PasteInviteTypeChar(c),
+            _ => Action::Nothing,
+        },
+        Modal::ConfirmInvite(_) => match key.code {
+            KeyCode::Esc | KeyCode::Char('c') | KeyCode::Char('C') => Action::CloseModal,
+            KeyCode::Enter | KeyCode::Char('d') | KeyCode::Char('D') => {
+                Action::ConfirmInviteAccept
+            }
+            _ => Action::Nothing,
+        },
         Modal::Search(_) => match key.code {
             KeyCode::Esc => Action::CloseModal,
             KeyCode::Enter => Action::SearchSubmit,
@@ -271,6 +295,8 @@ fn map_lobby(key: KeyEvent, app: &TuiApp) -> Action {
         KeyCode::Char('i') => Action::OpenQrIdentity,
         KeyCode::Char(',') => Action::OpenSettings,
         KeyCode::Char('c') => Action::OpenJoinWithCode,
+        KeyCode::Char('I') => Action::GenerateInvite,
+        KeyCode::Char('v') => Action::OpenPasteInvite,
         KeyCode::Tab => Action::LobbyFocusToggle,
         KeyCode::Char('j') | KeyCode::Down => Action::LobbyNavigateDown,
         KeyCode::Char('k') | KeyCode::Up => Action::LobbyNavigateUp,
@@ -314,6 +340,7 @@ fn map_in_room(key: KeyEvent, app: &TuiApp) -> Action {
             KeyCode::Char('g') if !input_active => Action::OpenGrantPicker,
             KeyCode::Char('o') if !input_active => Action::ToggleRoomVerifiedOnly,
             KeyCode::Char('j') if !input_active => Action::OpenGenerateJoinCode,
+            KeyCode::Char('I') if !input_active => Action::GenerateInvite,
             _ => Action::Nothing,
         };
     }

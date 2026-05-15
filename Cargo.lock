@@ -1535,6 +1535,7 @@ name = "huddle"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "base64",
  "clap",
  "crossterm",
  "dirs",
