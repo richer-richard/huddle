@@ -344,27 +344,29 @@ pub fn is_member_banned(db: &Db, room_id: &str, fingerprint: &str) -> Result<boo
     Ok(count > 0)
 }
 
-#[allow(dead_code)]
+/// List fingerprints currently banned from a room, newest first. Used
+/// by the `^B` in-room bans view (owners-only) so they can audit who's
+/// been kicked.
 pub fn list_room_bans(db: &Db, room_id: &str) -> Result<Vec<String>> {
     let conn = db.lock().unwrap();
     let mut stmt = conn.prepare(
-        "SELECT banned_fingerprint FROM room_bans WHERE room_id = ?1",
+        "SELECT banned_fingerprint FROM room_bans WHERE room_id = ?1 ORDER BY banned_at DESC",
     )?;
     let rows = stmt.query_map(params![room_id], |row| row.get::<_, String>(0))?;
     Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
 }
 
 /// Look up the persisted Ed25519 pubkey (base64) for a member by their
-/// fingerprint. Used by signed-envelope verification: when a peer's
-/// `SignedRoomMessage` arrives, the receiver checks the envelope's
-/// pubkey against this stored one (defense in depth, in case the
-/// envelope's self-asserted pubkey is fresh / unfamiliar).
+/// fingerprint. Defense-in-depth check during `SignedRoomMessage`
+/// verification: when a signed envelope arrives, we re-derive the
+/// fingerprint from the envelope's claimed pubkey AND, if we already
+/// know a pubkey for this fingerprint, refuse to accept a different
+/// one. Mismatch ⇒ identity drift / TOFU violation ⇒ drop the message.
 ///
 /// Returns `Ok(None)` if the member exists but pre-dates Phase 0 and
-/// hasn't re-announced with their pubkey yet — caller should still
-/// accept the envelope's claimed pubkey on TOFU and persist it via
-/// `upsert_room_member`.
-#[allow(dead_code)]
+/// hasn't re-announced with their pubkey yet — caller falls back to
+/// TOFU: accept the envelope's claimed pubkey on first contact and
+/// persist it via `upsert_room_member`.
 pub fn get_member_ed25519_pubkey(
     db: &Db,
     room_id: &str,
@@ -768,7 +770,21 @@ pub fn is_peer_blocked(db: &Db, fingerprint: &str) -> Result<bool> {
     Ok(count > 0)
 }
 
-#[allow(dead_code)]
+/// List every fingerprint we've blocked (across all rooms / global
+/// rejection from the inbound-dial modal), newest first. Used by the
+/// Settings modal's "blocked peers" pane to render the unblock action.
+pub fn list_blocked_peers(db: &Db) -> Result<Vec<String>> {
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare(
+        "SELECT fingerprint FROM blocked_peers ORDER BY blocked_at DESC",
+    )?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+/// Remove a fingerprint from the blocklist. Used by the Settings
+/// modal's "unblock" action so a previously-rejected inbound dial can
+/// reach us again. Counterpart of `block_peer`.
 pub fn unblock_peer(db: &Db, fingerprint: &str) -> Result<()> {
     let conn = db.lock().unwrap();
     conn.execute(

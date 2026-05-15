@@ -25,6 +25,16 @@
 //! the sender's Ed25519 identity. A MITM who substitutes their own
 //! ephemeral key into the exchange ends up with a *different* SAS code
 //! than the legitimate peer would compute, so the OOB comparison fails.
+//!
+//! ## SAS table — Matrix MSC 2241 alignment (huddle 0.3.x follow-up)
+//!
+//! Previously the emoji table was a 64-entry "in spirit" derivative;
+//! it has been realigned to the canonical 49-entry Matrix MSC 2241
+//! table so any future cross-client SAS interop just works. The
+//! derivation now uses 7 emoji (42 bits / 6 = 7 chunks, each mod 49)
+//! and 3 four-digit decimal groups (39 bits / 13 = 3 chunks, each
+//! offset +1000 so values land in 1000..9192), exactly as MSC 2241
+//! specifies.
 
 use hkdf::Hkdf;
 use rand::RngCore;
@@ -40,12 +50,12 @@ pub const TX_ID_LEN: usize = 16;
 /// SAS code information given to both sides for OOB comparison.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SasCode {
-    /// 6 emoji indices into [`SAS_EMOJI`] (each 0..64). Human-friendly
+    /// 7 emoji indices into [`SAS_EMOJI`] (each 0..49). Human-friendly
     /// for visual comparison; works in any modern terminal with emoji
-    /// support.
-    pub emoji_indices: [u8; 6],
-    /// 6-decimal-digit version. Fallback for terminals without emoji
-    /// rendering and easier to read aloud over a noisy call.
+    /// support. Matches Matrix MSC 2241 shape.
+    pub emoji_indices: [u8; 7],
+    /// Three 4-digit groups separated by `-`, each in `1000..=9191`,
+    /// per MSC 2241. Easier to read aloud than a flat 7-digit number.
     pub decimal: String,
 }
 
@@ -83,9 +93,15 @@ pub fn new_session() -> ([u8; TX_ID_LEN], StaticSecret, PublicKey) {
     (tx_id, secret, public)
 }
 
-/// Derive the 6-emoji + 6-digit SAS code from the X25519 shared secret
-/// and the agreed-upon `tx_id`. Both peers compute this independently
-/// and must end up with the same answer for OOB comparison to succeed.
+/// Derive the 7-emoji + 3-group-decimal SAS code from the X25519
+/// shared secret and the agreed-upon `tx_id`. Both peers compute this
+/// independently and must end up with the same answer for OOB
+/// comparison to succeed.
+///
+/// Matches the MSC 2241 derivation: HKDF-SHA256 with `tx_id` as salt
+/// and `b"huddle-sas-v1"` as info, expanded to 11 bytes. First 6 bytes
+/// → 7 6-bit chunks (mod 49) → emoji indices. Next 5 bytes → 3 13-bit
+/// chunks (+ 1000) → 3 four-digit decimal groups.
 pub fn derive_sas_code(
     our_secret: &StaticSecret,
     their_public: &PublicKey,
@@ -96,40 +112,58 @@ pub fn derive_sas_code(
     // (two SAS flows between the same pair must produce different
     // codes); info domain-separates from any other HKDF use.
     let hk = Hkdf::<Sha256>::new(Some(tx_id), shared.as_bytes());
-    // 6 emoji bytes (each in 0..64 → 6 bits each = 36 bits) +
-    // 3 bytes for the 6-digit decimal (~24 bits, plenty).
-    let mut okm = [0u8; 9];
+    let mut okm = [0u8; 11];
     hk.expand(b"huddle-sas-v1", &mut okm)
-        .expect("9 bytes is well within HKDF output limit");
-    let mut emoji_indices = [0u8; 6];
-    for i in 0..6 {
-        emoji_indices[i] = okm[i] & 0x3f; // mask to 0..64
+        .expect("11 bytes is well within HKDF output limit");
+
+    // First 6 bytes = 48 bits. Use the high 42 bits (7 × 6) for emoji.
+    // Bit extraction (big-endian, MSB-first):
+    let b = &okm[..6];
+    let mut raw_emoji = [0u8; 7];
+    raw_emoji[0] = b[0] >> 2;
+    raw_emoji[1] = ((b[0] & 0x03) << 4) | (b[1] >> 4);
+    raw_emoji[2] = ((b[1] & 0x0f) << 2) | (b[2] >> 6);
+    raw_emoji[3] = b[2] & 0x3f;
+    raw_emoji[4] = b[3] >> 2;
+    raw_emoji[5] = ((b[3] & 0x03) << 4) | (b[4] >> 4);
+    raw_emoji[6] = ((b[4] & 0x0f) << 2) | (b[5] >> 6);
+    let mut emoji_indices = [0u8; 7];
+    for i in 0..7 {
+        // MSC 2241: clients SHOULD NOT generate values 49-63; spec
+        // recommendation is to take mod 49 to coerce into the table.
+        emoji_indices[i] = raw_emoji[i] % (SAS_EMOJI.len() as u8);
     }
-    let decimal = format!(
-        "{:06}",
-        (u32::from(okm[6]) << 16 | u32::from(okm[7]) << 8 | u32::from(okm[8])) % 1_000_000
-    );
+
+    // Bytes 6..11 = 40 bits. Use the high 39 bits for the decimal
+    // (3 × 13-bit chunks, each offset by 1000).
+    let d = &okm[6..11];
+    let chunk0 = ((u32::from(d[0]) << 5) | (u32::from(d[1]) >> 3)) & 0x1fff;
+    let chunk1 = ((u32::from(d[1] & 0x07) << 10)
+        | (u32::from(d[2]) << 2)
+        | (u32::from(d[3]) >> 6))
+        & 0x1fff;
+    let chunk2 = ((u32::from(d[3] & 0x3f) << 7) | (u32::from(d[4]) >> 1)) & 0x1fff;
+    let decimal = format!("{}-{}-{}", chunk0 + 1000, chunk1 + 1000, chunk2 + 1000);
+
     SasCode {
         emoji_indices,
         decimal,
     }
 }
 
-/// 64 emoji / label pairs — every entry is visually distinct and the
-/// label is a short English word so users can also read the code aloud.
-/// Lifted in spirit from Matrix MSC 2241; reordered + relabelled to
-/// keep words ASCII and one-syllable where possible.
-pub const SAS_EMOJI: [(&str, &str); 64] = [
+/// The canonical 49-emoji table from Matrix MSC 2241, English labels.
+/// Indices 0-48; the derivation above maps 6-bit HKDF chunks mod 49.
+pub const SAS_EMOJI: [(&str, &str); 49] = [
     ("🐶", "dog"),
     ("🐱", "cat"),
     ("🦁", "lion"),
-    ("🐴", "horse"),
+    ("🐎", "horse"),
     ("🦄", "unicorn"),
     ("🐷", "pig"),
     ("🐘", "elephant"),
     ("🐰", "rabbit"),
     ("🐼", "panda"),
-    ("🐔", "rooster"),
+    ("🐓", "rooster"),
     ("🐧", "penguin"),
     ("🐢", "turtle"),
     ("🐟", "fish"),
@@ -139,7 +173,7 @@ pub const SAS_EMOJI: [(&str, &str); 64] = [
     ("🌳", "tree"),
     ("🌵", "cactus"),
     ("🍄", "mushroom"),
-    ("🌍", "globe"),
+    ("🌏", "globe"),
     ("🌙", "moon"),
     ("☁️", "cloud"),
     ("🔥", "fire"),
@@ -161,7 +195,7 @@ pub const SAS_EMOJI: [(&str, &str); 64] = [
     ("⌛", "hourglass"),
     ("⏰", "clock"),
     ("🎁", "gift"),
-    ("💡", "lightbulb"),
+    ("💡", "light bulb"),
     ("📕", "book"),
     ("✏️", "pencil"),
     ("📎", "paperclip"),
@@ -169,21 +203,6 @@ pub const SAS_EMOJI: [(&str, &str); 64] = [
     ("🔒", "lock"),
     ("🔑", "key"),
     ("🔨", "hammer"),
-    ("☎️", "telephone"),
-    ("🏁", "flag"),
-    ("🚂", "train"),
-    ("🚲", "bicycle"),
-    ("✈️", "plane"),
-    ("🚀", "rocket"),
-    ("🏆", "trophy"),
-    ("⚽", "ball"),
-    ("🎸", "guitar"),
-    ("🎺", "trumpet"),
-    ("🔔", "bell"),
-    ("⚓", "anchor"),
-    ("🎧", "headphones"),
-    ("📁", "folder"),
-    ("📌", "pin"),
 ];
 
 /// Decode a base64-encoded 32-byte X25519 pubkey received over the wire.
@@ -216,9 +235,16 @@ mod tests {
         let alice_code = derive_sas_code(&alice_secret, &bob_pub, &tx_id);
         let bob_code = derive_sas_code(&bob_secret, &alice_pub, &tx_id);
         assert_eq!(alice_code, bob_code);
-        assert_eq!(alice_code.decimal.len(), 6);
-        assert!(alice_code.decimal.chars().all(|c| c.is_ascii_digit()));
-        // Indices must all be in 0..64.
+        // Decimal shape: three 4-digit groups joined by '-', each in
+        // [1000, 9191].
+        let parts: Vec<&str> = alice_code.decimal.split('-').collect();
+        assert_eq!(parts.len(), 3);
+        for p in parts {
+            assert_eq!(p.len(), 4);
+            let n: u32 = p.parse().unwrap();
+            assert!((1000..=9191).contains(&n));
+        }
+        // Indices must all be in 0..49 (MSC 2241 table size).
         for i in alice_code.emoji_indices {
             assert!((i as usize) < SAS_EMOJI.len());
         }

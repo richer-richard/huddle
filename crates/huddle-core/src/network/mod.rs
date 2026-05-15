@@ -68,6 +68,14 @@ pub enum NetworkCommand {
     /// add the peer_id to the in-memory blocklist for this session
     /// (caller is responsible for the persistent blocked_peers row).
     RejectInbound { peer_id: PeerId },
+    /// Phase C follow-up: drop a connection that failed an
+    /// application-level identity check (e.g. invite-fingerprint
+    /// mismatch). Differs from `RejectInbound` in that it doesn't
+    /// touch the inbound-pending map (the connection is already
+    /// past Identify when we discover the mismatch) and doesn't
+    /// persist a block — the caller may want to retry with a
+    /// corrected invite.
+    DisconnectPeer { peer_id: PeerId },
     Shutdown,
 }
 
@@ -117,6 +125,13 @@ impl NetworkHandle {
         let _ = self
             .cmd_tx
             .send(NetworkCommand::RejectInbound { peer_id })
+            .await;
+    }
+
+    pub async fn disconnect_peer(&self, peer_id: PeerId) {
+        let _ = self
+            .cmd_tx
+            .send(NetworkCommand::DisconnectPeer { peer_id })
             .await;
     }
 
@@ -215,7 +230,7 @@ pub fn start_network_with(
 
             let identify = identify::Behaviour::new(
                 identify::Config::new("/huddle/1.0.0".into(), key.public())
-                    .with_agent_version("huddle/0.3".into()),
+                    .with_agent_version("huddle/0.4".into()),
             );
 
             let ping = ping::Behaviour::default();
@@ -242,7 +257,15 @@ pub fn start_network_with(
                 .subscribe(&rooms_topic)
                 .expect("subscribe rooms topic");
 
-            let autonat = autonat::v1::Behaviour::new(local_peer_id, Default::default());
+            // AutoNAT v2: client probes external addresses by asking
+            // remote servers to dial us back; server answers other
+            // peers' probes. Both halves are needed for symmetric
+            // P2P reachability detection (v1 combined them; v2 split).
+            let autonat_client = autonat::v2::client::Behaviour::new(
+                rand::rngs::OsRng,
+                autonat::v2::client::Config::default(),
+            );
+            let autonat_server = autonat::v2::server::Behaviour::new(rand::rngs::OsRng);
             let dcutr = dcutr::Behaviour::new(local_peer_id);
 
             HuddleBehavior {
@@ -251,7 +274,8 @@ pub fn start_network_with(
                 ping,
                 gossipsub,
                 relay_client,
-                autonat,
+                autonat_client,
+                autonat_server,
                 dcutr,
             }
         })
@@ -556,6 +580,45 @@ impl NetworkTask {
                         .await;
                 }
             }
+            HuddleBehaviorEvent::AutonatClient(ev) => {
+                // One probe per address candidate. `result.is_ok()`
+                // means a remote AutoNAT server dialed us back
+                // successfully on `tested_addr` ⇒ this address is
+                // reachable from the outside. The app layer aggregates
+                // these into the lobby reachability badge.
+                let reachable = ev.result.is_ok();
+                if reachable {
+                    info!(tested = %ev.tested_addr, server = %ev.server, "AutoNAT: reachable");
+                } else {
+                    debug!(tested = %ev.tested_addr, server = %ev.server, "AutoNAT: probe failed");
+                }
+                let _ = self
+                    .event_tx
+                    .send(NetworkEvent::NatProbeResult {
+                        tested_addr: ev.tested_addr,
+                        reachable,
+                    })
+                    .await;
+            }
+            HuddleBehaviorEvent::AutonatServer(_) => {
+                // We answered another peer's reachability probe.
+                // No app-visible action.
+            }
+            HuddleBehaviorEvent::Dcutr(ev) => {
+                let success = ev.result.is_ok();
+                if success {
+                    info!(remote = %ev.remote_peer_id, "DCUtR: direct connection established");
+                } else {
+                    debug!(remote = %ev.remote_peer_id, "DCUtR: hole-punch failed");
+                }
+                let _ = self
+                    .event_tx
+                    .send(NetworkEvent::DcutrUpgrade {
+                        remote_peer: ev.remote_peer_id,
+                        success,
+                    })
+                    .await;
+            }
             _ => {}
         }
     }
@@ -645,6 +708,10 @@ impl NetworkTask {
                 self.pending_inbound.remove(&peer_id);
                 self.session_blocklist.insert(peer_id);
                 info!(%peer_id, "inbound dial rejected — disconnecting");
+                let _ = self.swarm.disconnect_peer_id(peer_id);
+            }
+            NetworkCommand::DisconnectPeer { peer_id } => {
+                info!(%peer_id, "app-level identity check failed — disconnecting");
                 let _ = self.swarm.disconnect_peer_id(peer_id);
             }
             NetworkCommand::Dial { address } => {

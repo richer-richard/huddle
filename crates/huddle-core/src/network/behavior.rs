@@ -14,7 +14,16 @@ pub struct HuddleBehavior {
     // estimates whether we're behind NAT. DCUtR upgrades a relayed
     // connection to a direct one via hole-punching when possible.
     pub relay_client: relay::client::Behaviour,
-    pub autonat: autonat::v1::Behaviour,
+    // AutoNAT v2 (upgraded from v1 in the 0.3.x follow-up). v2 split
+    // the single v1 Behaviour into separate client + server halves;
+    // for a P2P mesh where any node may be asked to probe another's
+    // reachability, we include both — matching v1's symmetric design.
+    // Client emits an `Event` per address probe (Ok ⇒ reachable); the
+    // app layer consumes that to render the lobby reachability badge.
+    // Server runs silently behind the scenes — nodes use it to test
+    // each other.
+    pub autonat_client: autonat::v2::client::Behaviour,
+    pub autonat_server: autonat::v2::server::Behaviour,
     pub dcutr: dcutr::Behaviour,
 }
 
@@ -25,7 +34,8 @@ pub enum HuddleBehaviorEvent {
     Ping(ping::Event),
     Gossipsub(gossipsub::Event),
     RelayClient(relay::client::Event),
-    Autonat(autonat::v1::Event),
+    AutonatClient(autonat::v2::client::Event),
+    AutonatServer(autonat::v2::server::Event),
     Dcutr(dcutr::Event),
 }
 
@@ -59,9 +69,15 @@ impl From<relay::client::Event> for HuddleBehaviorEvent {
     }
 }
 
-impl From<autonat::v1::Event> for HuddleBehaviorEvent {
-    fn from(event: autonat::v1::Event) -> Self {
-        Self::Autonat(event)
+impl From<autonat::v2::client::Event> for HuddleBehaviorEvent {
+    fn from(event: autonat::v2::client::Event) -> Self {
+        Self::AutonatClient(event)
+    }
+}
+
+impl From<autonat::v2::server::Event> for HuddleBehaviorEvent {
+    fn from(event: autonat::v2::server::Event) -> Self {
+        Self::AutonatServer(event)
     }
 }
 

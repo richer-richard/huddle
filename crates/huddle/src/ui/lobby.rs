@@ -88,10 +88,33 @@ fn render_header(f: &mut Frame, area: Rect, app: &TuiApp) {
                 format!("listening on {}", listen),
                 Style::default().fg(Color::DarkGray),
             ),
+            Span::styled("  ", Style::default()),
+            nat_badge(app),
         ]),
     ];
     let para = Paragraph::new(lines);
     f.render_widget(para, area);
+}
+
+/// Phase D follow-up: emoji-badge of the AutoNAT-aggregated reachability
+/// state. None ⇒ '🔍 detecting…' (the probe stream hasn't told us
+/// anything yet), Some("reachable") ⇒ '🌐 reachable', anything else
+/// ⇒ '🏠 LAN only' (we couldn't confirm a public address).
+fn nat_badge(app: &TuiApp) -> Span<'_> {
+    match app.nat_status.as_deref() {
+        Some("reachable") => Span::styled(
+            "🌐 reachable",
+            Style::default().fg(Color::Green),
+        ),
+        Some(_) => Span::styled(
+            "🏠 LAN only",
+            Style::default().fg(Color::DarkGray),
+        ),
+        None => Span::styled(
+            "🔍 detecting…",
+            Style::default().fg(Color::DarkGray),
+        ),
+    }
 }
 
 fn render_known_peers(f: &mut Frame, area: Rect, app: &TuiApp) {

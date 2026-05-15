@@ -99,6 +99,14 @@ pub enum Action {
     MemberActionNext,
     MemberActionPrev,
     MemberActionConfirm,
+    /// Phase B follow-up: list bans for the current room (owners only).
+    /// Bound to `^B` in the room view; renders an Info modal so it
+    /// dismisses on any key.
+    ShowRoomBans,
+    /// Phase A follow-up: clear every globally-blocked peer. Bound to
+    /// `c` in the Settings modal. Sledgehammer for now — finer-grained
+    /// per-peer unblock is a future refinement.
+    ClearBlockedPeers,
     // Phase G: SAS verification
     VerifyStartSas,
     SasMatch,
@@ -220,6 +228,7 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
             KeyCode::Char('v') | KeyCode::Enter | KeyCode::Char(' ') => {
                 Action::SettingsToggleGlobalVerifiedOnly
             }
+            KeyCode::Char('c') => Action::ClearBlockedPeers,
             _ => Action::Nothing,
         },
         Modal::ShowJoinCode(_) => match key.code {
@@ -419,6 +428,10 @@ fn map_in_room(key: KeyEvent, app: &TuiApp) -> Action {
             KeyCode::PageUp => Action::PageUp,
             KeyCode::Home | KeyCode::Char('g') => Action::JumpTop,
             KeyCode::End | KeyCode::Char('G') => Action::JumpBottom,
+            // Shift+b — owners-only view of bans for the current room.
+            // Distinct from ^B (BackToLobby) since terminals collapse
+            // Ctrl+Shift+b → Ctrl+b, making the Ctrl-chord ambiguous.
+            KeyCode::Char('B') => Action::ShowRoomBans,
             KeyCode::Esc => Action::BackToLobby,
             _ => Action::Nothing,
         }

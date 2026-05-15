@@ -96,7 +96,6 @@ struct ActiveRoom {
     /// without the passphrase we can't wrap our own outbound session
     /// key for other members. Read-only until an owner re-onboards us
     /// with the full passphrase. Defaults false for passphrase joins.
-    #[allow(dead_code)]
     read_only: bool,
     /// Phase F: owner-issued join codes for this room (owner side
     /// only). Pairs of (code, expires_at_unix). Single-use; entries
@@ -149,11 +148,49 @@ pub struct AppHandle {
     /// 16-byte salt picked by the initiator + base64'd).
     sas_flows: Arc<Mutex<HashMap<String, SasFlow>>>,
     /// Phase F: ephemeral X25519 secrets the joiner is holding while
-    /// they wait for the owner's `CodeJoinResponse`. Keyed by room_id
-    /// — we only have one in-flight code join per room at a time.
-    pending_code_secrets: Arc<Mutex<HashMap<String, x25519_dalek::StaticSecret>>>,
+    /// they wait for the owner's `CodeJoinResponse`. Keyed by
+    /// `(room_id, joiner_fp)` so multiple joiners in the same room can
+    /// be in flight concurrently without trampling each other; and so
+    /// the 30s timeout task (see `join_room_with_code`) can clean up
+    /// its own entry by composite key without racing with peers.
+    pending_code_secrets:
+        Arc<Mutex<HashMap<(String, String), x25519_dalek::StaticSecret>>>,
+    /// Phase C follow-up: tracks "we dialed this multiaddr because of
+    /// an invite link claiming this fingerprint." When the peer
+    /// identifies (and we can derive their real fp), the post-dial arm
+    /// looks the multiaddr up here and compares — if the claimed and
+    /// derived fingerprints don't match, we disconnect and surface
+    /// an `InviteFingerprintMismatch` event.
+    ///
+    /// libp2p's `/p2p/<peer-id>` segment already enforces this at the
+    /// transport level when present (and our invite generator always
+    /// includes it), so this is defense in depth — but it also makes
+    /// the assert explicit so future invite-format changes can't slip
+    /// in a forgeable fingerprint label.
+    pending_invite_dials: Arc<Mutex<HashMap<String, String>>>,
+    /// Phase D follow-up: addresses confirmed reachable by AutoNAT v2
+    /// probes. We emit a `NatStatusChanged` whenever this set
+    /// transitions between empty (private / undetected) and
+    /// non-empty (reachable), so the TUI badge doesn't flap on every
+    /// individual probe.
+    nat_reachable_addrs: Arc<Mutex<HashSet<String>>>,
+    /// Phase D follow-up: `/p2p-circuit` reservation addresses we've
+    /// established via configured relays. These are populated when
+    /// `RelayReservationEstablished` arrives and feed into the
+    /// `RoomAnnouncement.host_addrs` field so cross-internet peers
+    /// can bootstrap without an invite link.
+    relay_circuit_addrs: Arc<Mutex<HashSet<String>>>,
+    /// Phase D follow-up: per-creator-fingerprint last-dial timestamp.
+    /// Throttles the opportunistic dial we issue when an announcement
+    /// arrives carrying `host_addrs` — we re-dial the same announcer
+    /// at most once per `HOST_ADDR_DIAL_BACKOFF_SECS`.
+    host_addr_dial_attempts: Arc<Mutex<HashMap<String, i64>>>,
     app_event_tx: broadcast::Sender<AppEvent>,
 }
+
+/// Phase D follow-up: minimum seconds between two opportunistic
+/// `host_addrs` dials to the same announcer fingerprint.
+const HOST_ADDR_DIAL_BACKOFF_SECS: i64 = 300;
 
 impl AppHandle {
     pub async fn start() -> Result<Self> {
@@ -218,6 +255,10 @@ impl AppHandle {
             session_persist_key,
             sas_flows: Arc::new(Mutex::new(HashMap::new())),
             pending_code_secrets: Arc::new(Mutex::new(HashMap::new())),
+            pending_invite_dials: Arc::new(Mutex::new(HashMap::new())),
+            nat_reachable_addrs: Arc::new(Mutex::new(HashSet::new())),
+            relay_circuit_addrs: Arc::new(Mutex::new(HashSet::new())),
+            host_addr_dial_attempts: Arc::new(Mutex::new(HashMap::new())),
             app_event_tx,
         };
 
@@ -741,6 +782,67 @@ impl AppHandle {
         Ok(())
     }
 
+    /// Phase D follow-up: snapshot of the NAT reachability state.
+    /// Returns the addresses AutoNAT has confirmed as externally
+    /// reachable in this session. The lobby renders an emoji badge
+    /// from this — non-empty ⇒ '🌐 reachable', empty ⇒ '🏠 LAN only'.
+    pub fn nat_reachable_addrs(&self) -> Vec<String> {
+        self.nat_reachable_addrs
+            .lock()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    /// Phase D follow-up: addresses suitable for putting on the wire
+    /// so other peers can dial us. Union of:
+    ///   - AutoNAT-confirmed external addresses (direct internet)
+    ///   - active `/p2p-circuit` reservations on configured relays
+    /// Capped at 4 entries to keep room announcements small.
+    /// Relay-circuit addresses are listed first (they're more likely
+    /// to work for NAT'd peers).
+    pub fn dialable_addrs(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .relay_circuit_addrs
+            .lock()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect();
+        for a in self.nat_reachable_addrs.lock().unwrap().iter() {
+            if !out.contains(a) {
+                out.push(a.clone());
+            }
+        }
+        out.truncate(4);
+        out
+    }
+
+    /// Phase C follow-up: dial a peer whose multiaddr came from an
+    /// invite link claiming `claimed_fp`. Behaves identically to
+    /// `dial`, but additionally stashes `(canonical_addr → claimed_fp)`
+    /// in `pending_invite_dials` so the `PeerIdentified` handler can
+    /// assert the cryptographic fp matches the human-display one in
+    /// the invite. Mismatch ⇒ disconnect + `InviteFingerprintMismatch`
+    /// event.
+    ///
+    /// libp2p's `/p2p/<peer-id>` segment already enforces this at the
+    /// transport level (and our invite generator always includes it),
+    /// so this is defense in depth — but it makes the assert explicit
+    /// rather than relying on a structural side effect.
+    pub async fn dial_invite(&self, address: &str, claimed_fp: &str) -> Result<()> {
+        let multiaddr = parse_dial_address(address)?;
+        let canonical = multiaddr.to_string();
+        self.pending_invite_dials
+            .lock()
+            .unwrap()
+            .insert(canonical.clone(), claimed_fp.to_string());
+        // Re-use the standard dial path so KnownPeer rows + status
+        // events look identical to a plain dial.
+        self.dial(address).await
+    }
+
     pub fn known_peers(&self) -> Vec<KnownPeerStatus> {
         let connected = self.connected_dial_addrs.lock().unwrap().clone();
         let stored = repo::list_known_peers(&self.db).unwrap_or_default();
@@ -882,6 +984,7 @@ impl AppHandle {
         let owner_fingerprints =
             repo::list_room_owners(&self.db, &info.id).unwrap_or_default();
         let verified_only = repo::get_room_verified_only(&self.db, &info.id).unwrap_or(false);
+        let host_addrs = self.dialable_addrs();
         let ann = RoomAnnouncement {
             room_id: info.id.clone(),
             name: info.name.clone(),
@@ -892,6 +995,7 @@ impl AppHandle {
             announced_at: now_unix(),
             owner_fingerprints,
             verified_only,
+            host_addrs,
         };
         self.network.announce_room(ann).await;
     }
@@ -1018,6 +1122,36 @@ impl AppHandle {
                         .unwrap()
                         .insert(ann.room_id.clone(), salt.clone());
                 }
+                // Phase D follow-up: opportunistically dial the
+                // announcer's first host_addr if we're not already
+                // connected. Skips self-announcements + rate-limits
+                // by creator fingerprint so we don't dial-storm.
+                let our_fp_for_dial = self.identity.fingerprint().to_string();
+                if ann.creator_fingerprint != our_fp_for_dial && !ann.host_addrs.is_empty() {
+                    let now = now_unix();
+                    let should_dial = {
+                        let mut attempts = self.host_addr_dial_attempts.lock().unwrap();
+                        match attempts.get(&ann.creator_fingerprint).copied() {
+                            Some(last) if now - last < HOST_ADDR_DIAL_BACKOFF_SECS => false,
+                            _ => {
+                                attempts.insert(ann.creator_fingerprint.clone(), now);
+                                true
+                            }
+                        }
+                    };
+                    if should_dial {
+                        if let Some(first) = ann.host_addrs.first() {
+                            info!(
+                                announcer = %ann.creator_fingerprint,
+                                addr = %first,
+                                "opportunistic dial via room announcement host_addrs"
+                            );
+                            // dial is fire-and-forget; failures land in
+                            // DialFailed and the user doesn't need to know.
+                            let _ = self.dial(first).await;
+                        }
+                    }
+                }
                 let discovered = DiscoveredRoom {
                     room_id: ann.room_id.clone(),
                     name: ann.name.clone(),
@@ -1065,8 +1199,29 @@ impl AppHandle {
                 let (msg, verified_signer) = match wire {
                     WireMessage::Plain(m) => (m, None),
                     WireMessage::Signed(env) => {
+                        let claimed_pubkey = env.ed25519_pubkey_b64.clone();
                         match crate::crypto::verify_signed(&env) {
-                            Ok((m, fp)) => (m, Some(fp)),
+                            Ok((m, fp)) => {
+                                // Defense in depth: if we've persisted
+                                // a pubkey for this fingerprint in this
+                                // room before, the envelope's pubkey
+                                // MUST match it. A different pubkey for
+                                // the same fingerprint means identity
+                                // drift — TOFU violation — drop.
+                                match repo::get_member_ed25519_pubkey(
+                                    &self.db, &room_id, &fp,
+                                ) {
+                                    Ok(Some(known)) if known != claimed_pubkey => {
+                                        warn!(
+                                            %fp, %room_id,
+                                            "pubkey mismatch vs stored; dropping signed message"
+                                        );
+                                        return;
+                                    }
+                                    _ => {}
+                                }
+                                (m, Some(fp))
+                            }
                             Err(e) => {
                                 warn!(%e, fp = %env.fingerprint, "signed envelope verify failed");
                                 return;
@@ -1127,6 +1282,41 @@ impl AppHandle {
                         })
                         .collect()
                 };
+                // Phase C follow-up: if any of these addresses came
+                // from an invite, verify the invite's claimed fp
+                // against what we just derived from the pubkey. A
+                // mismatch means the invite's fp label disagrees with
+                // libp2p's /p2p/<peer-id> cryptographic anchor —
+                // structurally impossible when both fields are
+                // generated from the same identity, but the explicit
+                // assert defends against future invite-format
+                // changes or hand-edited links.
+                let mismatch = {
+                    let mut map = self.pending_invite_dials.lock().unwrap();
+                    let mut found: Option<(String, String)> = None;
+                    for addr in &matched_addrs {
+                        if let Some(claimed) = map.remove(addr) {
+                            if claimed != fingerprint {
+                                found = Some((addr.clone(), claimed));
+                                break;
+                            }
+                        }
+                    }
+                    found
+                };
+                if let Some((addr, claimed)) = mismatch {
+                    warn!(
+                        %addr, %claimed, actual=%fingerprint,
+                        "invite fingerprint mismatch — disconnecting"
+                    );
+                    self.network.disconnect_peer(peer_id).await;
+                    let _ = self.app_event_tx.send(AppEvent::InviteFingerprintMismatch {
+                        address: addr,
+                        claimed,
+                        actual: fingerprint.clone(),
+                    });
+                    return;
+                }
                 for addr in matched_addrs {
                     let _ = repo::upsert_known_peer(
                         &self.db,
@@ -1148,9 +1338,60 @@ impl AppHandle {
                 // it to the addresses pane. Also emit a status hint via
                 // ListeningOn so the lobby's reachability line updates.
                 info!(addr = %address, "relay reservation established");
+                self.relay_circuit_addrs
+                    .lock()
+                    .unwrap()
+                    .insert(address.to_string());
                 let _ = self.app_event_tx.send(AppEvent::ListeningOn {
                     address: address.to_string(),
                 });
+            }
+            NetworkEvent::NatProbeResult {
+                tested_addr,
+                reachable,
+            } => {
+                let addr_s = tested_addr.to_string();
+                let (transitioned, becomes_reachable) = {
+                    let mut set = self.nat_reachable_addrs.lock().unwrap();
+                    let was_empty = set.is_empty();
+                    if reachable {
+                        set.insert(addr_s.clone());
+                    } else {
+                        set.remove(&addr_s);
+                    }
+                    let is_empty = set.is_empty();
+                    (was_empty != is_empty, !is_empty)
+                };
+                if transitioned {
+                    let label = if becomes_reachable {
+                        "reachable".to_string()
+                    } else {
+                        "private".to_string()
+                    };
+                    info!(reachable = %becomes_reachable, "NAT reachability changed");
+                    let _ = self.app_event_tx.send(AppEvent::NatStatusChanged {
+                        label,
+                        reachable: becomes_reachable,
+                    });
+                }
+            }
+            NetworkEvent::DcutrUpgrade {
+                remote_peer,
+                success,
+            } => {
+                if success {
+                    // Render the peer as the last 8 chars of the
+                    // PeerId for compactness — full peer id is too long
+                    // for a status line.
+                    let s = remote_peer.to_base58();
+                    let tail: String = s.chars().rev().take(8).collect::<String>()
+                        .chars()
+                        .rev()
+                        .collect();
+                    let _ = self.app_event_tx.send(AppEvent::DcutrSucceeded {
+                        peer_label: tail,
+                    });
+                }
             }
             NetworkEvent::InboundDial {
                 peer_id,
@@ -1467,6 +1708,24 @@ impl AppHandle {
                 new_salt,
             } => {
                 if rotator_fingerprint == our_fp {
+                    return;
+                }
+                // Rotations are self-attested: the signer must be the
+                // claimed rotator. Unsigned forgeries land in
+                // `verified_signer = None` and are dropped here, as are
+                // signed envelopes where the signer fp doesn't match.
+                let signer = match verified_signer {
+                    Some(fp) => fp,
+                    None => {
+                        warn!(%room_id, "RotateRoomKey arrived unsigned; dropping");
+                        return;
+                    }
+                };
+                if signer != rotator_fingerprint {
+                    warn!(
+                        %signer, %rotator_fingerprint, %room_id,
+                        "RotateRoomKey signer mismatch with claimed rotator; dropping"
+                    );
                     return;
                 }
                 let _ = self.app_event_tx.send(AppEvent::RotationRequested {
@@ -1859,7 +2118,7 @@ impl AppHandle {
                     .pending_code_secrets
                     .lock()
                     .unwrap()
-                    .remove(room_id)
+                    .remove(&(room_id.to_string(), our_fp.clone()))
                 {
                     Some(s) => s,
                     None => {
@@ -2452,12 +2711,39 @@ impl AppHandle {
         use x25519_dalek::{PublicKey, StaticSecret};
         let our_secret = StaticSecret::random_from_rng(rand::thread_rng());
         let our_pub = PublicKey::from(&our_secret);
-        // Stash the secret keyed by room_id; the response handler
-        // matches on target_fingerprint=our_fp + room_id.
+        // Stash the secret keyed by (room_id, our_fp); the response
+        // handler removes the matching entry when a response targeted
+        // at us arrives. The composite key means a second joiner can
+        // be in flight in the same room without overwriting our state.
+        let key = (room_id.to_string(), our_fp.clone());
         self.pending_code_secrets
             .lock()
             .unwrap()
-            .insert(room_id.to_string(), our_secret);
+            .insert(key.clone(), our_secret);
+        // Code-join timeout: if no response in 30s, the entry will
+        // still be in the map (the response handler removes it on
+        // success). Surface a `CodeJoinTimedOut` to the TUI so the
+        // user isn't stuck staring at an empty room expecting traffic.
+        let map = self.pending_code_secrets.clone();
+        let tx = self.app_event_tx.clone();
+        let timeout_room = room_id.to_string();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            let still_pending = map.lock().unwrap().remove(&key).is_some();
+            if still_pending {
+                let _ = tx.send(AppEvent::CodeJoinTimedOut {
+                    room_id: timeout_room,
+                    reason: "no response from owner — code may be wrong or expired".into(),
+                });
+            }
+        });
+        // Persist the rooms row BEFORE constructing RoomCrypto, whose
+        // `persist_outbound()` writes a `room_megolm_sessions` row with
+        // a FK to `rooms(id)`. Without this, the FK fires and the
+        // join aborts. The salt is left None for now — we don't have
+        // the passphrase and the announcing peer's salt is cached in
+        // ROOM_SALT_CACHE for whenever we get re-onboarded.
+        repo::insert_room(&self.db, &info)?;
         // Create a placeholder ActiveRoom with no crypto yet; we'll
         // fill in the inbound session in the response handler.
         self.active_rooms.lock().unwrap().insert(
@@ -2620,6 +2906,42 @@ impl AppHandle {
         repo::is_room_muted(&self.db, room_id).unwrap_or(false)
     }
 
+    /// Phase B: list the fingerprints currently banned from a room
+    /// (newest first). Backs the `^B` in-room view; intended for
+    /// owners but the read itself is harmless and we let callers
+    /// gate via `we_are_owner` if they want owner-only display.
+    pub fn list_room_bans(&self, room_id: &str) -> Vec<String> {
+        repo::list_room_bans(&self.db, room_id).unwrap_or_default()
+    }
+
+    /// Phase A: list every globally-blocked peer (one fingerprint per
+    /// row). Surfaced in the Settings modal alongside a clear-all
+    /// action that calls `unblock_peer` in a loop.
+    pub fn list_blocked_peers(&self) -> Vec<String> {
+        repo::list_blocked_peers(&self.db).unwrap_or_default()
+    }
+
+    /// Phase A: remove `fingerprint` from the persistent blocklist. The
+    /// peer will no longer be auto-rejected on connection; they fall
+    /// back to the regular inbound-dial accept/reject prompt.
+    pub fn unblock_peer(&self, fingerprint: &str) -> Result<()> {
+        repo::unblock_peer(&self.db, fingerprint)
+    }
+
+    /// Phase F: rooms entered via a join code don't have the passphrase
+    /// in memory, so the joining peer can't wrap their own outbound
+    /// session key for newer members — they can read and send, they
+    /// just can't onboard others. The TUI renders a `(read-only)`
+    /// badge in the room tab so the user understands.
+    pub fn is_room_read_only(&self, room_id: &str) -> bool {
+        self.active_rooms
+            .lock()
+            .unwrap()
+            .get(room_id)
+            .map(|r| r.read_only)
+            .unwrap_or(false)
+    }
+
     pub fn set_room_muted(&self, room_id: &str, muted: bool) -> Result<()> {
         repo::set_room_muted(&self.db, room_id, muted)
     }
@@ -2703,10 +3025,15 @@ impl AppHandle {
             rotator_fingerprint: self.identity.fingerprint().to_string(),
             new_salt: new_salt.to_vec(),
         };
-        if let Ok(bytes) = encode_wire(&rot) {
-            self.network
-                .publish_room_message(room_id.to_string(), bytes)
-                .await;
+        // Signed: rotations are self-attested, so peers can prove the
+        // claimed `rotator_fingerprint` really came from that identity.
+        // An unsigned rotation is rejected on the receive side.
+        if let Ok(env) = crate::crypto::sign_message(&self.identity, &rot) {
+            if let Ok(bytes) = crate::network::protocol::encode_wire_signed(&env) {
+                self.network
+                    .publish_room_message(room_id.to_string(), bytes)
+                    .await;
+            }
         }
         // Re-announce ourselves with the new wrapped session key.
         if let Err(e) = self.broadcast_member_announce(room_id).await {
@@ -2974,8 +3301,11 @@ fn open_with_system(path: &str) -> Result<()> {
 static ROOM_SALT_CACHE: std::sync::LazyLock<Mutex<HashMap<String, Vec<u8>>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
-#[allow(dead_code)]
-fn salt_len() -> usize {
+/// Public accessor for the Argon2id salt length used when deriving room
+/// passphrase keys. Exists so downstream tooling (status pages, debug
+/// CLIs, integration tests) can confirm the expected size without
+/// re-importing the constant from `crypto::passphrase`.
+pub fn salt_len() -> usize {
     SALT_LEN
 }
 

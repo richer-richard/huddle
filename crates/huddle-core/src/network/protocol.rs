@@ -19,8 +19,18 @@ pub fn room_topic(room_id: &str) -> String {
 
 /// Application-level signed envelope around a `RoomMessage`. Used for
 /// any message whose authenticity matters beyond gossipsub's transport-
-/// level signing — `RotateRoomKey`, `OwnerGrant`, `BanMember`, SAS
-/// handshakes, code-join requests/responses, `JoinRefused`.
+/// level signing.
+///
+/// The following variants MUST be sent inside a `Signed` envelope, and
+/// receivers MUST drop them when they arrive unsigned:
+///   - `RotateRoomKey` (signer must equal the claimed `rotator_fingerprint`)
+///   - `OwnerGrant`, `BanMember` (signer must be a current room owner)
+///   - `SasInit`, `SasResponse`, `SasConfirm` (SAS handshake — signature
+///     binds the ephemeral X25519 pubkey to the sender's identity)
+///   - `CodeJoinRequest`, `CodeJoinResponse` (signer is the joiner /
+///     owner)
+///   - `JoinRefused` (signer is a room owner; tells the rejected joiner
+///     it really came from the room)
 ///
 /// Verification happens via `crate::crypto::verify_signed`: it re-derives
 /// the fingerprint from `ed25519_pubkey_b64`, asserts equality with
@@ -93,6 +103,18 @@ pub struct RoomAnnouncement {
     /// `#[serde(default)]` so pre-0.3 senders default to permissive.
     #[serde(default)]
     pub verified_only: bool,
+    /// Phase D follow-up: dialable multiaddrs of the announcing node.
+    /// Populated from AutoNAT-confirmed external addresses + relay
+    /// circuit reservations (capped at 4 entries to keep the
+    /// announcement small). Empty for pre-0.3-followup senders.
+    ///
+    /// Consumer: when a peer sees an announcement with non-empty
+    /// `host_addrs` and isn't already connected to `creator_fingerprint`,
+    /// it opportunistically dials the first entry. This lets cross-
+    /// internet peers bootstrap via relay-circuit addresses without
+    /// requiring an invite link.
+    #[serde(default)]
+    pub host_addrs: Vec<String>,
 }
 
 /// All messages on a room's per-room topic.
@@ -268,6 +290,7 @@ mod tests {
             announced_at: 100,
             owner_fingerprints: vec!["creator-fp".into()],
             verified_only: false,
+            host_addrs: vec![],
         };
         let json = serde_json::to_vec(&ann).unwrap();
         let back: RoomAnnouncement = serde_json::from_slice(&json).unwrap();

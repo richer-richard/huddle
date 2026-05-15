@@ -134,18 +134,23 @@ pub enum Modal {
     QuitConfirm,
     Help,
     Error(String),
-    #[allow(dead_code)]
     Info(String),
 }
 
 #[derive(Debug, Clone)]
 pub struct SettingsState {
     pub verified_only_inbound: bool,
+    /// Snapshot of the persistent blocklist size, taken when the modal
+    /// opens. Re-snapped after `ClearBlockedPeers` so the row updates
+    /// without a modal re-open.
+    pub blocked_peer_count: usize,
 }
 
 #[derive(Debug, Clone)]
 pub struct ShowJoinCodeState {
-    #[allow(dead_code)]
+    /// Room identifier so the modal can render a short hash next to
+    /// the room name — useful when two rooms share a name (e.g.
+    /// multiple "general"s discovered across networks).
     pub room_id: String,
     pub room_name: String,
     pub code: String,
@@ -196,9 +201,9 @@ pub enum SasStage {
 
 #[derive(Debug, Clone)]
 pub struct SasState {
-    /// Held for context (which room the SAS started in) but currently
-    /// only the partner_fingerprint + tx_id drive behavior.
-    #[allow(dead_code)]
+    /// Room the SAS exchange started in. Surfaced in the modal title
+    /// ("SAS · #room-name") so the user knows which conversation
+    /// they're verifying — important when multiple rooms are open.
     pub room_id: String,
     pub partner_fingerprint: String,
     pub tx_id: String,
@@ -384,7 +389,6 @@ impl StartRoomState {
 pub struct JoinRoomState {
     pub room_id: String,
     pub room_name: String,
-    #[allow(dead_code)]
     pub encrypted: bool,
     pub passphrase: String,
 }
@@ -453,6 +457,13 @@ pub struct TuiApp {
     /// Bottom-bar status: text + expiry instant. After expiry, treated
     /// as None by the renderer.
     pub status_message: Option<(String, Instant)>,
+    /// Phase D follow-up: the lobby header renders this as a
+    /// reachability badge. `None` until AutoNAT delivers its first
+    /// transition; `Some("reachable")` once any external address
+    /// passes a probe; `Some("private")` if a reachable address
+    /// later disappears (all probes failing). The TUI maps this to
+    /// '🌐 reachable' / '🏠 private' emoji in `lobby::render_status`.
+    pub nat_status: Option<String>,
 }
 
 impl TuiApp {
@@ -487,6 +498,7 @@ impl TuiApp {
             active_tab: 0,
             listen_addresses: Vec::new(),
             status_message: None,
+            nat_status: None,
         }
     }
 
@@ -502,8 +514,10 @@ impl TuiApp {
         self.status_message = Some((msg.into(), Instant::now() + STATUS_TTL));
     }
 
-    /// Set the status line with an explicit TTL.
-    #[allow(dead_code)]
+    /// Set the status line with an explicit TTL. Used for transient
+    /// notifications worth a longer dwell than the default 6 s — e.g.
+    /// DCUtR upgrade success ("direct connection to <peer>") which we
+    /// want the user to actually see before it scrolls.
     pub fn set_status_for(&mut self, msg: impl Into<String>, ttl: Duration) {
         self.status_message = Some((msg.into(), Instant::now() + ttl));
     }
@@ -832,6 +846,38 @@ impl TuiApp {
                     "✓ verified {} via SAS",
                     short_fp(&partner_fingerprint)
                 ));
+            }
+            AppEvent::CodeJoinTimedOut { room_id: _, reason } => {
+                // The placeholder tab from `join_room_with_code` stays
+                // open (the user might retry) — we just surface the
+                // failure via the modal queue so it doesn't clobber
+                // anything the user happens to be typing.
+                self.replace_modal_if_idle(Modal::Error(format!("code join: {reason}")));
+            }
+            AppEvent::InviteFingerprintMismatch {
+                address: _,
+                claimed,
+                actual,
+            } => {
+                // The connection has already been dropped by the app
+                // handle; we just inform the user via the modal queue.
+                let msg = format!(
+                    "invite fingerprint mismatch — connection dropped.\nclaimed: {}\nactual:  {}\nthe invite link may be forged.",
+                    short_fp(&claimed),
+                    short_fp(&actual)
+                );
+                self.replace_modal_if_idle(Modal::Error(msg));
+            }
+            AppEvent::NatStatusChanged { label, reachable: _ } => {
+                // The lobby renders this as an emoji badge via
+                // `nat_status_badge()`; we just stash the raw label.
+                self.nat_status = Some(label);
+            }
+            AppEvent::DcutrSucceeded { peer_label } => {
+                self.set_status_for(
+                    format!("direct connection to …{}", peer_label),
+                    Duration::from_secs(10),
+                );
             }
         }
     }
@@ -2202,12 +2248,20 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
                 _ => return Ok(false),
             };
             app.modal = Modal::None;
-            // Dial. libp2p enforces the embedded /p2p/<peer-id> check
-            // on its end (structural MITM defense). If a room was
-            // included, we open Join modal speculatively — the joiner
-            // types the passphrase, and the actual join_room call will
-            // succeed once the room announcement arrives.
-            match app.handle.dial(&invite.host_multiaddr).await {
+            // Dial via the invite-aware path. libp2p enforces the
+            // embedded /p2p/<peer-id> check at the transport level
+            // (structural MITM defense), AND once Identify lands the
+            // app-layer post-dial arm compares the cryptographic fp
+            // against `invite.fingerprint`, disconnecting on mismatch.
+            // If a room was included, we open Join modal speculatively
+            // — the joiner types the passphrase, and the actual
+            // join_room call succeeds once the room announcement
+            // arrives.
+            match app
+                .handle
+                .dial_invite(&invite.host_multiaddr, &invite.fingerprint)
+                .await
+            {
                 Ok(()) => app.set_status(format!("dialing {} via invite…", short_fp(&invite.fingerprint))),
                 Err(e) => {
                     app.modal = Modal::Error(format!("dial failed: {e}"));
@@ -2289,13 +2343,14 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             if let Err(e) = app.handle.join_room_with_code(&room_id, code.trim()).await {
                 app.modal = Modal::Error(format!("code join failed: {e}"));
             } else {
-                app.set_status("code join request sent — waiting for owner");
+                app.set_status("code submitted — waiting for owner (up to 30 s)");
             }
             Ok(false)
         }
         Action::OpenSettings => {
             app.modal = Modal::Settings(SettingsState {
                 verified_only_inbound: app.handle.verified_only_inbound(),
+                blocked_peer_count: app.handle.list_blocked_peers().len(),
             });
             Ok(false)
         }
@@ -2310,6 +2365,35 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
                     return Ok(false);
                 }
             }
+            Ok(false)
+        }
+        Action::ClearBlockedPeers => {
+            // Iterate the persisted blocklist and unblock each. We do
+            // this in two phases (snapshot, then loop) so the SQLite
+            // connection isn't borrowed across the unblock_peer calls.
+            let blocked = app.handle.list_blocked_peers();
+            let n = blocked.len();
+            let mut errors = 0usize;
+            for fp in blocked {
+                if app.handle.unblock_peer(&fp).is_err() {
+                    errors += 1;
+                }
+            }
+            // Re-sync the open Settings modal's count so it reflects
+            // the cleared state without needing a modal reopen.
+            if let Modal::Settings(s) = &mut app.modal {
+                s.blocked_peer_count = app.handle.list_blocked_peers().len();
+            }
+            let msg = if errors == 0 {
+                format!("cleared {} blocked peer(s)", n)
+            } else {
+                format!(
+                    "cleared {} blocked peer(s); {} error(s)",
+                    n.saturating_sub(errors),
+                    errors
+                )
+            };
+            app.set_status(msg);
             Ok(false)
         }
         Action::ToggleRoomVerifiedOnly => {
@@ -2407,6 +2491,31 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
                 members,
                 selected: 0,
             });
+            Ok(false)
+        }
+        Action::ShowRoomBans => {
+            // Owners only. We use the same `we_are_owner` gate as
+            // kick/grant so the keybinding is silently ignored for
+            // non-owners (matching the rest of the moderation surface).
+            let room_id = match app.active_room() {
+                Some(r) => r.room_id.clone(),
+                None => return Ok(false),
+            };
+            if !app.handle.we_are_owner(&room_id) {
+                return Ok(false);
+            }
+            let bans = app.handle.list_room_bans(&room_id);
+            let body = if bans.is_empty() {
+                "no bans in this room.".to_string()
+            } else {
+                let mut s = format!("{} ban(s) in this room:\n\n", bans.len());
+                for fp in &bans {
+                    s.push_str(&format!("  {}\n", short_fp(fp)));
+                }
+                s.push_str("\nban is enforced by key rotation (the banned peer can no longer derive the room key). press any key to dismiss.");
+                s
+            };
+            app.replace_modal_if_idle(Modal::Info(body));
             Ok(false)
         }
         Action::MemberActionNext => {

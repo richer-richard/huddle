@@ -68,12 +68,18 @@ fn render_tabs(f: &mut Frame, area: Rect, app: &TuiApp) {
             } else {
                 ""
             };
+            let read_only = if app.handle.is_room_read_only(&r.room_id) {
+                " (read-only)"
+            } else {
+                ""
+            };
             Line::from(vec![
                 Span::styled(prefix, Style::default().fg(Color::DarkGray)),
                 Span::raw(r.name.clone()),
                 Span::styled(lock, Style::default().fg(Color::Magenta)),
                 Span::styled(unread, Style::default().fg(Color::Yellow)),
                 Span::styled(muted, Style::default().fg(Color::DarkGray)),
+                Span::styled(read_only, Style::default().fg(Color::DarkGray)),
             ])
         })
         .collect();

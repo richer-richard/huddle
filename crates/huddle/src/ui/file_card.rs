@@ -5,10 +5,10 @@
 use huddle_core::storage::repo::{AttachmentStatus, StoredAttachment};
 use ratatui::prelude::*;
 
-/// Card height in rows. The renderer emits exactly this many lines so
-/// interleaving with text in a shared Paragraph stays sane.
-#[allow(dead_code)]
-pub const CARD_HEIGHT: u16 = 4;
+/// Card height in rows. The renderer asserts the output Vec is exactly
+/// this length so layout code in `room.rs` can reserve rows correctly
+/// when computing scroll position.
+pub const CARD_HEIGHT: usize = 4;
 
 /// Width reserved for the message prefix column ("  HH:MM  label  ").
 /// Mirrors `MSG_PREFIX_WIDTH` in room.rs so cards sit under the body
@@ -43,7 +43,7 @@ pub fn render_card_lines(
     let status_style = Style::default().fg(status_color);
     let hint_style = Style::default().fg(Color::DarkGray);
 
-    vec![
+    let out = vec![
         Line::from(vec![
             Span::raw(prefix.clone()),
             Span::styled(top, border_style),
@@ -64,7 +64,13 @@ pub fn render_card_lines(
             Span::raw(prefix),
             Span::styled(bot, border_style),
         ]),
-    ]
+    ];
+    debug_assert_eq!(
+        out.len(),
+        CARD_HEIGHT,
+        "file_card::render_card_lines must produce exactly CARD_HEIGHT rows"
+    );
+    out
 }
 
 fn card_state(a: &StoredAttachment) -> (Color, &'static str, &'static str) {

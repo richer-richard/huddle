@@ -131,4 +131,32 @@ pub enum AppEvent {
         room_id: String,
         partner_fingerprint: String,
     },
+    /// Phase F follow-up: 30 seconds passed since we broadcast a
+    /// `CodeJoinRequest` and no `CodeJoinResponse` ever came back. The
+    /// owner either ignored us (bad/expired code), wasn't online, or
+    /// the network dropped our packet. Fired by the timeout task
+    /// spawned in `join_room_with_code` once it confirms our pending
+    /// secret is still sitting in the map.
+    CodeJoinTimedOut { room_id: String, reason: String },
+    /// Phase C follow-up: we dialed a peer via an invite link, the
+    /// peer identified, and the fingerprint they cryptographically
+    /// asserted doesn't match the one the invite claimed. The
+    /// connection has already been dropped. The TUI shows an error
+    /// modal so the user knows the link is forged or stale.
+    InviteFingerprintMismatch {
+        address: String,
+        claimed: String,
+        actual: String,
+    },
+    /// Phase D follow-up: aggregated NAT reachability state derived
+    /// from the AutoNAT probe stream. The app layer maintains a small
+    /// "do any probes say reachable?" tally; this event fires when
+    /// that aggregate changes. The TUI renders it as a badge in the
+    /// lobby header ('reachable' / 'private' / 'detecting').
+    NatStatusChanged { label: String, reachable: bool },
+    /// Phase D follow-up: a successful DCUtR upgrade — a relay-hopped
+    /// connection became direct. The TUI shows a transient status
+    /// line ("direct connection to <peer>"). Fires only on success;
+    /// failures stay in the debug log.
+    DcutrSucceeded { peer_label: String },
 }

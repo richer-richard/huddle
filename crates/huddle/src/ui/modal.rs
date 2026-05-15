@@ -104,11 +104,14 @@ pub fn render_join_room(f: &mut Frame, j: &JoinRoomState) {
     let area = centered_rect(54, 9, f.area());
     f.render_widget(Clear, area);
 
+    // 🔒 only appears when the announcement marked this room encrypted
+    // — gives users a visual confirmation before they type a passphrase.
+    let lock = if j.encrypted { "🔒 " } else { "" };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Magenta))
         .title(Span::styled(
-            format!(" join #{} (encrypted) ", j.room_name),
+            format!(" {lock}join #{} ", j.room_name),
             Style::default()
                 .fg(Color::Magenta)
                 .add_modifier(Modifier::BOLD),
@@ -854,11 +857,19 @@ pub fn render_sas(f: &mut Frame, s: &SasState) {
 
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(""));
+    // Title row carries the partner fp + a short room-id tag so the
+    // user knows which conversation they're verifying when several
+    // rooms are open in parallel.
+    let short_room: String = s.room_id.chars().take(8).collect();
     lines.push(Line::from(vec![
         Span::styled("  verifying  ", Style::default().fg(Color::DarkGray)),
         Span::styled(
             s.partner_fingerprint.clone(),
             Style::default().fg(Color::Yellow).bold(),
+        ),
+        Span::styled(
+            format!("  · room {}", short_room),
+            Style::default().fg(Color::DarkGray),
         ),
     ]));
     lines.push(Line::from(""));
@@ -938,9 +949,22 @@ pub fn render_sas(f: &mut Frame, s: &SasState) {
 
 /// Phase E: settings modal (global verified-only-inbound toggle).
 pub fn render_settings(f: &mut Frame, s: &SettingsState) {
-    let area = centered_rect(64, 12, f.area());
+    let area = centered_rect(64, 16, f.area());
     f.render_widget(Clear, area);
     let check = if s.verified_only_inbound { "[x]" } else { "[ ]" };
+    let blocked = s.blocked_peer_count;
+    let clear_hint = if blocked == 0 {
+        Line::from(Span::styled(
+            "  no blocked peers.",
+            Style::default().fg(Color::DarkGray),
+        ))
+    } else {
+        Line::from(vec![
+            Span::styled("  press ", Style::default().fg(Color::DarkGray)),
+            Span::styled("c", Style::default().fg(Color::Yellow).bold()),
+            Span::styled(" to clear all.", Style::default().fg(Color::DarkGray)),
+        ])
+    };
     let lines = vec![
         Line::from(""),
         Line::from(vec![
@@ -964,6 +988,15 @@ pub fn render_settings(f: &mut Frame, s: &SettingsState) {
             "  previously trusted them on an inbound prompt.",
             Style::default().fg(Color::DarkGray),
         )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" blocked peers: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{}", blocked),
+                Style::default().fg(Color::White).bold(),
+            ),
+        ]),
+        clear_hint,
         Line::from(""),
         Line::from(vec![
             Span::styled(" Enter / Space / v", Style::default().fg(Color::Yellow)),
@@ -993,11 +1026,18 @@ pub fn render_settings(f: &mut Frame, s: &SettingsState) {
 pub fn render_show_join_code(f: &mut Frame, s: &ShowJoinCodeState) {
     let area = centered_rect(64, 13, f.area());
     f.render_widget(Clear, area);
+    // Short hash disambiguates when two rooms share a name (e.g.
+    // multiple "general"s discovered across networks).
+    let short_id: String = s.room_id.chars().take(8).collect();
     let lines = vec![
         Line::from(""),
         Line::from(vec![
             Span::styled("  room: ", Style::default().fg(Color::DarkGray)),
             Span::styled(s.room_name.clone(), Style::default().fg(Color::White).bold()),
+            Span::styled(
+                format!("  ({})", short_id),
+                Style::default().fg(Color::DarkGray),
+            ),
         ]),
         Line::from(""),
         Line::from(vec![

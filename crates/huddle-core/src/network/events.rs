@@ -43,4 +43,21 @@ pub enum NetworkEvent {
     /// circuit address. Fires when libp2p emits `NewListenAddr` for an
     /// address with `/p2p-circuit/` in its path.
     RelayReservationEstablished { address: Multiaddr },
+    /// Phase D follow-up: AutoNAT v2 client finished a reachability
+    /// probe for one of our candidate external addresses. `reachable`
+    /// is true if a remote AutoNAT server successfully dialed us back.
+    /// One probe per address candidate; the app layer aggregates these
+    /// into the overall reachability badge shown in the lobby.
+    NatProbeResult {
+        tested_addr: Multiaddr,
+        reachable: bool,
+    },
+    /// Phase D follow-up: a Direct-Connection-Upgrade-through-Relay
+    /// attempt completed. `success` is true if a direct connection was
+    /// established (the relay hop is dropped at that point). The TUI
+    /// shows transient status when this fires.
+    DcutrUpgrade {
+        remote_peer: PeerId,
+        success: bool,
+    },
 }
