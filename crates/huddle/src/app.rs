@@ -56,11 +56,46 @@ pub enum Modal {
     InboundDial(InboundDialState),
     /// Phase B: owner-only picker for kick / grant-owner on a member.
     MemberAction(MemberActionState),
+    /// Phase G: SAS verification in progress — initial waiting state
+    /// before the partner's ephemeral pubkey arrives, then code-display
+    /// + match-confirm.
+    Sas(SasState),
     QuitConfirm,
     Help,
     Error(String),
     #[allow(dead_code)]
     Info(String),
+}
+
+/// Phase G: stages of an in-flight SAS verification. The state advances
+/// from `Waiting` (just started, no code yet) → `Comparing` (both sides
+/// have the code, user is deciding) on `AppEvent::SasCodeReady`.
+#[derive(Debug, Clone)]
+pub enum SasStage {
+    /// Initiator only — we sent SasInit, waiting for the partner's
+    /// SasResponse to arrive so we can derive the code.
+    Waiting,
+    /// Both ephemeral pubkeys exchanged; the SAS code is shown for
+    /// OOB comparison.
+    Comparing {
+        emoji_string: String,
+        emoji_labels: String,
+        decimal: String,
+        /// True once we've broadcast our SasConfirm. Used to hide the
+        /// "Match" button after pressing it (avoid double-fire).
+        our_matched: bool,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct SasState {
+    /// Held for context (which room the SAS started in) but currently
+    /// only the partner_fingerprint + tx_id drive behavior.
+    #[allow(dead_code)]
+    pub room_id: String,
+    pub partner_fingerprint: String,
+    pub tx_id: String,
+    pub stage: SasStage,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -630,6 +665,58 @@ impl TuiApp {
                     address,
                     opened_at: Instant::now(),
                 }));
+            }
+            AppEvent::SasCodeReady {
+                room_id,
+                partner_fingerprint,
+                tx_id,
+                emoji_string,
+                emoji_labels,
+                decimal,
+            } => {
+                // If our SAS modal already targets this tx_id, advance
+                // it to Comparing. Otherwise this is a fresh inbound
+                // SAS request — surface a new modal.
+                let advanced = if let Modal::Sas(s) = &mut self.modal {
+                    if s.tx_id == tx_id {
+                        s.stage = SasStage::Comparing {
+                            emoji_string: emoji_string.clone(),
+                            emoji_labels: emoji_labels.clone(),
+                            decimal: decimal.clone(),
+                            our_matched: false,
+                        };
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if !advanced {
+                    self.replace_modal_if_idle(Modal::Sas(SasState {
+                        room_id,
+                        partner_fingerprint,
+                        tx_id,
+                        stage: SasStage::Comparing {
+                            emoji_string,
+                            emoji_labels,
+                            decimal,
+                            our_matched: false,
+                        },
+                    }));
+                }
+            }
+            AppEvent::SasVerified {
+                partner_fingerprint,
+                ..
+            } => {
+                if matches!(self.modal, Modal::Sas(_)) {
+                    self.modal = Modal::None;
+                }
+                self.set_status(format!(
+                    "✓ verified {} via SAS",
+                    short_fp(&partner_fingerprint)
+                ));
             }
         }
     }
@@ -1877,6 +1964,55 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             if let Err(e) = app.handle.set_member_verified(&room_id, &fp, new_state) {
                 app.modal = Modal::Error(format!("verify failed: {e}"));
             }
+            Ok(false)
+        }
+        Action::VerifyStartSas => {
+            // From the Verify modal: kick off an SAS exchange with the
+            // focused member. Replaces the Verify modal with the SAS
+            // in-progress modal (Waiting → Comparing on response).
+            let (room_id, partner_fp) = match &app.modal {
+                Modal::Verify(v) => match v.members.get(v.selected) {
+                    Some((fp, _)) => (v.room_id.clone(), fp.clone()),
+                    None => return Ok(false),
+                },
+                _ => return Ok(false),
+            };
+            match app.handle.sas_start(&room_id, &partner_fp).await {
+                Ok(tx_id) => {
+                    app.modal = Modal::Sas(SasState {
+                        room_id,
+                        partner_fingerprint: partner_fp,
+                        tx_id,
+                        stage: SasStage::Waiting,
+                    });
+                }
+                Err(e) => app.modal = Modal::Error(format!("SAS start failed: {e}")),
+            }
+            Ok(false)
+        }
+        Action::SasMatch => {
+            if let Modal::Sas(s) = &mut app.modal {
+                let tx_id = s.tx_id.clone();
+                if let SasStage::Comparing {
+                    ref mut our_matched,
+                    ..
+                } = s.stage
+                {
+                    *our_matched = true;
+                }
+                if let Err(e) = app.handle.sas_match(&tx_id).await {
+                    app.modal = Modal::Error(format!("SAS match failed: {e}"));
+                    return Ok(false);
+                }
+                app.set_status("SAS match sent — waiting for partner to confirm");
+            }
+            Ok(false)
+        }
+        Action::SasCancel => {
+            if let Modal::Sas(s) = &app.modal {
+                app.handle.sas_cancel(&s.tx_id);
+            }
+            app.modal = Modal::None;
             Ok(false)
         }
         Action::OpenKickPicker => {

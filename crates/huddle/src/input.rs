@@ -99,6 +99,10 @@ pub enum Action {
     MemberActionNext,
     MemberActionPrev,
     MemberActionConfirm,
+    // Phase G: SAS verification
+    VerifyStartSas,
+    SasMatch,
+    SasCancel,
 }
 
 pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
@@ -182,6 +186,12 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
             KeyCode::Char('j') | KeyCode::Down => Action::VerifyNext,
             KeyCode::Char('k') | KeyCode::Up => Action::VerifyPrev,
             KeyCode::Enter | KeyCode::Char(' ') => Action::VerifyToggle,
+            KeyCode::Char('s') => Action::VerifyStartSas,
+            _ => Action::Nothing,
+        },
+        Modal::Sas(_) => match key.code {
+            KeyCode::Esc | KeyCode::Char('c') | KeyCode::Char('q') => Action::SasCancel,
+            KeyCode::Char('m') | KeyCode::Enter => Action::SasMatch,
             _ => Action::Nothing,
         },
         Modal::Search(_) => match key.code {

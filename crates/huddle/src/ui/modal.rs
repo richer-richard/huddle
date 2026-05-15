@@ -3,8 +3,8 @@ use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
 
 use crate::app::{
     AcceptRotationState, AttachPickerState, DialPeerState, InboundDialState, JoinRoomState,
-    MemberActionKind, MemberActionState, RotateRoomState, SearchState, StartField, StartRoomState,
-    VerifyState,
+    MemberActionKind, MemberActionState, RotateRoomState, SasStage, SasState, SearchState,
+    StartField, StartRoomState, VerifyState,
 };
 use crate::ui::centered_rect;
 
@@ -838,6 +838,98 @@ pub fn render_member_action(f: &mut Frame, s: &MemberActionState) {
                 .title(Span::styled(
                     title,
                     Style::default().fg(border_color).bold(),
+                )),
+        );
+    f.render_widget(para, area);
+}
+
+/// Phase G: SAS verification modal. Two stages:
+/// - Waiting: just sent SasInit, partner hasn't responded yet
+/// - Comparing: both sides have the code; user reads it aloud / shows
+///   the other side, both press Match if they agree
+pub fn render_sas(f: &mut Frame, s: &SasState) {
+    let area = centered_rect(72, 18, f.area());
+    f.render_widget(Clear, area);
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("  verifying  ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            s.partner_fingerprint.clone(),
+            Style::default().fg(Color::Yellow).bold(),
+        ),
+    ]));
+    lines.push(Line::from(""));
+
+    match &s.stage {
+        SasStage::Waiting => {
+            lines.push(Line::from(Span::styled(
+                "  waiting for partner to accept…",
+                Style::default().fg(Color::White),
+            )));
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "  Esc cancels.",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        SasStage::Comparing {
+            emoji_string,
+            emoji_labels,
+            decimal,
+            our_matched,
+        } => {
+            lines.push(Line::from(Span::styled(
+                "  read this code aloud / show to your partner:",
+                Style::default().fg(Color::White),
+            )));
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::raw("   "),
+                Span::styled(
+                    emoji_string.clone(),
+                    Style::default().fg(Color::Yellow).bold(),
+                ),
+            ]));
+            lines.push(Line::from(vec![
+                Span::raw("   "),
+                Span::styled(emoji_labels.clone(), Style::default().fg(Color::DarkGray)),
+            ]));
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled("  fallback decimal: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(decimal.clone(), Style::default().fg(Color::Cyan).bold()),
+            ]));
+            lines.push(Line::from(""));
+            if *our_matched {
+                lines.push(Line::from(Span::styled(
+                    "  ✓ you confirmed. waiting for partner…",
+                    Style::default().fg(Color::Green),
+                )));
+            } else {
+                lines.push(Line::from(vec![
+                    Span::styled(" [m]", Style::default().fg(Color::Green).bold()),
+                    Span::styled("atch  ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(" [c]", Style::default().fg(Color::Red).bold()),
+                    Span::styled("ancel  ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(" Esc", Style::default().fg(Color::Red)),
+                    Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
+                ]));
+            }
+        }
+    }
+
+    let para = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Magenta))
+                .padding(Padding::uniform(1))
+                .title(Span::styled(
+                    " SAS verify ",
+                    Style::default().fg(Color::Magenta).bold(),
                 )),
         );
     f.render_widget(para, area);

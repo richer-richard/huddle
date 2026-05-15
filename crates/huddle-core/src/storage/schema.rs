@@ -126,4 +126,12 @@ pub const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (room_id, banned_fingerprint)
     );",
     "CREATE INDEX IF NOT EXISTS idx_room_bans_room ON room_bans(room_id);",
+    // Phase G: global per-fingerprint verification — populated when an
+    // SAS verification succeeds. Distinct from `room_members.verified`
+    // (which is per-room) so Phase E's global inbound filter can
+    // answer "is this fingerprint SAS-verified at all?" in one query.
+    "CREATE TABLE IF NOT EXISTS verified_peers (
+        fingerprint TEXT PRIMARY KEY,
+        verified_at INTEGER NOT NULL
+    );",
 ];

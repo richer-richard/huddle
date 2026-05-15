@@ -188,6 +188,30 @@ pub enum RoomMessage {
         room_id: String,
         target_fingerprint: String,
     },
+    /// Phase G: SAS verification step 1. The initiator picks a random
+    /// `tx_id` and an ephemeral X25519 keypair, sends the pubkey.
+    /// MUST be sent inside `WireMessage::Signed` so the receiver can
+    /// bind this ephemeral key to the initiator's Ed25519 identity.
+    SasInit {
+        tx_id: String,
+        ephemeral_x25519_pubkey_b64: String,
+        target_fingerprint: String,
+    },
+    /// Phase G: SAS step 2 — responder's ephemeral X25519 pubkey.
+    /// Both sides now have what they need to compute the shared
+    /// secret and derive the SAS code locally. Signed.
+    SasResponse {
+        tx_id: String,
+        ephemeral_x25519_pubkey_b64: String,
+    },
+    /// Phase G: SAS step 3 — once both sides have OOB-compared the
+    /// derived code and pressed "Match", each broadcasts this. On
+    /// receiving the partner's `matched=true`, the local side flips
+    /// `verified=1` for the partner's fingerprint. Signed.
+    SasConfirm {
+        tx_id: String,
+        matched: bool,
+    },
 }
 
 #[cfg(test)]

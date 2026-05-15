@@ -99,6 +99,19 @@ const TYPING_TTL_SECS: i64 = 3;
 const DISCOVERED_TTL_SECS: i64 = 45;
 const ANNOUNCE_INTERVAL_SECS: u64 = 15;
 
+/// Phase G: in-flight SAS verification state, keyed by tx_id. Held in
+/// memory only; survives just long enough for the two-message
+/// handshake + the user pressing Match on both sides.
+struct SasFlow {
+    room_id: String,
+    partner_fingerprint: String,
+    our_secret: x25519_dalek::StaticSecret,
+    /// Set once we know both sides' pubkeys → the derived SAS code.
+    sas_code: Option<crate::crypto::sas::SasCode>,
+    our_confirmed: bool,
+    their_confirmed: bool,
+}
+
 #[derive(Clone)]
 pub struct AppHandle {
     identity: Arc<Identity>,
@@ -120,6 +133,9 @@ pub struct AppHandle {
     /// an HKDF subkey of the master key, or all-zero on the
     /// `--no-master-passphrase` / unencrypted-DB path.
     session_persist_key: [u8; 32],
+    /// Phase G: active SAS verifications. Keyed by tx_id (the random
+    /// 16-byte salt picked by the initiator + base64'd).
+    sas_flows: Arc<Mutex<HashMap<String, SasFlow>>>,
     app_event_tx: broadcast::Sender<AppEvent>,
 }
 
@@ -181,6 +197,7 @@ impl AppHandle {
             file_manager,
             db,
             session_persist_key,
+            sas_flows: Arc::new(Mutex::new(HashMap::new())),
             app_event_tx,
         };
 
@@ -1493,6 +1510,179 @@ impl AppHandle {
                 }
                 self.evict_banned_member(room_id, &target_fingerprint);
             }
+            RoomMessage::SasInit {
+                tx_id,
+                ephemeral_x25519_pubkey_b64,
+                target_fingerprint,
+            } => {
+                if target_fingerprint != our_fp {
+                    // Not addressed to us — ignore. Phase G is point-
+                    // to-point even though it travels over the room
+                    // topic, so members of the room who aren't the
+                    // target don't need to act.
+                    return;
+                }
+                let signer = match verified_signer {
+                    Some(fp) => fp,
+                    None => {
+                        warn!("SasInit arrived unsigned; dropping");
+                        return;
+                    }
+                };
+                let their_pub =
+                    match crate::crypto::sas::parse_pubkey(&ephemeral_x25519_pubkey_b64) {
+                        Ok(pk) => pk,
+                        Err(e) => {
+                            warn!(%e, "SasInit: bad x25519 pubkey");
+                            return;
+                        }
+                    };
+                let tx_id_bytes = match B64.decode(&tx_id) {
+                    Ok(b) if b.len() == crate::crypto::sas::TX_ID_LEN => {
+                        let mut arr = [0u8; crate::crypto::sas::TX_ID_LEN];
+                        arr.copy_from_slice(&b);
+                        arr
+                    }
+                    _ => {
+                        warn!(%tx_id, "SasInit: bad tx_id length");
+                        return;
+                    }
+                };
+                let (_, our_secret, our_pub) = crate::crypto::sas::new_session();
+                let sas_code =
+                    crate::crypto::sas::derive_sas_code(&our_secret, &their_pub, &tx_id_bytes);
+                self.sas_flows.lock().unwrap().insert(
+                    tx_id.clone(),
+                    SasFlow {
+                        room_id: room_id.to_string(),
+                        partner_fingerprint: signer.clone(),
+                        our_secret,
+                        sas_code: Some(sas_code.clone()),
+                        our_confirmed: false,
+                        their_confirmed: false,
+                    },
+                );
+                // Respond with our pubkey so the initiator can compute
+                // the same code.
+                let response = RoomMessage::SasResponse {
+                    tx_id: tx_id.clone(),
+                    ephemeral_x25519_pubkey_b64: B64.encode(our_pub.as_bytes()),
+                };
+                if let Ok(env) = crate::crypto::sign_message(&self.identity, &response) {
+                    if let Ok(bytes) = crate::network::protocol::encode_wire_signed(&env) {
+                        self.network
+                            .publish_room_message(room_id.to_string(), bytes)
+                            .await;
+                    }
+                }
+                let _ = self.app_event_tx.send(AppEvent::SasCodeReady {
+                    room_id: room_id.to_string(),
+                    partner_fingerprint: signer,
+                    tx_id,
+                    emoji_string: sas_code.emoji_string(),
+                    emoji_labels: sas_code.emoji_labels(),
+                    decimal: sas_code.decimal,
+                });
+            }
+            RoomMessage::SasResponse {
+                tx_id,
+                ephemeral_x25519_pubkey_b64,
+            } => {
+                let signer = match verified_signer {
+                    Some(fp) => fp,
+                    None => {
+                        warn!("SasResponse arrived unsigned; dropping");
+                        return;
+                    }
+                };
+                let their_pub =
+                    match crate::crypto::sas::parse_pubkey(&ephemeral_x25519_pubkey_b64) {
+                        Ok(pk) => pk,
+                        Err(e) => {
+                            warn!(%e, "SasResponse: bad x25519 pubkey");
+                            return;
+                        }
+                    };
+                let tx_id_bytes = match B64.decode(&tx_id) {
+                    Ok(b) if b.len() == crate::crypto::sas::TX_ID_LEN => {
+                        let mut arr = [0u8; crate::crypto::sas::TX_ID_LEN];
+                        arr.copy_from_slice(&b);
+                        arr
+                    }
+                    _ => return,
+                };
+                let emit = {
+                    let mut flows = self.sas_flows.lock().unwrap();
+                    let flow = match flows.get_mut(&tx_id) {
+                        Some(f) => f,
+                        None => {
+                            warn!(%tx_id, "SasResponse for unknown tx_id");
+                            return;
+                        }
+                    };
+                    if flow.partner_fingerprint != signer {
+                        warn!(
+                            expected = %flow.partner_fingerprint, got = %signer,
+                            "SasResponse signer doesn't match flow's partner; dropping"
+                        );
+                        return;
+                    }
+                    let code = crate::crypto::sas::derive_sas_code(
+                        &flow.our_secret,
+                        &their_pub,
+                        &tx_id_bytes,
+                    );
+                    flow.sas_code = Some(code.clone());
+                    code
+                };
+                let _ = self.app_event_tx.send(AppEvent::SasCodeReady {
+                    room_id: room_id.to_string(),
+                    partner_fingerprint: signer,
+                    tx_id,
+                    emoji_string: emit.emoji_string(),
+                    emoji_labels: emit.emoji_labels(),
+                    decimal: emit.decimal,
+                });
+            }
+            RoomMessage::SasConfirm { tx_id, matched } => {
+                let signer = match verified_signer {
+                    Some(fp) => fp,
+                    None => return,
+                };
+                let (room_id_done, partner_fp_done, both_done) = {
+                    let mut flows = self.sas_flows.lock().unwrap();
+                    let flow = match flows.get_mut(&tx_id) {
+                        Some(f) => f,
+                        None => return,
+                    };
+                    if flow.partner_fingerprint != signer {
+                        return;
+                    }
+                    if !matched {
+                        // Partner declined / mismatch — drop the flow.
+                        let _ = flow;
+                        flows.remove(&tx_id);
+                        return;
+                    }
+                    flow.their_confirmed = true;
+                    if flow.our_confirmed && flow.their_confirmed {
+                        (
+                            Some(flow.room_id.clone()),
+                            Some(flow.partner_fingerprint.clone()),
+                            true,
+                        )
+                    } else {
+                        (None, None, false)
+                    }
+                };
+                if both_done {
+                    if let (Some(rid), Some(pfp)) = (room_id_done, partner_fp_done) {
+                        if let Err(e) = self.finish_sas(&tx_id, &rid, &pfp).await {
+                            warn!(%e, "finish_sas failed");
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1874,6 +2064,94 @@ impl AppHandle {
         // session / persistence logic stays in one place.
         self.rotate_room(room_id, &new_passphrase).await?;
         Ok(new_passphrase)
+    }
+
+    /// Phase G: start an SAS verification with `target_fingerprint` in
+    /// `room_id`. Returns the tx_id so the caller can correlate
+    /// subsequent events. The full flow is asynchronous — the partner
+    /// must accept on their end, both compute the ECDH-derived SAS
+    /// code, OOB-compare it, and each press Match.
+    pub async fn sas_start(&self, room_id: &str, target_fingerprint: &str) -> Result<String> {
+        let (tx_id_bytes, our_secret, our_pub) = crate::crypto::sas::new_session();
+        let tx_id = B64.encode(tx_id_bytes);
+        let msg = RoomMessage::SasInit {
+            tx_id: tx_id.clone(),
+            ephemeral_x25519_pubkey_b64: B64.encode(our_pub.as_bytes()),
+            target_fingerprint: target_fingerprint.to_string(),
+        };
+        let env = crate::crypto::sign_message(&self.identity, &msg)?;
+        let bytes = crate::network::protocol::encode_wire_signed(&env)?;
+        self.sas_flows.lock().unwrap().insert(
+            tx_id.clone(),
+            SasFlow {
+                room_id: room_id.to_string(),
+                partner_fingerprint: target_fingerprint.to_string(),
+                our_secret,
+                sas_code: None,
+                our_confirmed: false,
+                their_confirmed: false,
+            },
+        );
+        self.network
+            .publish_room_message(room_id.to_string(), bytes)
+            .await;
+        Ok(tx_id)
+    }
+
+    /// Phase G: user pressed Match on the SAS code modal — broadcast our
+    /// signed `SasConfirm{matched: true}`. If the partner has already
+    /// matched, this completes verification on both sides.
+    pub async fn sas_match(&self, tx_id: &str) -> Result<()> {
+        let (room_id, partner_fp, both_done) = {
+            let mut flows = self.sas_flows.lock().unwrap();
+            let flow = flows
+                .get_mut(tx_id)
+                .ok_or_else(|| HuddleError::Other("unknown SAS tx_id".into()))?;
+            flow.our_confirmed = true;
+            (
+                flow.room_id.clone(),
+                flow.partner_fingerprint.clone(),
+                flow.our_confirmed && flow.their_confirmed,
+            )
+        };
+        let msg = RoomMessage::SasConfirm {
+            tx_id: tx_id.to_string(),
+            matched: true,
+        };
+        let env = crate::crypto::sign_message(&self.identity, &msg)?;
+        let bytes = crate::network::protocol::encode_wire_signed(&env)?;
+        self.network
+            .publish_room_message(room_id.clone(), bytes)
+            .await;
+        if both_done {
+            self.finish_sas(tx_id, &room_id, &partner_fp).await?;
+        }
+        Ok(())
+    }
+
+    /// Phase G: cancel an in-flight SAS — drop our local state. Doesn't
+    /// broadcast a "matched=false" notice in v1 (partner's flow stays
+    /// dangling; they can cancel their side too). Quiet teardown.
+    pub fn sas_cancel(&self, tx_id: &str) {
+        self.sas_flows.lock().unwrap().remove(tx_id);
+    }
+
+    /// Phase G internal: both sides have confirmed — flip the partner's
+    /// fingerprint to verified (per-room AND global) and clean up.
+    async fn finish_sas(
+        &self,
+        tx_id: &str,
+        room_id: &str,
+        partner_fingerprint: &str,
+    ) -> Result<()> {
+        repo::set_member_verified(&self.db, room_id, partner_fingerprint, true)?;
+        repo::add_verified_peer(&self.db, partner_fingerprint, now_unix())?;
+        self.sas_flows.lock().unwrap().remove(tx_id);
+        let _ = self.app_event_tx.send(AppEvent::SasVerified {
+            room_id: room_id.to_string(),
+            partner_fingerprint: partner_fingerprint.to_string(),
+        });
+        Ok(())
     }
 
     /// Phase B internal: drop a banned member's in-memory presence in a

@@ -663,6 +663,34 @@ pub fn block_peer(db: &Db, fingerprint: &str, now: i64) -> Result<()> {
     Ok(())
 }
 
+/// Phase G: mark a fingerprint as globally SAS-verified. Idempotent;
+/// re-verifying just refreshes `verified_at`. Used by both sides of
+/// an SAS exchange on receiving the partner's matching `SasConfirm`.
+pub fn add_verified_peer(db: &Db, fingerprint: &str, verified_at: i64) -> Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "INSERT INTO verified_peers (fingerprint, verified_at) VALUES (?1, ?2)
+         ON CONFLICT(fingerprint) DO UPDATE SET verified_at = excluded.verified_at",
+        params![fingerprint, verified_at],
+    )?;
+    Ok(())
+}
+
+/// Phase G + E: is this fingerprint globally SAS-verified? Used by
+/// Phase E's global inbound filter and by the per-room "verified_only"
+/// enforcement.
+pub fn is_globally_verified(db: &Db, fingerprint: &str) -> Result<bool> {
+    let conn = db.lock().unwrap();
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM verified_peers WHERE fingerprint = ?1",
+            params![fingerprint],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    Ok(count > 0)
+}
+
 pub fn is_peer_blocked(db: &Db, fingerprint: &str) -> Result<bool> {
     let conn = db.lock().unwrap();
     let count: i64 = conn

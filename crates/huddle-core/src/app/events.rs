@@ -114,4 +114,21 @@ pub enum AppEvent {
         /// dot tracks the peer.
         address: String,
     },
+    /// Phase G: SAS code is ready on both sides — both ephemeral
+    /// X25519 pubkeys exchanged + ECDH derived. The TUI shows the
+    /// `code` (emoji + decimal) and the Match/Cancel buttons.
+    SasCodeReady {
+        room_id: String,
+        partner_fingerprint: String,
+        tx_id: String,
+        emoji_string: String,
+        emoji_labels: String,
+        decimal: String,
+    },
+    /// Phase G: SAS completed — both sides confirmed the match. The
+    /// partner's fingerprint is now verified (per-room + global).
+    SasVerified {
+        room_id: String,
+        partner_fingerprint: String,
+    },
 }

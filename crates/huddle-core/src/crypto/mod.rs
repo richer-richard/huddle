@@ -1,5 +1,6 @@
 pub mod megolm;
 pub mod passphrase;
+pub mod sas;
 
 pub use megolm::RoomCrypto;
 
