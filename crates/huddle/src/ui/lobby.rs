@@ -4,15 +4,25 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Padding, Parag
 use huddle_core::network::NetworkMode;
 
 use crate::app::{LobbyFocus, TuiApp};
+use crate::keybindings;
 use crate::ui::short_fp;
 
 pub fn render_lobby(f: &mut Frame, area: Rect, app: &TuiApp) {
     // Known-peers panel is always visible — listing + dialing coexist
     // in both LAN (mDNS) and Direct modes.
     let peer_h: u16 = ((app.known_peers.len() as u16).clamp(1, 6)) + 2;
-    let status_h: u16 = if app.current_status().is_some() { 1 } else { 0 };
+    let status_h: u16 = if app.current_status().is_some() || app.pending_count() > 0 {
+        1
+    } else {
+        0
+    };
+    let banner_h: u16 = if app.update_banner.is_some() { 1 } else { 0 };
 
-    let mut constraints = vec![Constraint::Length(7), Constraint::Length(peer_h)];
+    let mut constraints = vec![Constraint::Length(7)];
+    if banner_h > 0 {
+        constraints.push(Constraint::Length(banner_h));
+    }
+    constraints.push(Constraint::Length(peer_h));
     constraints.push(Constraint::Min(5));
     if status_h > 0 {
         constraints.push(Constraint::Length(status_h));
@@ -27,6 +37,10 @@ pub fn render_lobby(f: &mut Frame, area: Rect, app: &TuiApp) {
     let mut idx = 0;
     render_header(f, chunks[idx], app);
     idx += 1;
+    if banner_h > 0 {
+        render_update_banner(f, chunks[idx], app);
+        idx += 1;
+    }
     render_known_peers(f, chunks[idx], app);
     idx += 1;
     render_rooms_list(f, chunks[idx], app);
@@ -60,15 +74,52 @@ fn render_header(f: &mut Frame, area: Rect, app: &TuiApp) {
         ),
     };
 
+    // huddle 0.6: cyan "huddle X.Y.Z" anchor at the top-left + clock
+    // at the top-right. The clock + version disambiguate which build
+    // is running when several huddle instances are tiled across panes.
+    let area_inner_w = area.width.saturating_sub(2) as usize;
+    let version_str = format!("huddle {}", env!("CARGO_PKG_VERSION"));
+    let clock_str = current_hhmm();
+    let title_inner = format!("  {}  ·  {}", version_str, "decentralized rooms");
+    let title_w = title_inner.chars().count();
+    let pad = area_inner_w
+        .saturating_sub(title_w + clock_str.chars().count())
+        .max(1);
+
+    let connected: usize = app
+        .known_peers
+        .iter()
+        .filter(|p| p.connected_peer_id.is_some())
+        .count();
+    let total = app.known_peers.len();
+    let connection_count = if total == 0 {
+        Span::styled("·  no peers yet", Style::default().fg(Color::DarkGray))
+    } else if connected == total {
+        Span::styled(
+            format!("·  {} peer{} connected", connected, if connected == 1 { "" } else { "s" }),
+            Style::default().fg(Color::Green),
+        )
+    } else {
+        Span::styled(
+            format!("·  {}/{} peers connected", connected, total),
+            Style::default().fg(Color::Yellow),
+        )
+    };
+
     let lines = vec![
         Line::from(""),
         Line::from(vec![
             Span::styled(
-                "  huddle  ",
+                format!("  {}  ", version_str),
                 Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             ),
             Span::styled("·  ", Style::default().fg(Color::DarkGray)),
             mode_label,
+            Span::raw(" ".repeat(pad)),
+            Span::styled(
+                clock_str,
+                Style::default().fg(Color::DarkGray),
+            ),
         ]),
         Line::from(Span::styled(
             "  decentralized rooms",
@@ -93,15 +144,38 @@ fn render_header(f: &mut Frame, area: Rect, app: &TuiApp) {
         Line::from(vec![
             Span::styled("       ", Style::default()),
             Span::styled(
-                format!("listening on {}", listen),
+                format!("listening on {}  ", listen),
                 Style::default().fg(Color::DarkGray),
             ),
-            Span::styled("  ", Style::default()),
             nat_badge(app),
+            Span::styled("  ", Style::default()),
+            connection_count,
         ]),
     ];
     let para = Paragraph::new(lines);
     f.render_widget(para, area);
+}
+
+/// huddle 0.6: HH:MM in the local timezone (best-effort — we don't
+/// pull in chrono just for this. UTC offset is approximated from
+/// SystemTime; for users west of UTC the clock will be a few hours
+/// behind their wall clock but the relative tick is still useful).
+fn current_hhmm() -> String {
+    // Pull wall-clock seconds since epoch and apply the local
+    // timezone offset from `localtime_r` via libc — but to avoid an
+    // FFI dep, we fall back on showing UTC if we can't get local.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    // crude approximation of the system local offset: derive from
+    // the difference between `SystemTime::now()` formatted in local
+    // and UTC. Without chrono we can't easily do this, so just show
+    // UTC. The user can read this as "UTC HH:MM" — better than no clock.
+    let secs_today = (now % 86_400) as u32;
+    let hh = (secs_today / 3600) % 24;
+    let mm = (secs_today / 60) % 60;
+    format!("{:02}:{:02} UTC  ", hh, mm)
 }
 
 /// Phase D follow-up: emoji-badge of the AutoNAT-aggregated reachability
@@ -130,10 +204,16 @@ fn render_known_peers(f: &mut Frame, area: Rect, app: &TuiApp) {
     let border = if focused { Color::Cyan } else { Color::DarkGray };
 
     if app.known_peers.is_empty() {
-        let para = Paragraph::new(Line::from(Span::styled(
-            "  no known peers yet — press [d] to dial one.",
-            Style::default().fg(Color::DarkGray),
-        )))
+        let para = Paragraph::new(vec![
+            Line::from(Span::styled(
+                "  no known peers yet — press [d] to dial one,",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(Span::styled(
+                "  [a] to add by HD ID, or [v] to paste an invite.",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ])
         .block(
             Block::default()
                 .borders(Borders::ALL)
@@ -231,6 +311,11 @@ fn render_rooms_list(f: &mut Frame, area: Rect, app: &TuiApp) {
                     NetworkMode::Mdns => "    on this network to appear.",
                     NetworkMode::Direct => "    you've dialed to appear.",
                 },
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "    or paste an invite link with [v].",
                 Style::default().fg(Color::DarkGray),
             )),
         ])
@@ -367,46 +452,71 @@ fn pad_right(s: &str, w: usize) -> String {
 
 fn render_status(f: &mut Frame, area: Rect, app: &TuiApp) {
     let msg = app.current_status().unwrap_or("").to_string();
-    let para = Paragraph::new(Line::from(Span::styled(
+    let mut spans: Vec<Span> = Vec::new();
+    spans.push(Span::styled(
         format!("  {}", msg),
         Style::default().fg(Color::Cyan),
-    )));
+    ));
+    let pending = app.pending_count();
+    if pending > 0 {
+        spans.push(Span::styled(
+            format!("   [{} pending · Ctrl+H to view]", pending),
+            Style::default().fg(Color::Yellow).bold(),
+        ));
+    }
+    let para = Paragraph::new(Line::from(spans));
     f.render_widget(para, area);
 }
 
-fn render_hints(f: &mut Frame, area: Rect, app: &TuiApp) {
-    let mut spans = vec![
-        Span::styled("  [s]", Style::default().fg(Color::Yellow)),
-        Span::styled(" start    ", Style::default().fg(Color::DarkGray)),
-        Span::styled("[a]", Style::default().fg(Color::Yellow)),
-        Span::styled(" add    ", Style::default().fg(Color::DarkGray)),
-        Span::styled("[d]", Style::default().fg(Color::Yellow)),
-        Span::styled(" dial    ", Style::default().fg(Color::DarkGray)),
-        Span::styled("[Tab]", Style::default().fg(Color::Yellow)),
-        Span::styled(" switch    ", Style::default().fg(Color::DarkGray)),
-        Span::styled("[Enter]", Style::default().fg(Color::Yellow)),
-    ];
-    spans.push(Span::styled(
-        match app.lobby_focus {
-            LobbyFocus::Rooms => " join    ",
-            LobbyFocus::KnownPeers => " reconnect    ",
-        },
-        Style::default().fg(Color::DarkGray),
-    ));
-    spans.extend([
-        Span::styled("[r]", Style::default().fg(Color::Yellow)),
+/// huddle 0.6: one-line banner under the lobby header announcing a
+/// new release. Dismissible via the command palette
+/// ("dismiss update banner"). The banner appears only when the user
+/// opted in to crates.io update checks AND a newer version was
+/// detected on the once-per-24h poll.
+fn render_update_banner(f: &mut Frame, area: Rect, app: &TuiApp) {
+    let v = match &app.update_banner {
+        Some(v) => v.clone(),
+        None => return,
+    };
+    let line = Line::from(vec![
+        Span::styled("  update available: ", Style::default().fg(Color::Yellow).bold()),
         Span::styled(
-            match app.lobby_focus {
-                LobbyFocus::Rooms => " refresh    ",
-                LobbyFocus::KnownPeers => " retry    ",
-            },
+            v,
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "  ·  run  ",
             Style::default().fg(Color::DarkGray),
         ),
-        Span::styled("[?]", Style::default().fg(Color::Yellow)),
-        Span::styled(" help    ", Style::default().fg(Color::DarkGray)),
-        Span::styled("[q]", Style::default().fg(Color::Yellow)),
-        Span::styled(" quit", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            "cargo install huddle --force",
+            Style::default().fg(Color::Cyan),
+        ),
+        Span::styled(
+            "  ·  ':' → dismiss update banner",
+            Style::default().fg(Color::DarkGray),
+        ),
     ]);
+    f.render_widget(Paragraph::new(line), area);
+}
+
+fn render_hints(f: &mut Frame, area: Rect, app: &TuiApp) {
+    // huddle 0.6: adaptive hint bar — pulls 5-6 most-likely actions
+    // from `keybindings::adaptive_hints` based on current focus/state.
+    let mut spans: Vec<Span> = vec![Span::raw("  ")];
+    for (i, (key, label)) in keybindings::adaptive_hints(app).into_iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled("   ", Style::default()));
+        }
+        spans.push(Span::styled(
+            format!("[{}]", key),
+            Style::default().fg(Color::Yellow),
+        ));
+        spans.push(Span::styled(
+            format!(" {}", label),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
 
     let para = Paragraph::new(Line::from(spans)).block(
         Block::default()

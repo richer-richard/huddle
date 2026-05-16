@@ -1,6 +1,6 @@
 [package]
 name = "huddle"
-version = "0.5.2"
+version = "0.6.0"
 edition = "2021"
 description = "Decentralized, terminal-native chat rooms — LAN mDNS or direct dial, Megolm-encrypted."
 license = "MIT OR Apache-2.0"
@@ -15,7 +15,7 @@ name = "huddle"
 path = "src/main.rs"
 
 [dependencies]
-huddle-core = { path = "../huddle-core", version = "0.5.2" }
+huddle-core = { path = "../huddle-core", version = "0.6.0" }
 libp2p = { version = "0.56", features = ["ed25519"] }
 ratatui = "0.30"
 crossterm = "0.29"
@@ -28,3 +28,8 @@ tracing-appender = "0.2"
 dirs = "6"
 qrcode = "0.14"
 base64 = "0.22"
+# huddle 0.6: opt-in update detection. ureq is lean (blocking,
+# rustls-based) — we call it from a tokio::spawn_blocking task once
+# per 24 h and parse the JSON response by substring (no serde_json
+# dep needed). The user opts in at first launch; default is off.
+ureq = { version = "2", default-features = false, features = ["tls"] }

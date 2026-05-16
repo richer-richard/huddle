@@ -148,11 +148,74 @@ pub enum Action {
     OnboardingNext,
     OnboardingPrev,
     OnboardingDismiss,
+    // huddle 0.6: notification history overlay (Ctrl+H)
+    OpenStatusHistory,
+    StatusHistoryScrollUp,
+    StatusHistoryScrollDown,
+    StatusHistoryPageUp,
+    StatusHistoryPageDown,
+    ClearStatusHistory,
+    // huddle 0.6: command palette (Ctrl+P) — fuzzy action search
+    OpenCommandPalette,
+    CommandPaletteTypeChar(char),
+    CommandPaletteBackspace,
+    CommandPaletteNext,
+    CommandPalettePrev,
+    CommandPaletteConfirm,
+    // huddle 0.6: re-open onboarding / "what's new" card (Shift+?)
+    OpenWhatsNew,
+    // huddle 0.6: mark every room's unread counter back to 0 (R in lobby)
+    MarkAllRead,
+    // huddle 0.6: help screen scroll
+    HelpScrollUp,
+    HelpScrollDown,
+    HelpPageUp,
+    HelpPageDown,
+    // huddle 0.6: update-check opt-in
+    UpdateCheckOptInYes,
+    UpdateCheckOptInNo,
+    ToggleUpdateCheck,
+    DismissUpdateBanner,
 }
 
 pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         return Action::OpenQuitConfirm;
+    }
+
+    // huddle 0.6: global hotkeys that fire regardless of current
+    // screen, as long as no modal is open (modal-internal Ctrl chords
+    // would conflict otherwise). Ctrl+P = command palette,
+    // Ctrl+H = status history, Shift+? = re-open onboarding.
+    if matches!(app.modal, Modal::None) {
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            // Ctrl+H — note: crossterm sometimes delivers this as
+            // KeyCode::Backspace on certain terminals because of the
+            // ASCII collision. We accept both.
+            if matches!(key.code, KeyCode::Char('h') | KeyCode::Char('H')) {
+                let input_active = app
+                    .active_room()
+                    .map(|r| r.input_active)
+                    .unwrap_or(false);
+                // Suppress when the user is typing — Ctrl+H = Backspace
+                // on POSIX terminals and we don't want to eat it.
+                if !input_active {
+                    return Action::OpenStatusHistory;
+                }
+            }
+            if matches!(key.code, KeyCode::Char('p') | KeyCode::Char('P')) {
+                // Ctrl+P is bound to TabPrev inside a room; only override
+                // when room input is NOT active so the palette is reachable.
+                let input_active = app
+                    .active_room()
+                    .map(|r| r.input_active)
+                    .unwrap_or(false);
+                let in_room = matches!(app.screen, Screen::InRoom);
+                if !(in_room && input_active) {
+                    return Action::OpenCommandPalette;
+                }
+            }
+        }
     }
 
     match &app.modal {
@@ -164,6 +227,10 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
             _ => Action::CloseModal,
         },
         Modal::Help => match key.code {
+            KeyCode::Char('j') | KeyCode::Down => Action::HelpScrollDown,
+            KeyCode::Char('k') | KeyCode::Up => Action::HelpScrollUp,
+            KeyCode::PageDown => Action::HelpPageDown,
+            KeyCode::PageUp => Action::HelpPageUp,
             _ => Action::CloseModal,
         },
         Modal::StartRoom(_) => match key.code {
@@ -246,6 +313,12 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
             }
             KeyCode::Char('c') => Action::ClearBlockedPeers,
             KeyCode::Char('u') => Action::OpenEditUsername,
+            // huddle 0.6: capital U = toggle update check; lowercase u
+            // stays "edit username". The case split keeps both reachable
+            // and matches the convention from R (mark all read) in lobby.
+            KeyCode::Char('U') => Action::ToggleUpdateCheck,
+            // huddle 0.6: W = replay onboarding from inside Settings.
+            KeyCode::Char('w') | KeyCode::Char('W') => Action::OpenWhatsNew,
             KeyCode::Char('!') => Action::OpenGoDarkModal,
             _ => Action::Nothing,
         },
@@ -299,15 +372,43 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
             _ => Action::Nothing,
         },
         Modal::Onboarding { .. } => match key.code {
-            // Esc dismisses early; the user can re-read the README. We
-            // still mark seen so it doesn't re-pop next launch.
-            KeyCode::Esc => Action::OnboardingDismiss,
+            // Esc dismisses early; the user can re-read it via Shift+?
+            // or from Settings. We still bump last_seen so it doesn't
+            // re-pop next launch on this version.
+            KeyCode::Esc | KeyCode::Char('q') => Action::OnboardingDismiss,
             KeyCode::Char('h') | KeyCode::Left | KeyCode::Backspace => Action::OnboardingPrev,
             KeyCode::Enter
             | KeyCode::Char(' ')
             | KeyCode::Char('l')
             | KeyCode::Right
             | KeyCode::Tab => Action::OnboardingNext,
+            _ => Action::Nothing,
+        },
+        Modal::StatusHistory { .. } => match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => Action::CloseModal,
+            KeyCode::Char('j') | KeyCode::Down => Action::StatusHistoryScrollDown,
+            KeyCode::Char('k') | KeyCode::Up => Action::StatusHistoryScrollUp,
+            KeyCode::PageDown => Action::StatusHistoryPageDown,
+            KeyCode::PageUp => Action::StatusHistoryPageUp,
+            KeyCode::Char('c') | KeyCode::Char('C') => Action::ClearStatusHistory,
+            KeyCode::Char('G') | KeyCode::End => Action::StatusHistoryPageDown,
+            KeyCode::Char('g') | KeyCode::Home => Action::StatusHistoryPageUp,
+            _ => Action::Nothing,
+        },
+        Modal::CommandPalette(_) => match key.code {
+            KeyCode::Esc => Action::CloseModal,
+            KeyCode::Enter => Action::CommandPaletteConfirm,
+            KeyCode::Down => Action::CommandPaletteNext,
+            KeyCode::Up => Action::CommandPalettePrev,
+            KeyCode::Backspace => Action::CommandPaletteBackspace,
+            KeyCode::Char(c) => Action::CommandPaletteTypeChar(c),
+            _ => Action::Nothing,
+        },
+        Modal::UpdateCheckOptIn => match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                Action::UpdateCheckOptInYes
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Action::UpdateCheckOptInNo,
             _ => Action::Nothing,
         },
         Modal::Search(_) => match key.code {
@@ -356,6 +457,9 @@ fn map_lobby(key: KeyEvent, app: &TuiApp) -> Action {
         KeyCode::Char('q') => Action::OpenQuitConfirm,
         KeyCode::Char('s') => Action::OpenStartRoom,
         KeyCode::Char('?') => Action::OpenHelp,
+        // huddle 0.6: vim-style command-line opens the palette. Works
+        // even on terminals where Ctrl+P is captured by the shell.
+        KeyCode::Char(':') => Action::OpenCommandPalette,
         KeyCode::Char('a') => Action::OpenAddFriend,
         KeyCode::Char('d') => Action::OpenDialPeer,
         KeyCode::Char('i') => Action::OpenQrIdentity,
@@ -363,6 +467,10 @@ fn map_lobby(key: KeyEvent, app: &TuiApp) -> Action {
         KeyCode::Char('c') => Action::OpenJoinWithCode,
         KeyCode::Char('I') => Action::GenerateInvite,
         KeyCode::Char('v') => Action::OpenPasteInvite,
+        // huddle 0.6: capital R = mark every room read. Lowercase r
+        // stays the refresh / reconnect key (context-dependent on
+        // lobby focus) — the case split keeps both reachable.
+        KeyCode::Char('R') => Action::MarkAllRead,
         KeyCode::Tab => Action::LobbyFocusToggle,
         KeyCode::Char('j') | KeyCode::Down => Action::LobbyNavigateDown,
         KeyCode::Char('k') | KeyCode::Up => Action::LobbyNavigateUp,
@@ -462,6 +570,9 @@ fn map_in_room(key: KeyEvent, app: &TuiApp) -> Action {
             KeyCode::Char('q') => Action::OpenQuitConfirm,
             KeyCode::Char('/') => Action::FocusInput,
             KeyCode::Char('?') => Action::OpenHelp,
+            // huddle 0.6: vim-style command palette also reachable
+            // from in-room chat mode.
+            KeyCode::Char(':') => Action::OpenCommandPalette,
             KeyCode::Char('f') => Action::ToggleCardFocus,
             KeyCode::Char('j') | KeyCode::Down => Action::ScrollDown,
             KeyCode::Char('k') | KeyCode::Up => Action::ScrollUp,

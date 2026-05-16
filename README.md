@@ -85,6 +85,14 @@ cargo build --release
 
 ## Key bindings
 
+### Global (any mode, no modal open)
+| Key                | Action                                  |
+|--------------------|-----------------------------------------|
+| `?`                | Help — generated live from `input.rs`, scroll with `j/k` |
+| `:` or `Ctrl+P`    | Command palette — fuzzy search every action |
+| `Ctrl+H`           | Notification history (last 100 status events) |
+| `Ctrl+C`           | Quit (confirms first)                   |
+
 ### Lobby
 | Key                | Action                                  |
 |--------------------|-----------------------------------------|
@@ -94,13 +102,13 @@ cargo build --release
 | `i`                | Show your identity as a QR code         |
 | `I` (Shift+I)      | Generate an invite link (peer-only)     |
 | `v`                | Paste an invite link (`huddle://invite#…`) |
-| `,`                | Settings (username, verified-only, clear blocks, go dark) |
+| `,`                | Settings (username, verified-only, clear blocks, go dark, update check, what's new) |
+| `R` (Shift+r)      | Mark every room read                    |
 | `Enter`            | Join / reconnect the selected entry     |
 | `Tab`              | Toggle focus rooms ↔ known peers        |
 | `j/k` or arrows    | Navigate                                |
 | `r`                | Refresh / reconnect                     |
 | `x`                | Forget the selected known peer          |
-| `?`                | Help                                    |
 | `q`                | Quit                                    |
 
 ### In a room
@@ -111,7 +119,7 @@ cargo build --release
 | `Alt+Enter` / `^J` | Insert a newline in the input        |
 | `Esc`     | Blur input (or, if blurred, go to lobby)     |
 | `^Tab`/`^N` | Next tab                                   |
-| `^P`      | Previous tab                                 |
+| `^P`      | Previous tab (or command palette when input is blurred) |
 | `1`..`9`  | Jump to tab N                                |
 | `^L`      | Leave the current room                       |
 | `^B`      | Back to lobby (without leaving)              |
@@ -132,6 +140,16 @@ cargo build --release
 | `?`       | Help                                         |
 | `q`       | Quit (in-room, when input not focused)       |
 | `Ctrl-C`  | Quit (always — confirms first)               |
+
+### Settings modal
+| Key | Action                                                   |
+|-----|----------------------------------------------------------|
+| `u` | Edit your username                                       |
+| `U` (Shift+u) | Toggle the crates.io update check (opt-in)     |
+| `v` / Space / Enter | Toggle "reject inbound from unverified"  |
+| `c` | Clear blocked peers                                      |
+| `w` | Replay onboarding (what's new)                           |
+| `!` | Delete account (go dark) — two-factor confirm            |
 
 ## Username & ID display (huddle 0.5)
 
@@ -383,6 +401,50 @@ Phase 2 cap is 1 MiB per file.
   peer you can re-bootstrap from.
 - The SAS emoji table follows Matrix MSC 2241 for future cross-client
   compatibility but is not yet interop-tested against any other client.
+
+## What's new in 0.6 (UX overhaul)
+
+`0.6.0` is a focused UX release. The protocol surface didn't change;
+the TUI did.
+
+- **Command palette** (`:` or `Ctrl+P`) — fuzzy-search every action.
+  Drives discoverability without bloating the visible chrome. You no
+  longer need to remember `a/d/i/,/c/I/v/!/u/o/^J/^I/^K/^G/^V` to find
+  things.
+- **Notification history** (`Ctrl+H`) — the last 100 status-bar
+  messages, scrollable, with timestamps. Replaces the "goldfish"
+  status bar where two events in quick succession overwrote each
+  other.
+- **Help is now generated from `input.rs`** — every keybinding is
+  documented, scroll with `j/k`. Help is sectioned by context
+  (Lobby / In a room / Card focus / etc.) and can never drift from
+  the actual key map again.
+- **Onboarding versioning** — the welcome card now re-fires only the
+  "what's new in X.Y" page when you upgrade between versions. You can
+  also replay it any time from `Settings → w`.
+- **Pending-modal indicator** — when an async event (inbound dial,
+  rotation, error) arrives behind another modal, the status bar shows
+  `[N pending · Ctrl+H to view]` so it never silently disappears.
+  Queue is FIFO and capped at 16.
+- **Adaptive hint bar** — the bottom-of-screen hints rotate based on
+  what's most likely to be useful next (empty lobby surfaces "add
+  friend"; unread tab surfaces "join"; etc.).
+- **Lobby header polish** — `huddle 0.6.0` version anchor, clock,
+  live peer counter alongside the NAT reachability badge.
+- **Scroll indicator + day separators in chat** — the message pane
+  shows `N/M · live` (or `N/M · ↑ K above`) at the bottom border, and
+  date dividers (`─── 2026-05-15 ───`) appear when conversations span
+  days.
+- **Unread counts in tabs** — `[2] room-name (3)` shows the actual
+  count instead of a vague `*`. `R` (shift-r) in the lobby zeros every
+  tab at once.
+- **Opt-in update detection** — a tiny ureq-backed background task
+  pings `https://crates.io/api/v1/crates/huddle` once per 24 h. If a
+  newer version exists, a banner appears under the lobby header. OFF
+  by default; toggle via `Settings → U` or the command palette.
+- **`huddle doctor` CLI** — `huddle doctor` prints version, data
+  paths, file sizes, and config without touching the network or
+  asking for the master passphrase. Paste it into bug reports.
 
 ## Testing
 

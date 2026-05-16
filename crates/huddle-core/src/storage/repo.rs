@@ -758,6 +758,31 @@ pub fn mark_onboarding_seen(db: &Db) -> Result<()> {
     Ok(())
 }
 
+/// huddle 0.6: the version string of huddle that this user last
+/// finished onboarding for. Stored under the app_settings KV so
+/// version bumps re-fire the "what's new" card without churning
+/// the identity schema again. `None` means the user hasn't seen
+/// any onboarding yet OR pre-existed the version-tracking change.
+pub fn get_last_seen_onboarding_version(db: &Db) -> Result<Option<String>> {
+    get_setting(db, "last_seen_onboarding_version")
+}
+
+pub fn set_last_seen_onboarding_version(db: &Db, version: &str) -> Result<()> {
+    set_setting(db, "last_seen_onboarding_version", version)
+}
+
+/// huddle 0.6: opt-in flag for the crates.io update check. None means
+/// the user hasn't been asked yet; `Some(true)` enables the background
+/// poll; `Some(false)` disables it.
+pub fn get_update_check_enabled(db: &Db) -> Result<Option<bool>> {
+    Ok(get_setting(db, "update_check_enabled")?
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true")))
+}
+
+pub fn set_update_check_enabled(db: &Db, enabled: bool) -> Result<()> {
+    set_setting(db, "update_check_enabled", if enabled { "1" } else { "0" })
+}
+
 pub fn is_peer_blocked(db: &Db, fingerprint: &str) -> Result<bool> {
     let conn = db.lock().unwrap();
     let count: i64 = conn

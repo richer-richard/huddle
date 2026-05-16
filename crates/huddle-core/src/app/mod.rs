@@ -2768,6 +2768,54 @@ impl AppHandle {
         repo::mark_onboarding_seen(&self.db)
     }
 
+    /// huddle 0.6: version string of huddle the user last finished
+    /// onboarding for. Compared against `env!("CARGO_PKG_VERSION")` at
+    /// startup so a version bump re-fires the "what's new" card.
+    pub fn last_seen_onboarding_version(&self) -> Option<String> {
+        repo::get_last_seen_onboarding_version(&self.db).unwrap_or(None)
+    }
+
+    pub fn set_last_seen_onboarding_version(&self, version: &str) -> Result<()> {
+        repo::set_last_seen_onboarding_version(&self.db, version)
+    }
+
+    /// huddle 0.6: opt-in flag for the crates.io update check.
+    /// `None` ⇒ the user hasn't been asked yet.
+    pub fn update_check_enabled(&self) -> Option<bool> {
+        repo::get_update_check_enabled(&self.db).unwrap_or(None)
+    }
+
+    pub fn set_update_check_enabled(&self, enabled: bool) -> Result<()> {
+        repo::set_update_check_enabled(&self.db, enabled)
+    }
+
+    /// huddle 0.6: cache anchor for the once-per-24h crates.io poll.
+    /// Returns 0 if nothing has been recorded yet.
+    pub fn last_update_check_at(&self) -> i64 {
+        repo::get_setting(&self.db, "last_update_check_at")
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0)
+    }
+
+    pub fn set_last_update_check_at(&self, ts: i64) -> Result<()> {
+        repo::set_setting(&self.db, "last_update_check_at", &ts.to_string())
+    }
+
+    /// huddle 0.6: the most recent `max_stable_version` we saw on
+    /// crates.io. Persisted so a re-launch within the 24h window
+    /// can render the banner without re-fetching.
+    pub fn last_known_remote_version(&self) -> Option<String> {
+        repo::get_setting(&self.db, "last_known_remote_version")
+            .ok()
+            .flatten()
+    }
+
+    pub fn set_last_known_remote_version(&self, v: &str) -> Result<()> {
+        repo::set_setting(&self.db, "last_known_remote_version", v)
+    }
+
     /// Phase B: promote `target_fingerprint` to owner. Builds a signed
     /// `OwnerGrant`, broadcasts it, and applies it locally. Returns an
     /// error if we ourselves aren't an owner — only owners can grant.

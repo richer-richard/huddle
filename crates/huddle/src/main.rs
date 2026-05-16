@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use libp2p::Multiaddr;
 use tracing_appender::rolling;
 use tracing_subscriber::EnvFilter;
@@ -9,6 +9,7 @@ use huddle_core::storage::keychain;
 
 mod app;
 mod input;
+mod keybindings;
 mod ui;
 
 #[derive(Parser)]
@@ -49,6 +50,18 @@ struct Cli {
     /// entries. LAN-only operation.
     #[arg(long)]
     no_relay: bool,
+
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// huddle 0.6: print version, paths, and config for bug reports.
+    /// Useful for "what does my install look like?" — runs without
+    /// the TUI, doesn't touch the network, and never asks for the
+    /// master passphrase.
+    Doctor,
 }
 
 fn parse_mode(s: &str) -> std::result::Result<NetworkMode, String> {
@@ -58,6 +71,12 @@ fn parse_mode(s: &str) -> std::result::Result<NetworkMode, String> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // huddle 0.6: `huddle doctor` runs without the TUI, log appender,
+    // or network. Just a pretty diagnostic dump for bug reports.
+    if let Some(Commands::Doctor) = &cli.command {
+        return run_doctor();
+    }
 
     let log_path = huddle_core::config::log_path();
     if let Some(parent) = log_path.parent() {
@@ -165,4 +184,66 @@ async fn main() -> Result<()> {
         }
     }
     app::run_tui(handle).await
+}
+
+/// huddle 0.6: print a diagnostic snapshot — version, build target,
+/// data paths, file sizes, config contents. Output is plain text
+/// (no TUI) so users can copy-paste into bug reports.
+fn run_doctor() -> Result<()> {
+    use huddle_core::config;
+    use std::fs;
+
+    println!("huddle {}", env!("CARGO_PKG_VERSION"));
+    println!("repository: https://github.com/richer-richard/huddle");
+    println!();
+    println!("paths:");
+    let data_dir = config::data_dir();
+    let db_path = config::db_path();
+    let log_path = config::log_path();
+    let config_path = config::config_path();
+    println!("  data dir:   {}", data_dir.display());
+    println!("  database:   {}", db_path.display());
+    println!("  log file:   {}", log_path.display());
+    println!("  config:     {}", config_path.display());
+    println!();
+
+    let exists = |p: &std::path::Path| {
+        if let Ok(meta) = fs::metadata(p) {
+            let kb = meta.len() / 1024;
+            format!("present ({} KB)", kb)
+        } else {
+            "absent".to_string()
+        }
+    };
+    println!("data files:");
+    for name in &[
+        "huddle.db",
+        "huddle.db-shm",
+        "huddle.db-wal",
+        "keychain.salt",
+        "identity.key",
+        "huddle.log",
+    ] {
+        let p = data_dir.join(name);
+        println!("  {:<16} {}", format!("{}:", name), exists(&p));
+    }
+    println!();
+
+    // Config: just print the relay list if any.
+    match config::load_relays() {
+        Some(list) if !list.is_empty() => {
+            println!("relays configured (from config.toml):");
+            for r in list {
+                println!("  {}", r);
+            }
+        }
+        _ => {
+            println!("relays: none configured");
+        }
+    }
+    println!();
+
+    println!("for support, open an issue at:");
+    println!("  https://github.com/richer-richard/huddle/issues");
+    Ok(())
 }

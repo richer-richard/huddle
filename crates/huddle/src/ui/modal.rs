@@ -168,53 +168,76 @@ pub fn render_quit_confirm(f: &mut Frame) {
     f.render_widget(para, area);
 }
 
-pub fn render_help(f: &mut Frame) {
-    let area = centered_rect(64, 22, f.area());
+pub fn render_help(f: &mut Frame, scroll: u16) {
+    use crate::keybindings::{Context, BINDINGS};
+    let area = centered_rect(76, 28, f.area());
     f.render_widget(Clear, area);
-    let lines = vec![
-        Line::from(""),
-        Line::from(Span::styled(" Lobby", Style::default().fg(Color::Cyan).bold())),
-        Line::from(""),
-        kv("  s", "start a new room"),
-        kv("  d", "dial a peer by IP:port (Direct mode)"),
-        kv("  Tab", "switch focus: known peers <-> rooms"),
-        kv("  Enter", "join selected room / reconnect peer"),
-        kv("  j/k or arrows", "navigate the focused list"),
-        kv("  r", "refresh rooms / retry connect"),
-        kv("  x", "forget the highlighted peer"),
-        kv("  ?", "this help"),
-        kv("  q / Ctrl-C", "quit"),
-        Line::from(""),
-        Line::from(Span::styled(" In a room", Style::default().fg(Color::Cyan).bold())),
-        Line::from(""),
-        kv("  /", "type a message"),
-        kv("  Esc", "blur input / back to lobby"),
-        kv("  ^Tab / ^N", "next tab"),
-        kv("  ^P", "previous tab"),
-        kv("  1..9", "jump to tab N"),
-        kv("  ^L", "leave the current room"),
-        kv("  ^B", "back to lobby (without leaving)"),
+
+    // Group bindings by Context, preserving the source order so help
+    // lays out the same way every time and never drifts away from the
+    // input.rs match arms.
+    let sections: &[(Context, &str)] = &[
+        (Context::Global, "Global"),
+        (Context::Lobby, "Lobby"),
+        (Context::LobbyRooms, "Lobby — rooms focus"),
+        (Context::LobbyPeers, "Lobby — known peers focus"),
+        (Context::RoomChat, "In a room"),
+        (Context::RoomInputActive, "While typing"),
+        (Context::RoomCardFocus, "Card focus mode"),
     ];
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!("  huddle {} — keybindings", env!("CARGO_PKG_VERSION")),
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines.push(Line::from(""));
+    let key_w: usize = 18;
+    for (ctx, label) in sections {
+        let mut count = 0usize;
+        for b in BINDINGS.iter().filter(|b| b.context == *ctx) {
+            if count == 0 {
+                lines.push(Line::from(Span::styled(
+                    format!(" {}", label),
+                    Style::default().fg(Color::Cyan).bold(),
+                )));
+                lines.push(Line::from(""));
+            }
+            count += 1;
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  {:<width$}", b.keys, width = key_w),
+                    Style::default().fg(Color::Yellow),
+                ),
+                Span::styled(
+                    b.description.to_string(),
+                    Style::default().fg(Color::White),
+                ),
+            ]));
+        }
+        if count > 0 {
+            lines.push(Line::from(""));
+        }
+    }
+    lines.push(Line::from(Span::styled(
+        "  press j/k or PgUp/PgDn to scroll · any other key to close",
+        Style::default().fg(Color::DarkGray),
+    )));
     let para = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
+        .scroll((scroll, 0))
         .block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Cyan))
                 .padding(Padding::uniform(1))
                 .title(Span::styled(
-                    " help  (press any key to close) ",
+                    " help ",
                     Style::default().fg(Color::Cyan).bold(),
                 )),
         );
     f.render_widget(para, area);
-}
-
-fn kv(k: &'static str, v: &'static str) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(k, Style::default().fg(Color::Yellow)),
-        Span::styled(format!("   {}", v), Style::default().fg(Color::White)),
-    ])
 }
 
 pub fn render_dial_peer(f: &mut Frame, s: &DialPeerState) {
@@ -947,9 +970,11 @@ pub fn render_sas(f: &mut Frame, s: &SasState) {
     f.render_widget(para, area);
 }
 
-/// Phase E: settings modal (global verified-only-inbound toggle).
-pub fn render_settings(f: &mut Frame, s: &SettingsState) {
-    let area = centered_rect(68, 22, f.area());
+/// Phase E + huddle 0.6: settings modal. The TuiApp is passed in so
+/// we can render contextual info (update-check status, pending modal
+/// count) without bloating SettingsState.
+pub fn render_settings(f: &mut Frame, s: &SettingsState, app: &crate::app::TuiApp) {
+    let area = centered_rect(72, 26, f.area());
     f.render_widget(Clear, area);
     let check = if s.verified_only_inbound { "[x]" } else { "[ ]" };
     let blocked = s.blocked_peer_count;
@@ -1010,6 +1035,29 @@ pub fn render_settings(f: &mut Frame, s: &SettingsState) {
         clear_hint,
         Line::from(""),
         Line::from(vec![
+            Span::styled(" update check (crates.io): ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                match app.handle.update_check_enabled() {
+                    Some(true) => "ON",
+                    Some(false) => "OFF",
+                    None => "(not asked yet)",
+                },
+                Style::default().fg(Color::Cyan).bold(),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  press ", Style::default().fg(Color::DarkGray)),
+            Span::styled("U", Style::default().fg(Color::Yellow).bold()),
+            Span::styled(" to toggle", Style::default().fg(Color::DarkGray)),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" press ", Style::default().fg(Color::DarkGray)),
+            Span::styled("W", Style::default().fg(Color::Yellow).bold()),
+            Span::styled(" to replay onboarding / what's new", Style::default().fg(Color::DarkGray)),
+        ]),
+        Line::from(""),
+        Line::from(vec![
             Span::styled(" [!]", Style::default().fg(Color::Red).bold()),
             Span::styled(
                 " delete account (go dark) — press ",
@@ -1019,7 +1067,7 @@ pub fn render_settings(f: &mut Frame, s: &SettingsState) {
         ]),
         Line::from(""),
         Line::from(vec![
-            Span::styled(" Esc", Style::default().fg(Color::Yellow)),
+            Span::styled(" Esc / q", Style::default().fg(Color::Yellow)),
             Span::styled(" close", Style::default().fg(Color::DarkGray)),
         ]),
     ];
@@ -1510,26 +1558,32 @@ pub fn render_confirm_invite(f: &mut Frame, s: &ConfirmInviteState) {
     f.render_widget(para, area);
 }
 
-/// Phase H: first-launch onboarding. Three pages; dismiss on last
-/// page or Esc marks `identity.onboarding_seen = 1`.
-pub fn render_onboarding(f: &mut Frame, page: usize) {
-    let pages = crate::app::ONBOARDING_PAGES;
-    let page = page.min(pages.len() - 1);
-    let (title, lines_src) = pages[page];
-    let total = pages.len();
+/// Phase H + huddle 0.6: paginated onboarding. `pages` is a filtered
+/// index list into `ONBOARDING_PAGES` so a version bump shows only
+/// the new "what's new" cards. `cursor` is the position within
+/// that filtered list (not the global index).
+pub fn render_onboarding(f: &mut Frame, page_indices: &[usize], cursor: usize) {
+    let all = crate::app::ONBOARDING_PAGES;
+    if page_indices.is_empty() {
+        return;
+    }
+    let cursor = cursor.min(page_indices.len() - 1);
+    let global_idx = page_indices[cursor].min(all.len() - 1);
+    let page = &all[global_idx];
+    let total = page_indices.len();
 
-    let height = (lines_src.len() as u16) + 9;
-    let area = centered_rect(72, height.min(22), f.area());
+    let height = (page.body.len() as u16) + 10;
+    let area = centered_rect(76, height.min(24), f.area());
     f.render_widget(Clear, area);
 
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        format!("  {}", title),
+        format!("  {}", page.title),
         Style::default().fg(Color::Yellow).bold(),
     )));
     lines.push(Line::from(""));
-    for body in lines_src.iter() {
+    for body in page.body.iter() {
         lines.push(Line::from(Span::styled(
             format!("  {}", body),
             Style::default().fg(Color::White),
@@ -1537,20 +1591,17 @@ pub fn render_onboarding(f: &mut Frame, page: usize) {
     }
     lines.push(Line::from(""));
     let dots: String = (0..total)
-        .map(|i| if i == page { '●' } else { '○' })
-        .collect::<Vec<_>>()
-        .into_iter()
-        .map(|c| c.to_string())
+        .map(|i| if i == cursor { "●" } else { "○" })
         .collect::<Vec<_>>()
         .join(" ");
     lines.push(Line::from(Span::styled(
-        format!("  {} ({}/{})", dots, page + 1, total),
+        format!("  {} ({}/{})", dots, cursor + 1, total),
         Style::default().fg(Color::DarkGray),
     )));
     lines.push(Line::from(""));
-    let nav_hint = if page + 1 == total {
+    let nav_hint = if cursor + 1 == total {
         " Enter dismiss   ← back   Esc skip"
-    } else if page == 0 {
+    } else if cursor == 0 {
         " Enter / → next   Esc skip"
     } else {
         " Enter / → next   ← back   Esc skip"
@@ -1570,6 +1621,193 @@ pub fn render_onboarding(f: &mut Frame, page: usize) {
                 .title(Span::styled(
                     " welcome to huddle ",
                     Style::default().fg(Color::Cyan).bold(),
+                )),
+        );
+    f.render_widget(para, area);
+}
+
+/// huddle 0.6: scrollable notification history overlay (Ctrl+H).
+/// Shows the last `STATUS_HISTORY_CAP` status-bar entries, newest
+/// first, with absolute timestamps.
+pub fn render_status_history(f: &mut Frame, app: &crate::app::TuiApp, scroll: u16) {
+    let area = centered_rect(80, 24, f.area());
+    f.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .padding(Padding::uniform(1))
+        .title(Span::styled(
+            format!(" notification history ({}) ", app.status_history.len()),
+            Style::default().fg(Color::Cyan).bold(),
+        ));
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(""));
+    if app.status_history.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  no notifications yet.",
+            Style::default().fg(Color::DarkGray),
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  everything huddle would say in the status bar will land here",
+            Style::default().fg(Color::DarkGray),
+        )));
+        lines.push(Line::from(Span::styled(
+            "  for replay. give it a few minutes.",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        // Render newest-first so the most recent is always visible at
+        // the top of the modal without scrolling.
+        for entry in app.status_history.iter().rev() {
+            let t = format_clock_time(entry.timestamp);
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  {}  ", t),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(entry.message.clone(), Style::default().fg(Color::White)),
+            ]));
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  j/k scroll · PgUp/PgDn page · c clear · Esc / q close",
+        Style::default().fg(Color::DarkGray),
+    )));
+    let para = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .scroll((scroll, 0))
+        .block(block);
+    f.render_widget(para, area);
+}
+
+fn format_clock_time(unix_secs: i64) -> String {
+    let secs_today = (unix_secs % 86_400) as u32;
+    let hh = (secs_today / 3600) % 24;
+    let mm = (secs_today / 60) % 60;
+    let ss = secs_today % 60;
+    format!("{:02}:{:02}:{:02}", hh, mm, ss)
+}
+
+/// huddle 0.6: command palette (Ctrl+P / `:`). Fuzzy-search every
+/// palette-eligible action plus a few "extras" (toggles & dismiss
+/// banner). Enter executes; Esc cancels.
+pub fn render_command_palette(f: &mut Frame, s: &crate::app::CommandPaletteState) {
+    let area = centered_rect(80, 22, f.area());
+    f.render_widget(Clear, area);
+    let entries = crate::app::palette_filtered(&s.query);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .padding(Padding::uniform(1))
+        .title(Span::styled(
+            " command palette ",
+            Style::default().fg(Color::Cyan).bold(),
+        ));
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(vec![
+        Span::styled(" › ", Style::default().fg(Color::Cyan).bold()),
+        Span::styled(s.query.clone(), Style::default().fg(Color::White)),
+        Span::styled("_", Style::default().fg(Color::DarkGray)),
+    ]));
+    lines.push(Line::from(""));
+    if entries.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  no matching commands.",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        // Show up to 14 entries; window around the selected one so
+        // scrolling with ↓ works even past the visible cap.
+        const VISIBLE: usize = 14;
+        let offset = if s.selected >= VISIBLE {
+            s.selected.saturating_sub(VISIBLE - 1)
+        } else {
+            0
+        };
+        for (i, e) in entries.iter().enumerate().skip(offset).take(VISIBLE) {
+            let focused = i == s.selected;
+            let marker = if focused { "› " } else { "  " };
+            let label_style = if focused {
+                Style::default().fg(Color::Cyan).bold()
+            } else {
+                Style::default().fg(Color::White)
+            };
+            let keys_pretty = if e.keys.is_empty() {
+                "".to_string()
+            } else {
+                format!("    [{}]", e.keys)
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {}", marker), Style::default().fg(Color::Yellow)),
+                Span::styled(e.label.to_string(), label_style),
+                Span::styled(keys_pretty, Style::default().fg(Color::DarkGray)),
+            ]));
+        }
+    }
+    while lines.len() < 18 {
+        lines.push(Line::from(""));
+    }
+    lines.push(Line::from(Span::styled(
+        " Enter run · ↑/↓ navigate · type to filter · Esc cancel",
+        Style::default().fg(Color::DarkGray),
+    )));
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false }).block(block);
+    f.render_widget(para, area);
+}
+
+/// huddle 0.6: first-launch opt-in for the crates.io update check.
+/// Shown to users who haven't been asked yet (after onboarding).
+pub fn render_update_opt_in(f: &mut Frame) {
+    let area = centered_rect(72, 14, f.area());
+    f.render_widget(Clear, area);
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "  check crates.io for updates?",
+            Style::default().fg(Color::White).bold(),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  huddle would HTTPS GET https://crates.io once per 24 h",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(Span::styled(
+            "  to see if there's a newer version available. A banner",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(Span::styled(
+            "  shows in the lobby header when one is. No telemetry.",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  privacy note: crates.io's CDN sees your IP + User-Agent.",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(Span::styled(
+            "  default OFF for that reason. you can toggle from settings.",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" [y]", Style::default().fg(Color::Green).bold()),
+            Span::styled(" enable    ", Style::default().fg(Color::DarkGray)),
+            Span::styled(" [n / Esc]", Style::default().fg(Color::Red).bold()),
+            Span::styled(" no thanks", Style::default().fg(Color::DarkGray)),
+        ]),
+    ];
+    let para = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow))
+                .padding(Padding::uniform(1))
+                .title(Span::styled(
+                    " update check ",
+                    Style::default().fg(Color::Yellow).bold(),
                 )),
         );
     f.render_widget(para, area);

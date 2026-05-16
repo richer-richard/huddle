@@ -1,5 +1,7 @@
 use std::cell::Cell;
+use std::collections::VecDeque;
 use std::io;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -25,13 +27,35 @@ use crate::input::{self, Action};
 /// Default lifetime for transient status-bar messages.
 const STATUS_TTL: Duration = Duration::from_secs(6);
 
-/// Phase H: first-launch onboarding pages. Three cards explaining the
-/// mental model + key shortcuts. Kept inline as a const so any change
-/// only needs `cargo build` to refresh — no runtime config plumbing.
-pub const ONBOARDING_PAGES: &[(&str, &[&str])] = &[
-    (
-        "huddle is not iMessage",
-        &[
+/// Maximum entries kept in the status history ring buffer.
+pub const STATUS_HISTORY_CAP: usize = 100;
+
+/// Maximum modals we queue behind the active one. Beyond this we drop
+/// the oldest — see `enqueue_modal`.
+pub const PENDING_MODAL_CAP: usize = 16;
+
+/// huddle 0.6: an onboarding page tagged with the version it was
+/// introduced in. Users only see pages whose `min_version` is newer
+/// than their last_seen_onboarding_version, so a version bump
+/// surfaces only the new "what's new" page — not the foundational
+/// cards from before.
+pub struct OnboardingPage {
+    pub title: &'static str,
+    pub body: &'static [&'static str],
+    /// Pages with `min_version` greater than the user's last-seen
+    /// onboarding version are surfaced. "0.0.0" = foundational pages
+    /// shown only on true first launch.
+    pub min_version: &'static str,
+}
+
+/// Phase H + huddle 0.6: onboarding pages. The mental-model and
+/// passphrase pages are foundational (min_version="0.0.0"); each
+/// release that ships a user-visible change adds one "what's new"
+/// page tagged with its release version.
+pub const ONBOARDING_PAGES: &[OnboardingPage] = &[
+    OnboardingPage {
+        title: "huddle is not iMessage",
+        body: &[
             "every member is a peer — no host, no central server.",
             "rooms outlive whoever created them.",
             "anyone with the room passphrase can join, send, rotate the key.",
@@ -40,10 +64,11 @@ pub const ONBOARDING_PAGES: &[(&str, &[&str])] = &[
             "",
             "press → / Tab / Enter / Space to continue.",
         ],
-    ),
-    (
-        "passphrase ≠ password",
-        &[
+        min_version: "0.0.0",
+    },
+    OnboardingPage {
+        title: "passphrase ≠ password",
+        body: &[
             "the master passphrase encrypts your LOCAL database (rooms,",
             "messages, members, Megolm sessions, attachments).",
             "room passphrases are the access keys to encrypted rooms.",
@@ -54,29 +79,79 @@ pub const ONBOARDING_PAGES: &[(&str, &[&str])] = &[
             "  ^V→s  SAS-verify a member's fingerprint",
             "  ^I  produce an invite link (passphrase still OOB)",
         ],
-    ),
-    (
-        "what's new in 0.5",
-        &[
+        min_version: "0.0.0",
+    },
+    OnboardingPage {
+        title: "what's new in 0.5",
+        body: &[
             "  a    add friend by HD ID or username — races LAN / IP / relay",
             "  ,→u  set / clear your username (signed broadcast)",
             "  ,→!  delete account + wipe data dir (go dark)",
             "  ✓    green tag next to SAS-verified peers in chat",
             "  HD-  branded ID, shown alongside username everywhere",
-            "",
-            "still around from 0.3 / 0.4:",
-            "  ^K   kick a member (signed ban + key rotation)",
-            "  ^G   grant another member the owner role",
-            "  ^J   generate a 10-minute join code (owner only)",
-            "  ^V   verify fingerprints; press s inside for SAS",
-            "  ^I   show an invite link for the current room",
-            "  v    paste an invite link from the lobby",
-            "  o    toggle 'only verified members may join' (in room)",
-            "",
-            "press Enter to dismiss.",
         ],
-    ),
+        min_version: "0.5.0",
+    },
+    OnboardingPage {
+        title: "what's new in 0.6 — UX overhaul",
+        body: &[
+            "  Ctrl+P  command palette — fuzzy search every action",
+            "  Ctrl+H  notification history (last 100 status events)",
+            "  Shift+? re-open this card anytime ('show what's new')",
+            "  ?       help screen is now generated from input.rs —",
+            "          every key is documented, scroll with j/k.",
+            "  R       (lobby) mark every room read",
+            "",
+            "  · version + clock in the lobby header",
+            "  · live peer counter next to the NAT badge",
+            "  · per-tab unread counts (instead of '*')",
+            "  · scroll indicator + day separators in chat",
+            "  · '[N pending]' badge when a modal event was queued",
+            "  · update banner (opt-in) — checks crates.io every 24h",
+            "  · `huddle doctor` CLI subcommand for bug reports",
+        ],
+        min_version: "0.6.0",
+    },
 ];
+
+/// huddle 0.6: pages that should be shown to a user with the given
+/// last-seen onboarding version. Brand-new users see everything;
+/// upgrading users see only the pages tagged with versions newer
+/// than their last_seen.
+pub fn pages_to_show(last_seen: Option<&str>, legacy_onboarding_seen: bool) -> Vec<usize> {
+    let baseline = match (last_seen, legacy_onboarding_seen) {
+        (Some(v), _) => v.to_string(),
+        // Legacy user from before version tracking: they already saw
+        // the 0.5 foundational + "what's new" cards. Treat them as
+        // having last_seen=0.5.2 so only newer pages surface.
+        (None, true) => "0.5.2".to_string(),
+        // Brand-new user: every page.
+        (None, false) => "0.0.0".to_string(),
+    };
+    ONBOARDING_PAGES
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| semver_lt(&baseline, p.min_version))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Tiny numeric semver compare — splits on '.' and parses each segment
+/// as a u32, treating missing or non-numeric trailers as 0. Enough for
+/// our 0.X.Y release numbering; we never ship pre-release tags.
+fn semver_lt(a: &str, b: &str) -> bool {
+    parse_semver(a) < parse_semver(b)
+}
+
+fn parse_semver(s: &str) -> (u32, u32, u32) {
+    let mut it = s.split('.');
+    let major = it.next().unwrap_or("0").parse().unwrap_or(0);
+    let minor = it.next().unwrap_or("0").parse().unwrap_or(0);
+    let patch_raw = it.next().unwrap_or("0");
+    let patch_num: String = patch_raw.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let patch = patch_num.parse().unwrap_or(0);
+    (major, minor, patch)
+}
 
 /// Top-level screen — the lobby or the in-room view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,15 +221,41 @@ pub enum Modal {
     PasteInvite(PasteInviteState),
     /// Phase C: parsed invite — confirm before dialing.
     ConfirmInvite(ConfirmInviteState),
-    /// Phase H: first-launch onboarding card. Three pages, dismissed
-    /// once and persisted on the identity row.
+    /// Phase H + huddle 0.6: onboarding card. `pages` is a filtered
+    /// index list into `ONBOARDING_PAGES` so a version bump can show
+    /// only the new "what's new" page without re-walking the
+    /// foundational cards.
     Onboarding {
-        page: usize,
+        pages: Vec<usize>,
+        cursor: usize,
     },
+    /// huddle 0.6: scrollable list of the last `STATUS_HISTORY_CAP`
+    /// status-bar messages. Opens on Ctrl+H. Doubles as a notification
+    /// center.
+    StatusHistory {
+        scroll: u16,
+    },
+    /// huddle 0.6: command palette — fuzzy-search every action that
+    /// has a `palette_label` in `crate::keybindings::BINDINGS`. Opens
+    /// on Ctrl+P. Type to filter, Enter to execute.
+    CommandPalette(CommandPaletteState),
+    /// huddle 0.6: first-launch opt-in for the update check. Shown
+    /// when `handle.update_check_enabled().is_none()`. Yes records
+    /// the user opted in and triggers the first poll; No disables.
+    UpdateCheckOptIn,
     QuitConfirm,
     Help,
     Error(String),
     Info(String),
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CommandPaletteState {
+    pub query: String,
+    /// Full list of (label, keys, action_id) for every palette-eligible
+    /// binding plus a few synthetic entries (e.g. "toggle update check"
+    /// that doesn't have a keybinding). Filtered by `query` at render.
+    pub selected: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -479,7 +580,10 @@ pub struct OpenRoom {
     pub card_focus: bool,
     /// Index into the visible cards (filtered from `attachments`).
     pub focused_card_idx: usize,
-    pub unread: bool,
+    /// huddle 0.6: number of unread messages since the tab was last
+    /// focused. Reset to 0 on tab activation. Replaces the old bool
+    /// flag — gives users an "exact count" instead of a vague star.
+    pub unread: u32,
 }
 
 /// Which list the cursor is on in the lobby — known dial peers or
@@ -490,15 +594,26 @@ pub enum LobbyFocus {
     Rooms,
 }
 
+/// huddle 0.6: a single entry in the status-history ring buffer.
+/// `timestamp` is wall-clock seconds since UNIX epoch (so the
+/// notification overlay renders absolute time, not "12s ago").
+#[derive(Debug, Clone)]
+pub struct StatusEntry {
+    pub message: String,
+    pub timestamp: i64,
+}
+
 pub struct TuiApp {
     pub handle: AppHandle,
     pub mode: NetworkMode,
     pub screen: Screen,
     pub modal: Modal,
-    /// An async-event modal (an error, or a rotation request) that
-    /// arrived while the user was mid-interaction with another modal.
-    /// Surfaced once the foreground modal is dismissed.
-    pub pending_modal: Option<Modal>,
+    /// huddle 0.6: a FIFO queue of async-event modals (errors, rotation
+    /// requests, inbound dials) that arrived while another modal held
+    /// the foreground. Replaces the single-slot Option<Modal> — events
+    /// no longer get silently dropped past the second. Capped at
+    /// `PENDING_MODAL_CAP`; oldest is shed on overflow.
+    pub pending_modals: VecDeque<Modal>,
     pub discovered_rooms: Vec<DiscoveredRoom>,
     pub known_peers: Vec<KnownPeerStatus>,
     pub lobby_focus: LobbyFocus,
@@ -510,6 +625,24 @@ pub struct TuiApp {
     /// Bottom-bar status: text + expiry instant. After expiry, treated
     /// as None by the renderer.
     pub status_message: Option<(String, Instant)>,
+    /// huddle 0.6: every status-bar message that's ever been displayed
+    /// in this session, capped at `STATUS_HISTORY_CAP`. Opens on
+    /// Ctrl+H. Replaces the "goldfish" status bar where two events in
+    /// quick succession overwrote each other.
+    pub status_history: VecDeque<StatusEntry>,
+    /// huddle 0.6: scroll offset of the Help modal. Lives on TuiApp
+    /// (not Modal) so the Modal enum stays simple.
+    pub help_scroll: u16,
+    /// huddle 0.6: latest crates.io poll result. `Some(version)`
+    /// renders a banner under the lobby header; `None` hides it.
+    /// Set by the spawned update-check task via `update_check_slot`.
+    pub update_banner: Option<String>,
+    /// huddle 0.6: shared mailbox between the spawned update-check
+    /// task (writer) and the main loop (reader). The task writes a
+    /// detected newer version here; the main loop drains it once
+    /// per tick and copies into `update_banner`. Stays empty when
+    /// the user hasn't opted in.
+    pub update_check_slot: Arc<Mutex<Option<String>>>,
     /// Phase D follow-up: the lobby header renders this as a
     /// reachability badge. `None` until AutoNAT delivers its first
     /// transition; `Some("reachable")` once any external address
@@ -537,20 +670,34 @@ impl TuiApp {
         } else {
             LobbyFocus::Rooms
         };
-        // Phase H: surface the onboarding card on first launch via the
-        // existing pending_modal slot. main_loop's promote-when-idle
-        // step opens it on the first frame.
-        let pending_modal = if !handle.onboarding_seen() {
-            Some(Modal::Onboarding { page: 0 })
-        } else {
-            None
-        };
+        // huddle 0.6: onboarding-pages-to-show is now version-driven.
+        // First-launch users see every page; upgrading users see only
+        // the "what's new in X.Y" page for releases newer than their
+        // last_seen_onboarding_version.
+        let last_seen = handle.last_seen_onboarding_version();
+        let legacy_seen = handle.onboarding_seen();
+        let pages = pages_to_show(last_seen.as_deref(), legacy_seen);
+        let mut pending_modals: VecDeque<Modal> = VecDeque::new();
+        if !pages.is_empty() {
+            pending_modals.push_back(Modal::Onboarding { pages, cursor: 0 });
+        }
+        // huddle 0.6: ask first-launch users to opt in to the update
+        // check. If they've already answered (Some(true) or Some(false))
+        // we skip the modal. The prompt sits behind onboarding so new
+        // users see the welcome card first.
+        if handle.update_check_enabled().is_none() && legacy_seen {
+            // For brand-new users, the modal is part of the onboarding
+            // flow — we don't bother them with a separate yes/no on
+            // first launch. Returning users (legacy_seen=true) who
+            // haven't been asked yet get the prompt next.
+            pending_modals.push_back(Modal::UpdateCheckOptIn);
+        }
         Self {
             handle,
             mode,
             screen: Screen::Lobby,
             modal: Modal::None,
-            pending_modal,
+            pending_modals,
             discovered_rooms: Vec::new(),
             known_peers,
             lobby_focus,
@@ -560,6 +707,10 @@ impl TuiApp {
             active_tab: 0,
             listen_addresses: Vec::new(),
             status_message: None,
+            status_history: VecDeque::new(),
+            help_scroll: 0,
+            update_banner: None,
+            update_check_slot: Arc::new(Mutex::new(None)),
             nat_status: None,
             went_dark_at: None,
         }
@@ -572,9 +723,14 @@ impl TuiApp {
         }
     }
 
-    /// Set the bottom status line with the default 6s TTL.
+    /// Set the bottom status line with the default 6s TTL. Also
+    /// appends to the status history ring buffer (huddle 0.6) so the
+    /// Ctrl+H overlay can show a backlog even when events fire faster
+    /// than the TTL.
     pub fn set_status(&mut self, msg: impl Into<String>) {
-        self.status_message = Some((msg.into(), Instant::now() + STATUS_TTL));
+        let msg = msg.into();
+        self.record_status(&msg);
+        self.status_message = Some((msg, Instant::now() + STATUS_TTL));
     }
 
     /// Set the status line with an explicit TTL. Used for transient
@@ -582,7 +738,32 @@ impl TuiApp {
     /// DCUtR upgrade success ("direct connection to <peer>") which we
     /// want the user to actually see before it scrolls.
     pub fn set_status_for(&mut self, msg: impl Into<String>, ttl: Duration) {
-        self.status_message = Some((msg.into(), Instant::now() + ttl));
+        let msg = msg.into();
+        self.record_status(&msg);
+        self.status_message = Some((msg, Instant::now() + ttl));
+    }
+
+    /// huddle 0.6: append to the status history ring buffer. Dedupes
+    /// adjacent duplicates so a re-render of the same message (which
+    /// happens because tick_status calls set_status indirectly via
+    /// app events) doesn't fill the buffer with the same line.
+    fn record_status(&mut self, msg: &str) {
+        if let Some(last) = self.status_history.back() {
+            if last.message == msg {
+                return;
+            }
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        self.status_history.push_back(StatusEntry {
+            message: msg.to_string(),
+            timestamp: now,
+        });
+        while self.status_history.len() > STATUS_HISTORY_CAP {
+            self.status_history.pop_front();
+        }
     }
 
     /// Returns the current status text if it hasn't expired.
@@ -637,16 +818,35 @@ impl TuiApp {
     }
 
     /// Show `m` now if the user isn't mid-interaction with a modal,
-    /// otherwise queue it behind the current one. Dismissible modals
-    /// (None / Error / Info) are pure output and safe to displace; input
-    /// modals hold unsaved user state and must not be clobbered by an
-    /// async event.
+    /// otherwise enqueue it. Dismissible modals (None / Error / Info)
+    /// are pure output and safe to displace; input modals hold
+    /// unsaved user state and must not be clobbered by an async event.
+    ///
+    /// huddle 0.6: the queue is now a `VecDeque` (was a single Option)
+    /// — concurrent inbound dials / errors no longer drop the second.
+    /// Bounded at `PENDING_MODAL_CAP`; oldest shed on overflow so a
+    /// runaway error storm can't grow without bound.
     fn replace_modal_if_idle(&mut self, m: Modal) {
         if matches!(self.modal, Modal::None | Modal::Error(_) | Modal::Info(_)) {
             self.modal = m;
         } else {
-            self.pending_modal = Some(m);
+            self.enqueue_modal(m);
         }
+    }
+
+    /// huddle 0.6: append a modal to the pending queue with overflow
+    /// protection. Caller usually goes through `replace_modal_if_idle`.
+    pub fn enqueue_modal(&mut self, m: Modal) {
+        self.pending_modals.push_back(m);
+        while self.pending_modals.len() > PENDING_MODAL_CAP {
+            self.pending_modals.pop_front();
+        }
+    }
+
+    /// huddle 0.6: count of modals queued behind the active one. Used
+    /// by the lobby/room status bar to render a "[N pending]" badge.
+    pub fn pending_count(&self) -> usize {
+        self.pending_modals.len()
     }
 
     pub fn handle_app_event(&mut self, ev: AppEvent) {
@@ -679,7 +879,7 @@ impl TuiApp {
                             last_max_scroll: Cell::new(0),
                             card_focus: false,
                             focused_card_idx: 0,
-                            unread: false,
+                            unread: 0,
                         });
                         self.active_tab = self.open_rooms.len() - 1;
                         self.screen = Screen::InRoom;
@@ -729,7 +929,7 @@ impl TuiApp {
                         sent_at,
                     });
                     if !is_active {
-                        r.unread = true;
+                        r.unread = r.unread.saturating_add(1);
                     }
                 }
             }
@@ -800,7 +1000,7 @@ impl TuiApp {
                 let on_active = self.screen == Screen::InRoom && active_id.as_deref() == Some(&room_id);
                 if let Some(r) = self.open_rooms.iter_mut().find(|r| r.room_id == room_id) {
                     if !on_active {
-                        r.unread = true;
+                        r.unread = r.unread.saturating_add(1);
                     }
                 }
                 self.set_status(format!(
@@ -1066,7 +1266,7 @@ fn open_existing_room_tab(app: &mut TuiApp, room_id: &str) {
         last_max_scroll: Cell::new(0),
         card_focus: false,
         focused_card_idx: 0,
-        unread: false,
+        unread: 0,
     });
     app.active_tab = app.open_rooms.len() - 1;
     app.screen = Screen::InRoom;
@@ -1108,6 +1308,11 @@ pub async fn run_tui(handle: AppHandle) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = TuiApp::new(handle);
+    // huddle 0.6: if the user already opted in to update checks
+    // (Some(true) on a prior launch), kick the once-per-24h poll.
+    if matches!(app.handle.update_check_enabled(), Some(true)) {
+        spawn_update_check(&app);
+    }
     let mut event_rx = app.handle.subscribe();
 
     let result = main_loop(&mut terminal, &mut app, &mut event_rx).await;
@@ -1427,6 +1632,17 @@ async fn main_loop(
         // Drop expired status-bar messages.
         app.tick_status();
 
+        // huddle 0.6: drain the update-check slot. The poll task
+        // writes here when a newer version is detected; we copy
+        // into `update_banner` once so the lobby renders the banner.
+        if app.update_banner.is_none() {
+            if let Ok(mut slot) = app.update_check_slot.lock() {
+                if let Some(v) = slot.take() {
+                    app.update_banner = Some(v);
+                }
+            }
+        }
+
         // huddle 0.5: if go_dark fired, hold the goodbye modal on
         // screen for `GO_DARK_FAREWELL`, then quit. The data dir is
         // already wiped at this point; the network task is down.
@@ -1484,9 +1700,11 @@ async fn main_loop(
 
         // An async-event modal queued while the user was mid-interaction
         // (see `replace_modal_if_idle`) surfaces once the foreground modal
-        // is dismissed — by any path, not just `Action::CloseModal`.
+        // is dismissed — by any path, not just `Action::CloseModal`. The
+        // queue is FIFO (huddle 0.6); we drain one per tick so the user
+        // sees them in arrival order.
         if matches!(app.modal, Modal::None) {
-            if let Some(m) = app.pending_modal.take() {
+            if let Some(m) = app.pending_modals.pop_front() {
                 app.modal = m;
             }
         }
@@ -1512,6 +1730,7 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             Ok(false)
         }
         Action::OpenHelp => {
+            app.help_scroll = 0;
             app.modal = Modal::Help;
             Ok(false)
         }
@@ -1750,7 +1969,7 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             if !app.open_rooms.is_empty() {
                 app.active_tab = (app.active_tab + 1) % app.open_rooms.len();
                 if let Some(r) = app.active_room_mut() {
-                    r.unread = false;
+                    r.unread = 0;
                 }
             }
             Ok(false)
@@ -1763,7 +1982,7 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
                     app.active_tab - 1
                 };
                 if let Some(r) = app.active_room_mut() {
-                    r.unread = false;
+                    r.unread = 0;
                 }
             }
             Ok(false)
@@ -1772,7 +1991,7 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             if n < app.open_rooms.len() {
                 app.active_tab = n;
                 if let Some(r) = app.active_room_mut() {
-                    r.unread = false;
+                    r.unread = 0;
                 }
             }
             Ok(false)
@@ -2225,27 +2444,190 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             Ok(false)
         }
         Action::OnboardingNext => {
-            if let Modal::Onboarding { page } = &mut app.modal {
-                if *page + 1 < ONBOARDING_PAGES.len() {
-                    *page += 1;
+            if let Modal::Onboarding { pages, cursor } = &mut app.modal {
+                if *cursor + 1 < pages.len() {
+                    *cursor += 1;
                 } else {
                     let _ = app.handle.mark_onboarding_seen();
+                    let _ = app
+                        .handle
+                        .set_last_seen_onboarding_version(env!("CARGO_PKG_VERSION"));
                     app.modal = Modal::None;
                 }
             }
             Ok(false)
         }
         Action::OnboardingPrev => {
-            if let Modal::Onboarding { page } = &mut app.modal {
-                if *page > 0 {
-                    *page -= 1;
+            if let Modal::Onboarding { cursor, .. } = &mut app.modal {
+                if *cursor > 0 {
+                    *cursor -= 1;
                 }
             }
             Ok(false)
         }
         Action::OnboardingDismiss => {
+            // Esc still records last_seen so the same pages don't re-pop
+            // on next launch. Users replay via Settings → "Show what's
+            // new" or the command palette.
             let _ = app.handle.mark_onboarding_seen();
+            let _ = app
+                .handle
+                .set_last_seen_onboarding_version(env!("CARGO_PKG_VERSION"));
             app.modal = Modal::None;
+            Ok(false)
+        }
+        // huddle 0.6: re-open onboarding regardless of last_seen. Shows
+        // every page — gives users a way to revisit the welcome cards.
+        Action::OpenWhatsNew => {
+            let pages: Vec<usize> = (0..ONBOARDING_PAGES.len()).collect();
+            app.modal = Modal::Onboarding { pages, cursor: 0 };
+            Ok(false)
+        }
+        Action::OpenStatusHistory => {
+            app.modal = Modal::StatusHistory { scroll: 0 };
+            Ok(false)
+        }
+        Action::StatusHistoryScrollUp => {
+            if let Modal::StatusHistory { scroll } = &mut app.modal {
+                *scroll = scroll.saturating_sub(1);
+            }
+            Ok(false)
+        }
+        Action::StatusHistoryScrollDown => {
+            if let Modal::StatusHistory { scroll } = &mut app.modal {
+                *scroll = scroll.saturating_add(1);
+            }
+            Ok(false)
+        }
+        Action::StatusHistoryPageUp => {
+            if let Modal::StatusHistory { scroll } = &mut app.modal {
+                *scroll = scroll.saturating_sub(10);
+            }
+            Ok(false)
+        }
+        Action::StatusHistoryPageDown => {
+            if let Modal::StatusHistory { scroll } = &mut app.modal {
+                *scroll = scroll.saturating_add(10);
+            }
+            Ok(false)
+        }
+        Action::ClearStatusHistory => {
+            app.status_history.clear();
+            app.set_status("notification history cleared");
+            app.modal = Modal::None;
+            Ok(false)
+        }
+        Action::OpenCommandPalette => {
+            app.modal = Modal::CommandPalette(CommandPaletteState::default());
+            Ok(false)
+        }
+        Action::CommandPaletteTypeChar(c) => {
+            if let Modal::CommandPalette(s) = &mut app.modal {
+                s.query.push(c);
+                s.selected = 0;
+            }
+            Ok(false)
+        }
+        Action::CommandPaletteBackspace => {
+            if let Modal::CommandPalette(s) = &mut app.modal {
+                s.query.pop();
+                s.selected = 0;
+            }
+            Ok(false)
+        }
+        Action::CommandPaletteNext => {
+            if let Modal::CommandPalette(s) = &mut app.modal {
+                let total = palette_filtered(&s.query).len();
+                if s.selected + 1 < total {
+                    s.selected += 1;
+                }
+            }
+            Ok(false)
+        }
+        Action::CommandPalettePrev => {
+            if let Modal::CommandPalette(s) = &mut app.modal {
+                if s.selected > 0 {
+                    s.selected -= 1;
+                }
+            }
+            Ok(false)
+        }
+        Action::CommandPaletteConfirm => {
+            let picked: Option<String> = if let Modal::CommandPalette(s) = &app.modal {
+                let filtered = palette_filtered(&s.query);
+                filtered.get(s.selected).map(|e| e.label.to_string())
+            } else {
+                None
+            };
+            app.modal = Modal::None;
+            if let Some(label) = picked {
+                return run_palette_action(&label, app).await;
+            }
+            Ok(false)
+        }
+        Action::MarkAllRead => {
+            let mut n = 0u32;
+            for r in &mut app.open_rooms {
+                if r.unread > 0 {
+                    n = n.saturating_add(r.unread);
+                    r.unread = 0;
+                }
+            }
+            app.set_status(if n == 0 {
+                "no unread to mark".to_string()
+            } else {
+                format!("marked {} message(s) read across {} room(s)", n, app.open_rooms.len())
+            });
+            Ok(false)
+        }
+        Action::HelpScrollUp => {
+            app.help_scroll = app.help_scroll.saturating_sub(1);
+            Ok(false)
+        }
+        Action::HelpScrollDown => {
+            app.help_scroll = app.help_scroll.saturating_add(1);
+            Ok(false)
+        }
+        Action::HelpPageUp => {
+            app.help_scroll = app.help_scroll.saturating_sub(10);
+            Ok(false)
+        }
+        Action::HelpPageDown => {
+            app.help_scroll = app.help_scroll.saturating_add(10);
+            Ok(false)
+        }
+        Action::UpdateCheckOptInYes => {
+            let _ = app.handle.set_update_check_enabled(true);
+            app.modal = Modal::None;
+            app.set_status("update check enabled — polling crates.io once per day");
+            // Kick off a check immediately so the user sees the
+            // outcome rather than waiting for the 24h timer.
+            spawn_update_check(app);
+            Ok(false)
+        }
+        Action::UpdateCheckOptInNo => {
+            let _ = app.handle.set_update_check_enabled(false);
+            app.modal = Modal::None;
+            app.set_status("update check disabled — toggle later in settings");
+            Ok(false)
+        }
+        Action::ToggleUpdateCheck => {
+            let cur = app.handle.update_check_enabled().unwrap_or(false);
+            let _ = app.handle.set_update_check_enabled(!cur);
+            app.set_status(if !cur {
+                "update check ON — polling crates.io once per day"
+            } else {
+                "update check OFF"
+            });
+            if !cur {
+                spawn_update_check(app);
+            } else {
+                app.update_banner = None;
+            }
+            Ok(false)
+        }
+        Action::DismissUpdateBanner => {
+            app.update_banner = None;
             Ok(false)
         }
         Action::GenerateInvite => {
@@ -2908,4 +3290,268 @@ fn focused_card_info(
     let r = app.active_room()?;
     let a = r.attachments.get(r.focused_card_idx)?;
     Some((r.room_id.clone(), a.file_id.clone(), a.status, a.encrypted))
+}
+
+// =========================================================================
+// huddle 0.6: command palette
+// =========================================================================
+
+/// One entry surfaced by the command palette. `label` is the
+/// human-readable description shown to the user; `keys` is the
+/// keybinding to display alongside. Confirm dispatches by matching
+/// `label`.
+#[derive(Debug, Clone, Copy)]
+pub struct PaletteEntry {
+    pub label: &'static str,
+    pub keys: &'static str,
+}
+
+/// Static list of "extra" palette entries that don't have a normal
+/// keybinding — toggles and settings rows reachable only via the
+/// palette.
+const EXTRA_PALETTE_ENTRIES: &[PaletteEntry] = &[
+    PaletteEntry {
+        label: "toggle update check (crates.io)",
+        keys: "",
+    },
+    PaletteEntry {
+        label: "dismiss update banner",
+        keys: "",
+    },
+    PaletteEntry {
+        label: "clear notification history",
+        keys: "Ctrl+H · c",
+    },
+];
+
+/// Build the palette entry list filtered by `query`. Each character
+/// of the query must appear in order in the label (subsequence
+/// match — the standard "fuzzy" pattern). Empty query returns all.
+pub fn palette_filtered(query: &str) -> Vec<PaletteEntry> {
+    use crate::keybindings::palette_entries;
+    let entries: Vec<PaletteEntry> = palette_entries()
+        .map(|(label, keys)| PaletteEntry { label, keys })
+        .chain(EXTRA_PALETTE_ENTRIES.iter().copied())
+        .collect();
+    if query.trim().is_empty() {
+        return entries;
+    }
+    let q_lower: String = query.to_lowercase();
+    entries
+        .into_iter()
+        .filter(|e| fuzzy_match(&e.label.to_lowercase(), &q_lower))
+        .collect()
+}
+
+fn fuzzy_match(haystack: &str, needle: &str) -> bool {
+    let mut it = haystack.chars();
+    'outer: for nc in needle.chars() {
+        for hc in it.by_ref() {
+            if hc == nc {
+                continue 'outer;
+            }
+        }
+        return false;
+    }
+    true
+}
+
+/// Dispatch a confirmed palette pick to the actual app action. Each
+/// arm mirrors what the corresponding keybinding would do. Some
+/// actions are no-ops in some contexts (e.g. "kick member" when not
+/// in a room as owner) — they surface a status note instead of
+/// throwing an error.
+pub async fn run_palette_action(label: &str, app: &mut TuiApp) -> Result<bool> {
+    match label {
+        // === Lobby-style ===
+        "start a new room" => {
+            app.modal = Modal::StartRoom(StartRoomState::new());
+        }
+        "add friend by HD ID or username" => {
+            app.modal = Modal::AddFriend(AddFriendState::default());
+        }
+        "dial peer by address" => {
+            app.modal = Modal::DialPeer(DialPeerState::default());
+        }
+        "show your QR identity" => {
+            app.modal = Modal::QrIdentity;
+        }
+        "open settings" => {
+            app.modal = Modal::Settings(SettingsState {
+                verified_only_inbound: app.handle.verified_only_inbound(),
+                blocked_peer_count: app.handle.list_blocked_peers().len(),
+                username: app.handle.display_name(),
+            });
+        }
+        "join with code" => {
+            app.set_status("select an encrypted room in the lobby first, then press c");
+        }
+        "generate invite link" | "generate invite for this room" => {
+            return Box::pin(handle_action(Action::GenerateInvite, app)).await;
+        }
+        "paste invite link" => {
+            app.modal = Modal::PasteInvite(PasteInviteState { url: String::new() });
+        }
+        "mark all rooms read" => {
+            return Box::pin(handle_action(Action::MarkAllRead, app)).await;
+        }
+        "refresh rooms" => {
+            app.refresh_discovered();
+            app.refresh_known_peers();
+            app.set_status("refreshed");
+        }
+        // === Global ===
+        "show help" => {
+            app.help_scroll = 0;
+            app.modal = Modal::Help;
+        }
+        "show what's new / onboarding" => {
+            let pages: Vec<usize> = (0..ONBOARDING_PAGES.len()).collect();
+            app.modal = Modal::Onboarding { pages, cursor: 0 };
+        }
+        "show notification history" => {
+            app.modal = Modal::StatusHistory { scroll: 0 };
+        }
+        "quit huddle" => {
+            app.modal = Modal::QuitConfirm;
+        }
+        // === Room-context ===
+        "switch to next room" => {
+            return Box::pin(handle_action(Action::TabNext, app)).await;
+        }
+        "leave current room" => {
+            return Box::pin(handle_action(Action::LeaveRoom, app)).await;
+        }
+        "back to lobby" => {
+            app.screen = Screen::Lobby;
+        }
+        "search room history" => {
+            return Box::pin(handle_action(Action::OpenSearch, app)).await;
+        }
+        "verify members" => {
+            return Box::pin(handle_action(Action::OpenVerify, app)).await;
+        }
+        "rotate room key" => {
+            return Box::pin(handle_action(Action::OpenRotateRoom, app)).await;
+        }
+        "attach a file" => {
+            return Box::pin(handle_action(Action::OpenAttachmentPicker, app)).await;
+        }
+        "toggle room mute" => {
+            return Box::pin(handle_action(Action::ToggleMute, app)).await;
+        }
+        "kick member" => {
+            return Box::pin(handle_action(Action::OpenKickPicker, app)).await;
+        }
+        "grant owner" => {
+            return Box::pin(handle_action(Action::OpenGrantPicker, app)).await;
+        }
+        "toggle verified-only joins" => {
+            return Box::pin(handle_action(Action::ToggleRoomVerifiedOnly, app)).await;
+        }
+        "generate join code" => {
+            return Box::pin(handle_action(Action::OpenGenerateJoinCode, app)).await;
+        }
+        "show room bans" => {
+            return Box::pin(handle_action(Action::ShowRoomBans, app)).await;
+        }
+        // === Extras ===
+        "toggle update check (crates.io)" => {
+            return Box::pin(handle_action(Action::ToggleUpdateCheck, app)).await;
+        }
+        "dismiss update banner" => {
+            return Box::pin(handle_action(Action::DismissUpdateBanner, app)).await;
+        }
+        "clear notification history" => {
+            return Box::pin(handle_action(Action::ClearStatusHistory, app)).await;
+        }
+        other => {
+            app.set_status(format!("no dispatch for '{}'", other));
+        }
+    }
+    Ok(false)
+}
+
+// =========================================================================
+// huddle 0.6: update detection (Tier 1 — passive banner, opt-in)
+// =========================================================================
+
+/// 24h between crates.io pings. The user opts in once; subsequent
+/// launches respect this cache so we don't hammer the API.
+const UPDATE_CHECK_INTERVAL_SECS: i64 = 24 * 60 * 60;
+
+/// Spawn a tokio task that — only if the cache is older than 24h —
+/// fetches crates.io's `huddle` crate metadata, extracts the
+/// `max_stable_version`, and writes it into the app's shared
+/// `update_check_slot` if it's newer than `CARGO_PKG_VERSION`. Safe
+/// to call multiple times; the cache check serializes work.
+pub fn spawn_update_check(app: &TuiApp) {
+    let handle = app.handle.clone();
+    let slot = app.update_check_slot.clone();
+    tokio::spawn(async move {
+        let result = tokio::task::spawn_blocking(move || run_update_check(&handle))
+            .await
+            .ok()
+            .flatten();
+        if let Some(v) = result {
+            if let Ok(mut s) = slot.lock() {
+                *s = Some(v);
+            }
+        }
+    });
+}
+
+fn run_update_check(handle: &huddle_core::app::AppHandle) -> Option<String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs() as i64;
+    let cached_at = handle.last_update_check_at();
+    let cached_version = handle.last_known_remote_version();
+    if now - cached_at < UPDATE_CHECK_INTERVAL_SECS {
+        // Fresh cache: just compare the stored value.
+        return cached_version.filter(|v| is_version_newer(v, env!("CARGO_PKG_VERSION")));
+    }
+    // Stale cache → fetch.
+    let body = ureq::get("https://crates.io/api/v1/crates/huddle")
+        .set("User-Agent", &format!("huddle/{}", env!("CARGO_PKG_VERSION")))
+        .timeout(std::time::Duration::from_secs(10))
+        .call()
+        .ok()?
+        .into_string()
+        .ok()?;
+    // Extract "max_stable_version":"X.Y.Z" by hand to avoid a
+    // serde_json dependency. Crates.io returns this field at the
+    // top of the JSON; substring-finding it is robust.
+    let version = parse_max_stable_version(&body)?;
+    let _ = handle.set_last_update_check_at(now);
+    let _ = handle.set_last_known_remote_version(&version);
+    if is_version_newer(&version, env!("CARGO_PKG_VERSION")) {
+        Some(version)
+    } else {
+        None
+    }
+}
+
+/// Extract `"max_stable_version":"X.Y.Z"` from a crates.io API body
+/// by substring match. Returns the value, or None if the field is
+/// absent / malformed.
+fn parse_max_stable_version(body: &str) -> Option<String> {
+    let needle = "\"max_stable_version\":\"";
+    let start = body.find(needle)? + needle.len();
+    let rest = &body[start..];
+    let end = rest.find('"')?;
+    let v = &rest[..end];
+    // Guard against accidentally matching an empty or non-numeric
+    // value.
+    if v.is_empty() || !v.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    Some(v.to_string())
+}
+
+/// Reuse the same semver-tuple compare from `parse_semver`. Returns
+/// true iff `remote > current`.
+fn is_version_newer(remote: &str, current: &str) -> bool {
+    parse_semver(remote) > parse_semver(current)
 }

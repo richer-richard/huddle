@@ -1,0 +1,460 @@
+// Single source of truth for every keybinding in huddle.
+//
+// `render_help` (modal.rs), the command palette (modal.rs), and the
+// adaptive hint bar all read this table — adding a new key here is the
+// only place you have to touch. Keep this in sync with `input.rs`.
+
+use crate::app::{LobbyFocus, Modal, Screen, TuiApp};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Context {
+    Lobby,
+    LobbyPeers,
+    LobbyRooms,
+    RoomChat,
+    RoomCardFocus,
+    RoomInputActive,
+    Global,
+}
+
+impl Context {
+    #[allow(dead_code)]
+    pub fn label(self) -> &'static str {
+        match self {
+            Context::Lobby => "Lobby",
+            Context::LobbyPeers => "Lobby (known peers)",
+            Context::LobbyRooms => "Lobby (rooms)",
+            Context::RoomChat => "In a room",
+            Context::RoomCardFocus => "Card focus",
+            Context::RoomInputActive => "Typing",
+            Context::Global => "Global",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Binding {
+    /// Key glyph as shown in help / hints. e.g. "?", "Ctrl+J", "Shift+B".
+    pub keys: &'static str,
+    pub context: Context,
+    pub description: &'static str,
+    /// Canonical action name surfaced in the command palette. None means
+    /// the key isn't reachable through the palette (e.g. typing modes).
+    pub palette_label: Option<&'static str>,
+}
+
+pub const BINDINGS: &[Binding] = &[
+    // Global
+    Binding {
+        keys: "Ctrl+C",
+        context: Context::Global,
+        description: "quit",
+        palette_label: Some("quit huddle"),
+    },
+    Binding {
+        keys: "?",
+        context: Context::Global,
+        description: "help (this screen)",
+        palette_label: Some("show help"),
+    },
+    Binding {
+        keys: "Shift+?",
+        context: Context::Global,
+        description: "re-open onboarding / what's new",
+        palette_label: Some("show what's new / onboarding"),
+    },
+    Binding {
+        keys: "Ctrl+H",
+        context: Context::Global,
+        description: "open notification history",
+        palette_label: Some("show notification history"),
+    },
+    Binding {
+        keys: "Ctrl+P",
+        context: Context::Global,
+        description: "command palette",
+        palette_label: None,
+    },
+    // Lobby
+    Binding {
+        keys: "s",
+        context: Context::Lobby,
+        description: "start a new room",
+        palette_label: Some("start a new room"),
+    },
+    Binding {
+        keys: "a",
+        context: Context::Lobby,
+        description: "add a friend by HD ID or username",
+        palette_label: Some("add friend by HD ID or username"),
+    },
+    Binding {
+        keys: "d",
+        context: Context::Lobby,
+        description: "dial a peer by IP:port or multiaddr",
+        palette_label: Some("dial peer by address"),
+    },
+    Binding {
+        keys: "i",
+        context: Context::Lobby,
+        description: "show your QR identity",
+        palette_label: Some("show your QR identity"),
+    },
+    Binding {
+        keys: ",",
+        context: Context::Lobby,
+        description: "open settings",
+        palette_label: Some("open settings"),
+    },
+    Binding {
+        keys: "c",
+        context: Context::Lobby,
+        description: "join encrypted room with a code",
+        palette_label: Some("join with code"),
+    },
+    Binding {
+        keys: "Shift+I",
+        context: Context::Lobby,
+        description: "generate an invite link",
+        palette_label: Some("generate invite link"),
+    },
+    Binding {
+        keys: "v",
+        context: Context::Lobby,
+        description: "paste an invite link",
+        palette_label: Some("paste invite link"),
+    },
+    Binding {
+        keys: "Tab",
+        context: Context::Lobby,
+        description: "switch focus (peers ↔ rooms)",
+        palette_label: None,
+    },
+    Binding {
+        keys: "j / k",
+        context: Context::Lobby,
+        description: "navigate the focused list",
+        palette_label: None,
+    },
+    Binding {
+        keys: "R",
+        context: Context::Lobby,
+        description: "mark every room read",
+        palette_label: Some("mark all rooms read"),
+    },
+    Binding {
+        keys: "q",
+        context: Context::Lobby,
+        description: "quit",
+        palette_label: None,
+    },
+    // Lobby (rooms focus)
+    Binding {
+        keys: "Enter",
+        context: Context::LobbyRooms,
+        description: "join the selected room",
+        palette_label: None,
+    },
+    Binding {
+        keys: "r",
+        context: Context::LobbyRooms,
+        description: "refresh discovered rooms",
+        palette_label: Some("refresh rooms"),
+    },
+    // Lobby (known-peers focus)
+    Binding {
+        keys: "Enter",
+        context: Context::LobbyPeers,
+        description: "reconnect to highlighted peer",
+        palette_label: None,
+    },
+    Binding {
+        keys: "r",
+        context: Context::LobbyPeers,
+        description: "retry connect",
+        palette_label: None,
+    },
+    Binding {
+        keys: "x",
+        context: Context::LobbyPeers,
+        description: "forget peer",
+        palette_label: None,
+    },
+    // In-room (chat mode)
+    Binding {
+        keys: "/",
+        context: Context::RoomChat,
+        description: "focus input (type)",
+        palette_label: None,
+    },
+    Binding {
+        keys: "Esc",
+        context: Context::RoomChat,
+        description: "back to lobby",
+        palette_label: None,
+    },
+    Binding {
+        keys: "Tab / Ctrl+N",
+        context: Context::RoomChat,
+        description: "next tab",
+        palette_label: Some("switch to next room"),
+    },
+    Binding {
+        keys: "Ctrl+P",
+        context: Context::RoomChat,
+        description: "command palette",
+        palette_label: None,
+    },
+    Binding {
+        keys: "1..9",
+        context: Context::RoomChat,
+        description: "jump to tab N",
+        palette_label: None,
+    },
+    Binding {
+        keys: "j / k / arrows",
+        context: Context::RoomChat,
+        description: "scroll messages",
+        palette_label: None,
+    },
+    Binding {
+        keys: "PgUp / PgDn",
+        context: Context::RoomChat,
+        description: "page through history",
+        palette_label: None,
+    },
+    Binding {
+        keys: "g / G",
+        context: Context::RoomChat,
+        description: "jump to top / bottom",
+        palette_label: None,
+    },
+    Binding {
+        keys: "Ctrl+L",
+        context: Context::RoomChat,
+        description: "leave the current room",
+        palette_label: Some("leave current room"),
+    },
+    Binding {
+        keys: "Ctrl+B",
+        context: Context::RoomChat,
+        description: "back to lobby (stay in room)",
+        palette_label: Some("back to lobby"),
+    },
+    Binding {
+        keys: "Ctrl+F",
+        context: Context::RoomChat,
+        description: "search this room's history",
+        palette_label: Some("search room history"),
+    },
+    Binding {
+        keys: "Ctrl+V",
+        context: Context::RoomChat,
+        description: "verify member fingerprints",
+        palette_label: Some("verify members"),
+    },
+    Binding {
+        keys: "Ctrl+R",
+        context: Context::RoomChat,
+        description: "rotate the room key (owner)",
+        palette_label: Some("rotate room key"),
+    },
+    Binding {
+        keys: "Ctrl+A",
+        context: Context::RoomChat,
+        description: "attach a file",
+        palette_label: Some("attach a file"),
+    },
+    Binding {
+        keys: "Ctrl+M",
+        context: Context::RoomChat,
+        description: "mute / unmute room notifications",
+        palette_label: Some("toggle room mute"),
+    },
+    Binding {
+        keys: "Ctrl+K",
+        context: Context::RoomChat,
+        description: "kick a member (owner)",
+        palette_label: Some("kick member"),
+    },
+    Binding {
+        keys: "Ctrl+G",
+        context: Context::RoomChat,
+        description: "grant owner to a member (owner)",
+        palette_label: Some("grant owner"),
+    },
+    Binding {
+        keys: "Ctrl+O",
+        context: Context::RoomChat,
+        description: "toggle verified-only joins (owner)",
+        palette_label: Some("toggle verified-only joins"),
+    },
+    Binding {
+        keys: "Ctrl+J",
+        context: Context::RoomChat,
+        description: "generate a 10-min single-use join code (owner)",
+        palette_label: Some("generate join code"),
+    },
+    Binding {
+        keys: "Ctrl+Shift+I",
+        context: Context::RoomChat,
+        description: "generate an invite link for this room",
+        palette_label: Some("generate invite for this room"),
+    },
+    Binding {
+        keys: "Shift+B",
+        context: Context::RoomChat,
+        description: "show room bans (owner)",
+        palette_label: Some("show room bans"),
+    },
+    Binding {
+        keys: "f",
+        context: Context::RoomChat,
+        description: "focus file cards (when present)",
+        palette_label: None,
+    },
+    Binding {
+        keys: "q",
+        context: Context::RoomChat,
+        description: "quit huddle",
+        palette_label: None,
+    },
+    // Card-focus mode
+    Binding {
+        keys: "j / k",
+        context: Context::RoomCardFocus,
+        description: "select next / previous card",
+        palette_label: None,
+    },
+    Binding {
+        keys: "Enter",
+        context: Context::RoomCardFocus,
+        description: "save the focused card",
+        palette_label: None,
+    },
+    Binding {
+        keys: "o",
+        context: Context::RoomCardFocus,
+        description: "open the saved file",
+        palette_label: None,
+    },
+    Binding {
+        keys: "c",
+        context: Context::RoomCardFocus,
+        description: "cancel the transfer",
+        palette_label: None,
+    },
+    Binding {
+        keys: "s",
+        context: Context::RoomCardFocus,
+        description: "save again (to a new path)",
+        palette_label: None,
+    },
+    Binding {
+        keys: "Esc / f",
+        context: Context::RoomCardFocus,
+        description: "exit card focus",
+        palette_label: None,
+    },
+    // Input-active mode
+    Binding {
+        keys: "Enter",
+        context: Context::RoomInputActive,
+        description: "send the message",
+        palette_label: None,
+    },
+    Binding {
+        keys: "Alt+Enter / Ctrl+J",
+        context: Context::RoomInputActive,
+        description: "insert a newline (multi-line message)",
+        palette_label: None,
+    },
+    Binding {
+        keys: "Esc",
+        context: Context::RoomInputActive,
+        description: "blur the input (back to nav mode)",
+        palette_label: None,
+    },
+    Binding {
+        keys: "PgUp / PgDn",
+        context: Context::RoomInputActive,
+        description: "scroll messages while typing",
+        palette_label: None,
+    },
+];
+
+/// Bindings filtered by `context`. Used by `render_help` for section
+/// headers and by the adaptive hint bar.
+#[allow(dead_code)]
+pub fn for_context(ctx: Context) -> impl Iterator<Item = &'static Binding> {
+    BINDINGS.iter().filter(move |b| b.context == ctx)
+}
+
+/// Command palette entries — every binding that exposes a `palette_label`.
+pub fn palette_entries() -> impl Iterator<Item = (&'static str, &'static str)> {
+    BINDINGS.iter().filter_map(|b| {
+        b.palette_label.map(|label| (label, b.keys))
+    })
+}
+
+/// Adaptive hint bar items for the current app state. Roughly 5-6 items,
+/// prioritized by likelihood of being the next action the user wants.
+pub fn adaptive_hints(app: &TuiApp) -> Vec<(&'static str, &'static str)> {
+    let mut out: Vec<(&'static str, &'static str)> = Vec::new();
+    // Only render hints when no modal is open — otherwise the modal
+    // hint bar is the relevant thing.
+    if !matches!(app.modal, Modal::None) {
+        return out;
+    }
+    match app.screen {
+        Screen::Lobby => {
+            // Highest-priority lobby actions depend on whether the user
+            // has any peers / rooms yet.
+            if app.known_peers.is_empty() && app.discovered_rooms.is_empty() {
+                out.push(("a", "add friend"));
+                out.push(("s", "start room"));
+                out.push(("v", "paste invite"));
+            } else if app.lobby_focus == LobbyFocus::KnownPeers && !app.known_peers.is_empty() {
+                out.push(("Enter", "reconnect"));
+                out.push(("r", "retry"));
+                out.push(("x", "forget"));
+                out.push(("s", "start room"));
+            } else if !app.discovered_rooms.is_empty() {
+                out.push(("Enter", "join"));
+                out.push(("s", "start room"));
+                out.push(("a", "add friend"));
+                out.push(("c", "join with code"));
+            }
+            out.push(("Tab", "switch focus"));
+            out.push(("?", "help"));
+            out.push(("Ctrl+P", "palette"));
+            out.push(("q", "quit"));
+        }
+        Screen::InRoom => {
+            let r = app.active_room();
+            let input_active = r.map(|r| r.input_active).unwrap_or(false);
+            let card_focus = r.map(|r| r.card_focus).unwrap_or(false);
+            if card_focus {
+                out.push(("j/k", "navigate"));
+                out.push(("Enter", "save"));
+                out.push(("o", "open"));
+                out.push(("Esc/f", "exit"));
+            } else if input_active {
+                out.push(("Enter", "send"));
+                out.push(("Alt+↵", "newline"));
+                out.push(("Esc", "blur"));
+                out.push(("PgUp", "scroll"));
+                out.push(("Ctrl+P", "palette"));
+            } else {
+                out.push(("/", "type"));
+                out.push(("Tab", "next tab"));
+                out.push(("Ctrl+F", "search"));
+                out.push(("Ctrl+V", "verify"));
+                out.push(("Ctrl+L", "leave"));
+                out.push(("Ctrl+B", "lobby"));
+                out.push(("?", "help"));
+            }
+        }
+    }
+    out
+}

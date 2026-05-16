@@ -2,6 +2,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Padding, Paragraph, Tabs, Wrap};
 
 use crate::app::TuiApp;
+use crate::keybindings;
 use crate::ui::file_card;
 use crate::ui::short_fp;
 
@@ -58,10 +59,15 @@ fn render_tabs(f: &mut Frame, area: Rect, app: &TuiApp) {
         .map(|(i, r)| {
             let prefix = format!("[{}] ", i + 1);
             let lock = if r.encrypted { " E" } else { "" };
-            let unread = if r.unread && i != app.active_tab {
-                "*"
+            // huddle 0.6: render the unread count instead of a bare
+            // '*'. Active tab always shows nothing (it's the one in
+            // focus).
+            let unread_str: String = if i == app.active_tab || r.unread == 0 {
+                String::new()
+            } else if r.unread > 99 {
+                " (99+)".to_string()
             } else {
-                ""
+                format!(" ({})", r.unread)
             };
             let muted = if app.handle.is_room_muted(&r.room_id) {
                 " (muted)"
@@ -77,7 +83,7 @@ fn render_tabs(f: &mut Frame, area: Rect, app: &TuiApp) {
                 Span::styled(prefix, Style::default().fg(Color::DarkGray)),
                 Span::raw(r.name.clone()),
                 Span::styled(lock, Style::default().fg(Color::Magenta)),
-                Span::styled(unread, Style::default().fg(Color::Yellow)),
+                Span::styled(unread_str, Style::default().fg(Color::Yellow).bold()),
                 Span::styled(muted, Style::default().fg(Color::DarkGray)),
                 Span::styled(read_only, Style::default().fg(Color::DarkGray)),
             ])
@@ -245,7 +251,24 @@ fn render_messages(f: &mut Frame, area: Rect, app: &TuiApp) {
     timeline.sort_by_key(|(ts, _)| *ts);
 
     let mut lines: Vec<Line> = Vec::new();
-    for (_, row) in timeline {
+    // huddle 0.6: day separators — when the date rolls between two
+    // consecutive rows, render a dim "─── YYYY-MM-DD ───" divider.
+    let mut prev_day: Option<i64> = None;
+    for (ts, row) in timeline {
+        let day = ts / 86_400;
+        if prev_day.map(|p| p != day).unwrap_or(true) {
+            // Skip the very first separator only if the buffer is
+            // empty — otherwise users see a divider sandwich between
+            // gaps, which is helpful context.
+            if prev_day.is_some() || !lines.is_empty() {
+                lines.push(separator_line(ts, inner_w));
+            } else {
+                // First message: render a single date label so the
+                // user knows when the conversation started.
+                lines.push(separator_line(ts, inner_w));
+            }
+            prev_day = Some(day);
+        }
         match row {
             Row::Text(m) => {
                 let is_me = m.sender_fingerprint == me || m.direction == "out";
@@ -317,7 +340,7 @@ fn render_messages(f: &mut Frame, area: Rect, app: &TuiApp) {
 
     if lines.is_empty() {
         lines.push(Line::from(Span::styled(
-            "  no messages yet — say hi!",
+            "  no messages yet — say hi! press / to type.",
             Style::default().fg(Color::DarkGray),
         )));
     }
@@ -336,15 +359,53 @@ fn render_messages(f: &mut Frame, area: Rect, app: &TuiApp) {
         r.scroll.min(max_scroll)
     };
 
+    // huddle 0.6: scroll position indicator embedded in the title bar
+    // so the user can see "I'm at 42/210" without guessing whether
+    // PageUp would do anything.
+    let title = if max_scroll == 0 {
+        " ".to_string()
+    } else if r.follow_mode {
+        format!(" {}/{}  · live ", total.saturating_sub(1), total)
+    } else {
+        let current_line = scroll_y + visible_h.min(total);
+        format!(
+            " {}/{}  · ↑ {} above  · g/G top/bottom ",
+            current_line.min(total),
+            total,
+            scroll_y
+        )
+    };
+
     let widget = Paragraph::new(lines)
         .block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::DarkGray))
-                .padding(Padding::horizontal(1)),
+                .padding(Padding::horizontal(1))
+                .title_bottom(Line::from(Span::styled(
+                    title,
+                    Style::default().fg(Color::DarkGray),
+                ))),
         )
         .scroll((scroll_y, 0));
     f.render_widget(widget, area);
+}
+
+/// huddle 0.6: a dim horizontal separator showing the calendar date
+/// of the messages immediately following. `inner_w` is the width
+/// inside the borders so we can size the dashes.
+fn separator_line(unix_secs: i64, inner_w: usize) -> Line<'static> {
+    let date = format_ymd(unix_secs);
+    let label = format!(" {} ", date);
+    let total = inner_w.saturating_sub(2); // 2 for the leading spaces below
+    let side = total.saturating_sub(label.chars().count()) / 2;
+    let dashes = "─".repeat(side.max(3));
+    Line::from(vec![
+        Span::raw("  "),
+        Span::styled(dashes.clone(), Style::default().fg(Color::DarkGray)),
+        Span::styled(label, Style::default().fg(Color::DarkGray)),
+        Span::styled(dashes, Style::default().fg(Color::DarkGray)),
+    ])
 }
 
 /// Split `body` into chunks no wider than `width` chars. Honors explicit
@@ -384,7 +445,7 @@ fn render_input(f: &mut Frame, area: Rect, app: &TuiApp) {
 
     let lines: Vec<Line> = if !r.input_active {
         vec![Line::from(Span::styled(
-            "press / to type   ·   Alt+Enter or ^J for newline",
+            "press / to type   ·   Alt+Enter or ^J for newline   ·   : for command palette",
             Style::default().fg(Color::DarkGray),
         ))]
     } else {
@@ -425,40 +486,30 @@ fn render_input(f: &mut Frame, area: Rect, app: &TuiApp) {
 }
 
 fn render_hints(f: &mut Frame, area: Rect, app: &TuiApp) {
-    let card_focus = app.active_room().map(|r| r.card_focus).unwrap_or(false);
-    let hints = if card_focus {
-        Line::from(vec![
-            Span::styled("  card mode  ", Style::default().fg(Color::Cyan).bold()),
-            Span::styled("j/k", Style::default().fg(Color::Yellow)),
-            Span::styled(" next/prev   ", Style::default().fg(Color::DarkGray)),
-            Span::styled("Enter", Style::default().fg(Color::Yellow)),
-            Span::styled(" save   ", Style::default().fg(Color::DarkGray)),
-            Span::styled("o", Style::default().fg(Color::Yellow)),
-            Span::styled(" open   ", Style::default().fg(Color::DarkGray)),
-            Span::styled("c", Style::default().fg(Color::Yellow)),
-            Span::styled(" cancel   ", Style::default().fg(Color::DarkGray)),
-            Span::styled("Esc/f", Style::default().fg(Color::Yellow)),
-            Span::styled(" exit", Style::default().fg(Color::DarkGray)),
-        ])
-    } else {
-        Line::from(vec![
-            Span::styled("  ^Tab", Style::default().fg(Color::Yellow)),
-            Span::styled(" next tab  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("/", Style::default().fg(Color::Yellow)),
-            Span::styled(" type  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("f", Style::default().fg(Color::Yellow)),
-            Span::styled(" files  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("^A", Style::default().fg(Color::Yellow)),
-            Span::styled(" attach  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("^L", Style::default().fg(Color::Yellow)),
-            Span::styled(" leave  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("^B", Style::default().fg(Color::Yellow)),
-            Span::styled(" lobby  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("?", Style::default().fg(Color::Yellow)),
-            Span::styled(" help", Style::default().fg(Color::DarkGray)),
-        ])
-    };
-    let para = Paragraph::new(hints).block(
+    // huddle 0.6: adaptive hint bar (see lobby.rs equivalent).
+    let mut spans: Vec<Span> = vec![Span::raw("  ")];
+    for (i, (key, label)) in keybindings::adaptive_hints(app).into_iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled("   ", Style::default()));
+        }
+        spans.push(Span::styled(
+            format!("[{}]", key),
+            Style::default().fg(Color::Yellow),
+        ));
+        spans.push(Span::styled(
+            format!(" {}", label),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    // Pending-modal indicator embedded in the hint bar — visible from
+    // inside a room too, not just from the lobby.
+    if app.pending_count() > 0 {
+        spans.push(Span::styled(
+            format!("   [{} pending]", app.pending_count()),
+            Style::default().fg(Color::Yellow).bold(),
+        ));
+    }
+    let para = Paragraph::new(Line::from(spans)).block(
         Block::default()
             .borders(Borders::TOP)
             .border_style(Style::default().fg(Color::DarkGray)),
@@ -472,4 +523,24 @@ fn format_time(unix_secs: i64) -> String {
     let hh = (secs_today / 3600) % 24;
     let mm = (secs_today / 60) % 60;
     format!("{:02}:{:02}", hh, mm)
+}
+
+/// huddle 0.6: format a unix timestamp as YYYY-MM-DD using
+/// a tiny Julian-day calculation — avoids a chrono dep while
+/// remaining correct for the Gregorian calendar (any date after
+/// 1970).
+fn format_ymd(unix_secs: i64) -> String {
+    let days = unix_secs.div_euclid(86_400);
+    // 1970-01-01 = Julian Day 2440588.
+    let jdn = days + 2440588;
+    // Algorithm from Hatcher (1985), as documented in the Wikipedia
+    // Julian-day-number article.
+    let f = jdn + 1401 + ((((4 * jdn) + 274_277) / 146_097) * 3) / 4 - 38;
+    let e = 4 * f + 3;
+    let g = (e.rem_euclid(1461)) / 4;
+    let h = 5 * g + 2;
+    let day = (h.rem_euclid(153)) / 5 + 1;
+    let month = (h / 153 + 2).rem_euclid(12) + 1;
+    let year = e.div_euclid(1461) - 4716 + (12 + 2 - month) / 12;
+    format!("{:04}-{:02}-{:02}", year, month, day)
 }
