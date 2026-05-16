@@ -58,10 +58,11 @@ pub const ONBOARDING_PAGES: &[(&str, &[&str])] = &[
     (
         "what's new in 0.5",
         &[
-            "  a    add friend by HD ID or username (lobby)",
-            "  ,→u  set / clear your username (broadcast signed)",
+            "  a    add friend by HD ID or username — races LAN / IP / relay",
+            "  ,→u  set / clear your username (signed broadcast)",
             "  ,→!  delete account + wipe data dir (go dark)",
             "  ✓    green tag next to SAS-verified peers in chat",
+            "  HD-  branded ID, shown alongside username everywhere",
             "",
             "still around from 0.3 / 0.4:",
             "  ^K   kick a member (signed ban + key rotation)",
@@ -2527,7 +2528,11 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             app.modal = Modal::None;
             match app.handle.dial_by_id_or_username(input.trim()).await {
                 Ok(()) => {
-                    app.set_status(format!("dialing {}…", input.trim()));
+                    // libp2p races every known address (LAN > public IP
+                    // > relay-circuit). The status line says "dialing"
+                    // generically — actual transport surfaces in the
+                    // ListeningOn / connected-peer events afterwards.
+                    app.set_status(format!("dialing {} (racing LAN / IP / relay)…", input.trim()));
                 }
                 Err(e) => {
                     app.modal = Modal::Error(format!("add friend: {e}"));

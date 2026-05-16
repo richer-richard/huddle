@@ -89,6 +89,7 @@ cargo build --release
 | Key                | Action                                  |
 |--------------------|-----------------------------------------|
 | `s`                | Start a new room                        |
+| `a`                | Add friend by HD ID or username (races LAN / IP / relay) |
 | `d`                | Dial a peer by multiaddr or `ip:port`   |
 | `i`                | Show your identity as a QR code         |
 | `I` (Shift+I)      | Generate an invite link (peer-only)     |
@@ -147,6 +148,33 @@ clear the field (empty input), you broadcast as `[anonymous]`.
 In chat, your message label shows the username (or `[anonymous]`).
 SAS-verified peers also get a green `✓` next to their name in chat,
 matching the existing badge in the room member list.
+
+## Add friend by HD ID or username (huddle 0.5.1+)
+
+Lobby `a` opens an add-friend modal that takes either:
+
+- an `HD-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX` ID (or the bare 24-hex form
+  with/without dashes — normalized internally),
+- or a username string (unique-match lookup in `peer_profiles`).
+
+Resolution: huddle looks the fingerprint up across recent room
+announcements (`creator_fingerprint` + `host_addrs`) and the persisted
+`known_peers` table. Every candidate multiaddr is then handed to libp2p
+as a single `DialOpts::peer_id().addresses()` call — the swarm **races
+them in parallel** (huddle 0.5.2+) and the first to complete wins. The
+client also pre-sorts by transport preference (RFC1918 LAN ip4 →
+loopback → public ip4 → ip6 / dns → `/p2p-circuit`) so when latencies
+are close the LAN slot starts first. mDNS-discovered peers don't need
+this path at all — they show up in the lobby automatically.
+
+The privacy trade-off worth knowing about: this works only for peers
+you've **already seen on a shared gossipsub mesh** — same LAN, a relay
+you both connect to, or a prior dial. There's deliberately no central
+"add by ID" directory; cold-start strangers must pass an invite link
+out-of-band first. Adding a directory (DHT, rendezvous server, central
+service) would either centralize the architecture or leak lookup
+metadata to bootstrap nodes — both fail the "trusted relay, absolute
+privacy" goal huddle's built around.
 
 ## SAS verification
 

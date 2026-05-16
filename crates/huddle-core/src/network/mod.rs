@@ -61,6 +61,14 @@ pub enum NetworkCommand {
     /// User-initiated dial of an explicit address. Used for cross-network
     /// reach when mDNS isn't enough.
     Dial { address: Multiaddr },
+    /// huddle 0.5.2: dial a peer using multiple candidate addresses,
+    /// letting libp2p race them in parallel. Used by the "add by HD
+    /// ID / username" flow, which resolves a fingerprint to every
+    /// address we know for that peer (room announcement `host_addrs`
+    /// + persisted `known_peers`). libp2p's parallel dialer picks
+    /// the cheapest path that completes — LAN beats public IP beats
+    /// relay-hopped without us having to probe transports manually.
+    DialAddresses { addresses: Vec<Multiaddr> },
     /// Phase A: user accepted an inbound dial — promote the peer to
     /// explicit-peer status so room announcements flow.
     AcceptInbound { peer_id: PeerId },
@@ -112,6 +120,18 @@ impl NetworkHandle {
 
     pub async fn dial(&self, address: Multiaddr) {
         let _ = self.cmd_tx.send(NetworkCommand::Dial { address }).await;
+    }
+
+    /// huddle 0.5.2: dial a peer with multiple candidate addresses
+    /// at once. libp2p's swarm races them; the first to complete a
+    /// handshake wins, the rest are dropped. Use when you've resolved
+    /// a peer fingerprint to several known transports — typically
+    /// LAN ip4 + public ip4 + relay circuit.
+    pub async fn dial_addresses(&self, addresses: Vec<Multiaddr>) {
+        let _ = self
+            .cmd_tx
+            .send(NetworkCommand::DialAddresses { addresses })
+            .await;
     }
 
     pub async fn accept_inbound(&self, peer_id: PeerId) {
@@ -729,6 +749,55 @@ impl NetworkTask {
                             let _ = tx
                                 .send(NetworkEvent::DialFailed {
                                     address,
+                                    error: err,
+                                })
+                                .await;
+                        });
+                    }
+                }
+            }
+            NetworkCommand::DialAddresses { addresses } => {
+                use libp2p::multiaddr::Protocol;
+                if addresses.is_empty() {
+                    return;
+                }
+                // Extract the shared peer-id from any address with a
+                // `/p2p/<peer-id>` suffix. All host_addrs originating
+                // from the same `RoomAnnouncement` share the
+                // announcer's peer-id, so the first match is enough.
+                let peer_id = addresses
+                    .iter()
+                    .flat_map(|a| a.iter())
+                    .find_map(|p| match p {
+                        Protocol::P2p(pid) => Some(pid),
+                        _ => None,
+                    });
+                let opts = match peer_id {
+                    Some(pid) => DialOpts::peer_id(pid)
+                        .addresses(addresses.clone())
+                        .build(),
+                    // No /p2p/ segment anywhere — fall back to single-
+                    // address dial of the first candidate, matching the
+                    // legacy `Dial` semantics for unanchored multiaddrs.
+                    None => addresses[0].clone().into(),
+                };
+                let conn_id = opts.connection_id();
+                // Use the first address as the representative for
+                // dial_attempts. On synchronous error we report it;
+                // on async success the post-identify handler upserts
+                // with the actually-connected endpoint.
+                let primary = addresses[0].clone();
+                match self.swarm.dial(opts) {
+                    Ok(()) => {
+                        self.dial_attempts.insert(conn_id, primary);
+                    }
+                    Err(e) => {
+                        let tx = self.event_tx.clone();
+                        let err = e.to_string();
+                        tokio::spawn(async move {
+                            let _ = tx
+                                .send(NetworkEvent::DialFailed {
+                                    address: primary,
                                     error: err,
                                 })
                                 .await;

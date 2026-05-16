@@ -288,6 +288,36 @@ move `~/Library/Application Support/huddle` (macOS) / `~/.local/share/huddle`
       fingerprint is generated, no memory of previous rooms /
       peers / messages.
 
+## 22. Add friend by HD ID or username (huddle 0.5.1+, racing in 0.5.2+)
+
+- [ ] On A and B (same LAN), launch huddle. Each waits in the lobby
+      until mDNS discovers the other — A's HD ID appears in B's
+      "known peers" panel.
+- [ ] On A press `a`, paste B's HD ID exactly as B sees it in their
+      lobby header (`HD-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX`). Enter.
+- [ ] A's status line shows
+      "dialing HD-XXXX-… (racing LAN / IP / relay)…".
+- [ ] B sees an inbound-dial prompt (or auto-connects if previously
+      trusted). The connection uses the LAN ip4 path, not a relay.
+- [ ] On A press `a` again, this time type B's username (the one B
+      set via Settings → `u`). Enter. Same outcome.
+- [ ] Try a random HD ID neither of you has seen
+      (`HD-0000-0000-0000-0000-0000-0000`): the modal closes and
+      an Error appears: "haven't seen `HD-0000…` on the network
+      yet — ask them for an invite link". This is the privacy-
+      preserving floor: no central directory.
+- [ ] Cross-network drill: A and B on different networks, both with
+      a working relay in `config.toml`. A's `host_addrs` will
+      include both a public-ish ip4 + a `/p2p-circuit` address.
+      Repeat the add-friend by HD ID on the other side; libp2p
+      races them, the relay path typically wins (direct IP from
+      NATs usually fails), DCUtR may later upgrade to direct.
+- [ ] Username collisions: have two peers both set the same
+      username and announce. On the third peer, typing that
+      username into add-friend should produce
+      "username `X` is ambiguous (2 peers share it) — use their
+      HD- ID instead".
+
 ## Troubleshooting
 
 - **Peers don't discover** — same-subnet? Some Wi-Fi networks have AP

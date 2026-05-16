@@ -814,34 +814,83 @@ impl AppHandle {
         if target_fp == self.identity.fingerprint() {
             return Err(HuddleError::Other("that's your own ID".into()));
         }
-        let addr = self.resolve_dial_addr(&target_fp).ok_or_else(|| {
-            HuddleError::Other(format!(
+        let candidates = self.resolve_dial_addrs(&target_fp);
+        if candidates.is_empty() {
+            return Err(HuddleError::Other(format!(
                 "haven't seen `{}` on the network yet — ask them for an invite link",
                 short_fp_for_msg(&target_fp)
-            ))
-        })?;
-        self.dial(&addr).await
+            )));
+        }
+        // Pre-record every candidate so the lobby's known-peers panel
+        // surfaces them even before the post-identify handler lands.
+        // We bind each address to the resolved fingerprint so the
+        // post-identify trust upgrade has the same fp to confirm.
+        let now = now_unix();
+        for addr in &candidates {
+            let _ = repo::upsert_known_peer(
+                &self.db,
+                &KnownPeer {
+                    address: addr.clone(),
+                    label: None,
+                    last_connected_at: None,
+                    last_attempt_at: Some(now),
+                    created_at: now,
+                    fingerprint: Some(target_fp.clone()),
+                    trusted: false,
+                },
+            );
+        }
+        // Parse to Multiaddrs, drop any that don't lex. Empty after
+        // parsing would mean every candidate is malformed — unlikely
+        // but defended-against.
+        let multiaddrs: Vec<Multiaddr> = candidates
+            .iter()
+            .filter_map(|s| s.parse::<Multiaddr>().ok())
+            .collect();
+        if multiaddrs.is_empty() {
+            return Err(HuddleError::Other(
+                "every known address for that peer is malformed".into(),
+            ));
+        }
+        let _ = self.app_event_tx.send(AppEvent::Dialing {
+            address: candidates[0].clone(),
+        });
+        info!(
+            target_fp = %target_fp,
+            n = multiaddrs.len(),
+            "dialing peer with {} candidate addresses",
+            multiaddrs.len()
+        );
+        self.network.dial_addresses(multiaddrs).await;
+        Ok(())
     }
 
-    /// Look up a dialable multiaddr for a fingerprint we've encountered.
-    /// Tries fresh room announcements first (their `host_addrs` are
-    /// AutoNAT-confirmed + recently-rebroadcast), then the persisted
-    /// `known_peers` table for prior dials.
-    fn resolve_dial_addr(&self, fingerprint: &str) -> Option<String> {
+    /// huddle 0.5.2: every dialable multiaddr we know for `fingerprint`,
+    /// sorted by transport preference so libp2p's parallel dialer races
+    /// the cheapest paths first. Order: RFC1918 LAN ip4 → loopback (for
+    /// tests) → public ip4 → ip6 / dns → relay-hopped (`/p2p-circuit`)
+    /// last. libp2p races them concurrently anyway — sorting just
+    /// gives the first-attempted slot to the address most likely to
+    /// win on a tie.
+    fn resolve_dial_addrs(&self, fingerprint: &str) -> Vec<String> {
+        let mut set: std::collections::HashSet<String> = std::collections::HashSet::new();
         for room in self.discovered_rooms.lock().unwrap().values() {
             if room.creator_fingerprint == fingerprint {
-                if let Some(addr) = room.host_addrs.first() {
-                    return Some(addr.clone());
+                for addr in &room.host_addrs {
+                    set.insert(addr.clone());
                 }
             }
         }
-        let known = repo::list_known_peers(&self.db).ok()?;
-        for peer in known {
-            if peer.fingerprint.as_deref() == Some(fingerprint) {
-                return Some(peer.address);
+        if let Ok(known) = repo::list_known_peers(&self.db) {
+            for peer in known {
+                if peer.fingerprint.as_deref() == Some(fingerprint) {
+                    set.insert(peer.address);
+                }
             }
         }
-        None
+        let mut v: Vec<String> = set.into_iter().collect();
+        v.sort_by_key(|a| address_preference(a));
+        v
     }
 
     pub async fn dial(&self, input: &str) -> Result<()> {
@@ -3610,6 +3659,48 @@ fn normalize_to_fingerprint(input: &str) -> Option<String> {
     Some(chunks.join("-"))
 }
 
+/// huddle 0.5.2: rank a multiaddr by transport preference. Lower =
+/// better. Used to sort candidate addresses for the parallel dialer so
+/// LAN connections get a head-start over relay-hopped ones when wall-
+/// times are close. The numeric values are arbitrary; only the
+/// ordering matters.
+fn address_preference(addr: &str) -> u8 {
+    if addr.contains("/p2p-circuit") {
+        return 9; // relay-hopped — bottom of the list
+    }
+    if let Some(rest) = addr.strip_prefix("/ip4/") {
+        if let Some(ip_str) = rest.split('/').next() {
+            if let Ok(ip) = ip_str.parse::<std::net::Ipv4Addr>() {
+                if ip.is_loopback() {
+                    return 1; // useful for tests
+                }
+                if is_rfc1918(&ip) || ip.is_link_local() {
+                    return 0; // LAN — wins ties
+                }
+                return 3; // public ipv4
+            }
+        }
+        return 3;
+    }
+    if addr.starts_with("/ip6/") {
+        return 4;
+    }
+    if addr.starts_with("/dns4/") || addr.starts_with("/dns6/") || addr.starts_with("/dnsaddr/") {
+        return 5;
+    }
+    7
+}
+
+/// True for IPv4 addresses in private (RFC 1918) ranges — 10/8,
+/// 172.16/12, 192.168/16. Used by `address_preference` to score LAN
+/// dials ahead of public-IP and relay-hopped ones.
+fn is_rfc1918(ip: &std::net::Ipv4Addr) -> bool {
+    let octets = ip.octets();
+    octets[0] == 10
+        || (octets[0] == 172 && (16..=31).contains(&octets[1]))
+        || (octets[0] == 192 && octets[1] == 168)
+}
+
 /// Short label for an HD ID, used only in error messages — strips the
 /// fingerprint down to its first four hex chars with the brand prefix
 /// so the message reads naturally.
@@ -3769,5 +3860,59 @@ mod parser_tests {
     #[test]
     fn rejects_bad_port() {
         assert!(parse_dial_address("1.2.3.4:notaport").is_err());
+    }
+}
+
+#[cfg(test)]
+mod transport_preference_tests {
+    use super::{address_preference, normalize_to_fingerprint};
+
+    #[test]
+    fn lan_beats_public_beats_circuit() {
+        let lan = address_preference("/ip4/192.168.1.5/tcp/9027");
+        let pub_v4 = address_preference("/ip4/8.8.8.8/tcp/9027");
+        let circuit = address_preference(
+            "/ip4/1.2.3.4/tcp/4001/p2p/12D3Koo/p2p-circuit/p2p/12D3KooXYZ",
+        );
+        assert!(lan < pub_v4, "LAN {} should beat public {}", lan, pub_v4);
+        assert!(
+            pub_v4 < circuit,
+            "public {} should beat circuit {}",
+            pub_v4,
+            circuit
+        );
+    }
+
+    #[test]
+    fn all_rfc1918_ranges_are_lan() {
+        assert_eq!(
+            address_preference("/ip4/10.0.0.1/tcp/9027"),
+            address_preference("/ip4/192.168.0.1/tcp/9027"),
+        );
+        assert_eq!(
+            address_preference("/ip4/172.16.0.1/tcp/9027"),
+            address_preference("/ip4/192.168.0.1/tcp/9027"),
+        );
+        // 172.32.x.x is OUTSIDE the 172.16-31 RFC1918 slice.
+        assert!(
+            address_preference("/ip4/172.32.0.1/tcp/9027")
+                > address_preference("/ip4/172.16.0.1/tcp/9027")
+        );
+    }
+
+    #[test]
+    fn normalize_id_accepts_branded_and_raw() {
+        let canon = "aaaa-bbbb-cccc-dddd-eeee-ffff";
+        assert_eq!(
+            normalize_to_fingerprint("HD-AAAA-BBBB-CCCC-DDDD-EEEE-FFFF").as_deref(),
+            Some(canon)
+        );
+        assert_eq!(
+            normalize_to_fingerprint("aaaabbbbccccddddeeeeffff").as_deref(),
+            Some(canon)
+        );
+        assert_eq!(normalize_to_fingerprint(canon).as_deref(), Some(canon));
+        assert!(normalize_to_fingerprint("alice").is_none());
+        assert!(normalize_to_fingerprint("HD-ZZZZ").is_none());
     }
 }
