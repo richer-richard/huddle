@@ -1155,6 +1155,62 @@ pub fn render_go_dark(f: &mut Frame, s: &crate::app::GoDarkState) {
     f.render_widget(para, area);
 }
 
+pub fn render_add_friend(f: &mut Frame, s: &crate::app::AddFriendState) {
+    let area = centered_rect(64, 14, f.area());
+    f.render_widget(Clear, area);
+    let displayed = if s.input.is_empty() {
+        Span::styled(
+            "HD-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX   or   alice",
+            Style::default().fg(Color::DarkGray),
+        )
+    } else {
+        Span::styled(
+            s.input.clone(),
+            Style::default().fg(Color::White).bold(),
+        )
+    };
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "  enter a friend's HD ID or username.",
+            Style::default().fg(Color::White),
+        )),
+        Line::from(Span::styled(
+            "  works for peers seen on the mesh; for cold start,",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(Span::styled(
+            "  paste an invite link with v instead.",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  > ", Style::default().fg(Color::Cyan).bold()),
+            displayed,
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" Enter", Style::default().fg(Color::Yellow)),
+            Span::styled(" dial  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Esc", Style::default().fg(Color::Yellow)),
+            Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
+        ]),
+    ];
+    let para = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan))
+                .padding(Padding::uniform(1))
+                .title(Span::styled(
+                    " add friend ",
+                    Style::default().fg(Color::Cyan).bold(),
+                )),
+        );
+    f.render_widget(para, area);
+}
+
 pub fn render_edit_username(f: &mut Frame, s: &crate::app::EditUsernameState) {
     let area = centered_rect(60, 10, f.area());
     f.render_widget(Clear, area);

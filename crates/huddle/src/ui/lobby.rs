@@ -378,6 +378,8 @@ fn render_hints(f: &mut Frame, area: Rect, app: &TuiApp) {
     let mut spans = vec![
         Span::styled("  [s]", Style::default().fg(Color::Yellow)),
         Span::styled(" start    ", Style::default().fg(Color::DarkGray)),
+        Span::styled("[a]", Style::default().fg(Color::Yellow)),
+        Span::styled(" add    ", Style::default().fg(Color::DarkGray)),
         Span::styled("[d]", Style::default().fg(Color::Yellow)),
         Span::styled(" dial    ", Style::default().fg(Color::DarkGray)),
         Span::styled("[Tab]", Style::default().fg(Color::Yellow)),

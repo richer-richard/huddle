@@ -320,6 +320,7 @@ impl AppHandle {
                 creator_fingerprint: room.info.creator_fingerprint.clone(),
                 last_seen: now,
                 restorable: false,
+                host_addrs: Vec::new(),
             };
             by_id
                 .entry(room.info.id.clone())
@@ -350,6 +351,7 @@ impl AppHandle {
                     creator_fingerprint: stored.creator_fingerprint.clone(),
                     last_seen: stored.last_active.unwrap_or(stored.created_at),
                     restorable: true,
+                    host_addrs: Vec::new(),
                 },
             );
         }
@@ -767,6 +769,81 @@ impl AppHandle {
     /// - `1.2.3.4:9000`
     /// - `[fe80::1]:9000`
     /// - `/ip4/.../tcp/...[/p2p/<peer>]` (raw multiaddr)
+    /// huddle 0.5.1: resolve an HD- ID or username back to a dialable
+    /// multiaddr and dial it.
+    ///
+    /// `input` is matched against, in order:
+    /// 1. an `HD-XXXX-...` prefixed string → strip prefix + lowercase to
+    ///    canonical fingerprint;
+    /// 2. a raw 24-char hex run (with or without dashes) → group into
+    ///    4-char blocks and lowercase;
+    /// 3. otherwise → treat as a username and look up `peer_profiles`.
+    ///
+    /// Resolution to an address: scan `discovered_rooms` for a room
+    /// whose `creator_fingerprint` matches; take the first `host_addrs`
+    /// entry. Falls back to the `known_peers` table for users we've
+    /// dialed before. Both paths require we've seen the peer on our
+    /// gossipsub mesh or dialed them before — bare-ID dialing on a
+    /// cold mesh is fundamentally impossible without a routing layer
+    /// huddle deliberately doesn't run (DHT, central directory). For
+    /// cross-internet first contact, paste an invite link instead.
+    pub async fn dial_by_id_or_username(&self, input: &str) -> Result<()> {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return Err(HuddleError::Other("input is empty".into()));
+        }
+        let target_fp = if let Some(fp) = normalize_to_fingerprint(trimmed) {
+            fp
+        } else {
+            let matches = repo::find_peers_by_username(&self.db, trimmed)?;
+            if matches.is_empty() {
+                return Err(HuddleError::Other(format!(
+                    "no peer named `{}` known yet — paste their invite link instead",
+                    trimmed
+                )));
+            }
+            if matches.len() > 1 {
+                return Err(HuddleError::Other(format!(
+                    "username `{}` is ambiguous ({} peers share it) — use their HD- ID instead",
+                    trimmed,
+                    matches.len()
+                )));
+            }
+            matches.into_iter().next().unwrap()
+        };
+        if target_fp == self.identity.fingerprint() {
+            return Err(HuddleError::Other("that's your own ID".into()));
+        }
+        let addr = self.resolve_dial_addr(&target_fp).ok_or_else(|| {
+            HuddleError::Other(format!(
+                "haven't seen `{}` on the network yet — ask them for an invite link",
+                short_fp_for_msg(&target_fp)
+            ))
+        })?;
+        self.dial(&addr).await
+    }
+
+    /// Look up a dialable multiaddr for a fingerprint we've encountered.
+    /// Tries fresh room announcements first (their `host_addrs` are
+    /// AutoNAT-confirmed + recently-rebroadcast), then the persisted
+    /// `known_peers` table for prior dials.
+    fn resolve_dial_addr(&self, fingerprint: &str) -> Option<String> {
+        for room in self.discovered_rooms.lock().unwrap().values() {
+            if room.creator_fingerprint == fingerprint {
+                if let Some(addr) = room.host_addrs.first() {
+                    return Some(addr.clone());
+                }
+            }
+        }
+        let known = repo::list_known_peers(&self.db).ok()?;
+        for peer in known {
+            if peer.fingerprint.as_deref() == Some(fingerprint) {
+                return Some(peer.address);
+            }
+        }
+        None
+    }
+
     pub async fn dial(&self, input: &str) -> Result<()> {
         let multiaddr = parse_dial_address(input)?;
         let canonical = multiaddr.to_string();
@@ -1173,6 +1250,7 @@ impl AppHandle {
                     creator_fingerprint: ann.creator_fingerprint.clone(),
                     last_seen: now_unix(),
                     restorable: false,
+                    host_addrs: ann.host_addrs.clone(),
                 };
                 // If we're already in this room, cache the announcement so
                 // others can still discover it through us, but don't emit
@@ -3476,11 +3554,73 @@ impl AppHandle {
                 }
             }
         }
+        // huddle 0.5.1: wipe the attachment cache directory. Each file
+        // inside is best-effort zeroed first, then the directory
+        // itself is removed.
+        let files_dir = data_dir.join("files");
+        if let Ok(read) = std::fs::read_dir(&files_dir) {
+            for entry in read.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    wipe_file(&path);
+                } else if path.is_dir() {
+                    // Two-level nesting (room_id subdirs) — sweep their
+                    // contents too.
+                    if let Ok(inner) = std::fs::read_dir(&path) {
+                        for inner_entry in inner.flatten() {
+                            if inner_entry.path().is_file() {
+                                wipe_file(&inner_entry.path());
+                            }
+                        }
+                    }
+                    let _ = std::fs::remove_dir(&path);
+                }
+            }
+        }
+        let _ = std::fs::remove_dir(&files_dir);
         let _ = std::fs::remove_dir(&data_dir);
 
         let _ = self.app_event_tx.send(AppEvent::WentDark);
         Ok(())
     }
+}
+
+/// huddle 0.5.1: parse `input` as a huddle ID — either `HD-`-prefixed
+/// or a bare 24-char hex run with or without dashes — and return it in
+/// the canonical lowercase-dashed form `xxxx-xxxx-...-xxxx` that
+/// matches `identity::compute_fingerprint`'s output. Returns None for
+/// anything that isn't a syntactic ID (the caller falls back to
+/// username lookup).
+fn normalize_to_fingerprint(input: &str) -> Option<String> {
+    let s = input
+        .trim()
+        .trim_start_matches("HD-")
+        .trim_start_matches("hd-")
+        .to_string();
+    let hex_only: String = s.chars().filter(|c| *c != '-').collect();
+    if hex_only.len() != 24 || !hex_only.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let lower = hex_only.to_ascii_lowercase();
+    let chunks: Vec<String> = lower
+        .as_bytes()
+        .chunks(4)
+        .map(|c| std::str::from_utf8(c).unwrap().to_string())
+        .collect();
+    Some(chunks.join("-"))
+}
+
+/// Short label for an HD ID, used only in error messages — strips the
+/// fingerprint down to its first four hex chars with the brand prefix
+/// so the message reads naturally.
+fn short_fp_for_msg(fingerprint: &str) -> String {
+    let head: String = fingerprint
+        .chars()
+        .filter(|c| *c != '-')
+        .take(4)
+        .collect::<String>()
+        .to_ascii_uppercase();
+    format!("HD-{}…", head)
 }
 
 /// Constant-time 32-byte equality. Used by `go_dark` to compare a

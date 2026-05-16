@@ -31,6 +31,7 @@ pub fn render(f: &mut Frame, app: &TuiApp) {
         Modal::Settings(s) => modal::render_settings(f, s),
         Modal::EditUsername(s) => modal::render_edit_username(f, s),
         Modal::GoDark(s) => modal::render_go_dark(f, s),
+        Modal::AddFriend(s) => modal::render_add_friend(f, s),
         Modal::ShowJoinCode(s) => modal::render_show_join_code(f, s),
         Modal::JoinWithCode(s) => modal::render_join_with_code(f, s),
         Modal::ShowInvite(s) => modal::render_show_invite(f, s),

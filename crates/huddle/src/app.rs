@@ -56,15 +56,20 @@ pub const ONBOARDING_PAGES: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "what's new in 0.3",
+        "what's new in 0.5",
         &[
+            "  a    add friend by HD ID or username (lobby)",
+            "  ,→u  set / clear your username (broadcast signed)",
+            "  ,→!  delete account + wipe data dir (go dark)",
+            "  ✓    green tag next to SAS-verified peers in chat",
+            "",
+            "still around from 0.3 / 0.4:",
             "  ^K   kick a member (signed ban + key rotation)",
             "  ^G   grant another member the owner role",
             "  ^J   generate a 10-minute join code (owner only)",
             "  ^V   verify fingerprints; press s inside for SAS",
             "  ^I   show an invite link for the current room",
             "  v    paste an invite link from the lobby",
-            "  ,    settings (verified-peer-only inbound)",
             "  o    toggle 'only verified members may join' (in room)",
             "",
             "press Enter to dismiss.",
@@ -120,6 +125,11 @@ pub enum Modal {
     /// master passphrase + a `DELETE EVERYTHING` confirmation phrase.
     /// Hitting Confirm with both filled calls `AppHandle::go_dark`.
     GoDark(GoDarkState),
+    /// huddle 0.5.1: "add friend by HD ID or username" — single-field
+    /// text input. On confirm, resolves the input to a fingerprint
+    /// (HD-prefix / bare hex / username lookup) and dials via the
+    /// usual flow.
+    AddFriend(AddFriendState),
     /// Phase F: an owner just generated a short-lived join code for
     /// the current encrypted room. The modal shows it big so the
     /// owner can read it aloud / copy it / pass it OOB.
@@ -182,6 +192,11 @@ pub struct GoDarkState {
 }
 
 pub const GO_DARK_CONFIRM_PHRASE: &str = "DELETE EVERYTHING";
+
+#[derive(Debug, Clone, Default)]
+pub struct AddFriendState {
+    pub input: String,
+}
 
 #[derive(Debug, Clone)]
 pub struct ShowJoinCodeState {
@@ -2481,6 +2496,43 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
         }
         Action::OpenGoDarkModal => {
             app.modal = Modal::GoDark(GoDarkState::default());
+            Ok(false)
+        }
+        Action::OpenAddFriend => {
+            app.modal = Modal::AddFriend(AddFriendState::default());
+            Ok(false)
+        }
+        Action::AddFriendTypeChar(c) => {
+            if let Modal::AddFriend(s) = &mut app.modal {
+                if s.input.chars().count() < 64 {
+                    s.input.push(c);
+                }
+            }
+            Ok(false)
+        }
+        Action::AddFriendBackspace => {
+            if let Modal::AddFriend(s) = &mut app.modal {
+                s.input.pop();
+            }
+            Ok(false)
+        }
+        Action::AddFriendConfirm => {
+            let input = match &app.modal {
+                Modal::AddFriend(s) => s.input.clone(),
+                _ => return Ok(false),
+            };
+            if input.trim().is_empty() {
+                return Ok(false);
+            }
+            app.modal = Modal::None;
+            match app.handle.dial_by_id_or_username(input.trim()).await {
+                Ok(()) => {
+                    app.set_status(format!("dialing {}…", input.trim()));
+                }
+                Err(e) => {
+                    app.modal = Modal::Error(format!("add friend: {e}"));
+                }
+            }
             Ok(false)
         }
         Action::GoDarkNextField => {

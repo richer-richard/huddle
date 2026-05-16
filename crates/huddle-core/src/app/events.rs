@@ -13,6 +13,11 @@ pub struct DiscoveredRoom {
     /// memory). The lobby renders these with a "saved" hint; pressing
     /// Enter goes through the join flow with passphrase prompt.
     pub restorable: bool,
+    /// huddle 0.5.1: cached host multiaddrs from the announcing peer's
+    /// `RoomAnnouncement.host_addrs`. Used by `dial_by_id_or_username`
+    /// to resolve an HD- ID or username back to a dialable address
+    /// when the target is on our gossipsub mesh.
+    pub host_addrs: Vec<String>,
 }
 
 #[derive(Debug, Clone)]

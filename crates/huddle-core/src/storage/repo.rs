@@ -837,6 +837,23 @@ pub fn get_peer_username(db: &Db, fingerprint: &str) -> Result<Option<String>> {
     }
 }
 
+/// huddle 0.5.1: every fingerprint that has broadcast the given
+/// username via a signed ProfileUpdate. Multiple matches are possible
+/// — usernames aren't unique — so the "add by username" flow asks
+/// the user to disambiguate via HD- ID when this returns > 1.
+pub fn find_peers_by_username(db: &Db, username: &str) -> Result<Vec<String>> {
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare(
+        "SELECT fingerprint FROM peer_profiles WHERE username = ?1",
+    )?;
+    let rows = stmt.query_map(params![username], |row| row.get::<_, String>(0))?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
 // =========================================================================
 // Room attachments
 // =========================================================================

@@ -126,6 +126,11 @@ pub enum Action {
     GoDarkTypeChar(char),
     GoDarkBackspace,
     GoDarkConfirm,
+    // huddle 0.5.1: add friend by HD ID or username
+    OpenAddFriend,
+    AddFriendTypeChar(char),
+    AddFriendBackspace,
+    AddFriendConfirm,
     // Phase F: short-lived join codes
     OpenGenerateJoinCode,
     OpenJoinWithCode,
@@ -259,6 +264,13 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
             KeyCode::Char(c) => Action::GoDarkTypeChar(c),
             _ => Action::Nothing,
         },
+        Modal::AddFriend(_) => match key.code {
+            KeyCode::Esc => Action::CloseModal,
+            KeyCode::Enter => Action::AddFriendConfirm,
+            KeyCode::Backspace => Action::AddFriendBackspace,
+            KeyCode::Char(c) => Action::AddFriendTypeChar(c),
+            _ => Action::Nothing,
+        },
         Modal::ShowJoinCode(_) => match key.code {
             _ => Action::CloseModal,
         },
@@ -344,6 +356,7 @@ fn map_lobby(key: KeyEvent, app: &TuiApp) -> Action {
         KeyCode::Char('q') => Action::OpenQuitConfirm,
         KeyCode::Char('s') => Action::OpenStartRoom,
         KeyCode::Char('?') => Action::OpenHelp,
+        KeyCode::Char('a') => Action::OpenAddFriend,
         KeyCode::Char('d') => Action::OpenDialPeer,
         KeyCode::Char('i') => Action::OpenQrIdentity,
         KeyCode::Char(',') => Action::OpenSettings,
