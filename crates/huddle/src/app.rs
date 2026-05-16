@@ -1,5 +1,5 @@
 use std::cell::Cell;
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -112,6 +112,36 @@ pub const ONBOARDING_PAGES: &[OnboardingPage] = &[
         ],
         min_version: "0.6.0",
     },
+    OnboardingPage {
+        title: "what's new in 0.7 — TUI 2.0",
+        body: &[
+            "huddle 0.7 rewrites the TUI around a sidebar:",
+            "",
+            "  Profile        you, your HD-ID, NAT badge",
+            "  Direct messages  1-1 DMs (encrypted, 2-people-forever)",
+            "  Group rooms      every multi-peer room you've joined",
+            "  People           known peers + verified + blocked",
+            "  Activity         status history + transfers",
+            "  Settings         toggles + go-dark",
+            "",
+            "New keys:",
+            "  m   start a DM (Compose-DM modal)",
+            "  g   start a group room",
+            "  p   jump to People pane",
+            "  ,   jump to Settings pane",
+            "  Tab/Shift+Tab   jump between sidebar sections",
+            "  Space/←/→       expand/collapse a section",
+            "  Ctrl+I          toggle the member margin in a Group",
+            "",
+            "Retired: tab-bar, Ctrl+B (back-to-lobby), numeric tab jump.",
+            "Direct chats and group chats are now visually distinct;",
+            "DMs land in the Direct messages section and stay 1-1.",
+            "",
+            "Note: v1 DMs aren't end-to-end encrypted on the room layer",
+            "(visibility-filter + topic-ID obscurity); v0.8 will add E2E.",
+        ],
+        min_version: "0.7.0",
+    },
 ];
 
 /// huddle 0.6: pages that should be shown to a user with the given
@@ -153,11 +183,96 @@ fn parse_semver(s: &str) -> (u32, u32, u32) {
     (major, minor, patch)
 }
 
-/// Top-level screen — the lobby or the in-room view.
+/// huddle 0.7: which pane the right side of the layout renders.
+/// Replaces the legacy `Screen::{Lobby, InRoom}` binary. Selection
+/// happens via the sidebar (or jump-shortcuts like `,` for Settings).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Pane {
+    Welcome,
+    Profile,
+    Dm(String),
+    Group(String),
+    People,
+    Activity,
+    Settings,
+}
+
+/// huddle 0.7: sidebar section identifiers. Section order is fixed at
+/// render time so this enum mirrors the visual order top-to-bottom.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SidebarSection {
+    Profile,
+    Direct,
+    Group,
+    People,
+    Activity,
+    Settings,
+}
+
+/// huddle 0.7: a single addressable row in the sidebar. `Section(s)` is
+/// the section header itself (clickable to expand/collapse); the other
+/// variants are children rendered under an expanded section.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SidebarItem {
+    Section(SidebarSection),
+    Profile,
+    Dm(String),
+    Group(String),
+    GroupDiscover,
+    Person(String),
+    Activity,
+    Settings,
+}
+
+/// huddle 0.7: keyboard focus is either on the sidebar (j/k navigates
+/// rows) or on the pane (typing in chat, scrolling messages). Tab/Esc
+/// toggles between them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Screen {
-    Lobby,
-    InRoom,
+pub enum SidebarFocus {
+    Sidebar,
+    Pane,
+}
+
+/// huddle 0.7: sidebar state — which item is selected, which sections
+/// are expanded, and whether keyboard focus is on the sidebar or the
+/// pane. Owns sidebar navigation; the pane router is purely read-only
+/// for this state.
+#[derive(Debug, Clone)]
+pub struct SidebarState {
+    pub selection: SidebarItem,
+    pub expanded: HashSet<SidebarSection>,
+    pub focus: SidebarFocus,
+}
+
+impl Default for SidebarState {
+    fn default() -> Self {
+        let mut expanded = HashSet::new();
+        expanded.insert(SidebarSection::Profile);
+        expanded.insert(SidebarSection::Direct);
+        expanded.insert(SidebarSection::Group);
+        expanded.insert(SidebarSection::People);
+        Self {
+            selection: SidebarItem::Section(SidebarSection::Profile),
+            expanded,
+            focus: SidebarFocus::Sidebar,
+        }
+    }
+}
+
+/// huddle 0.7: which sublist has focus inside the People pane —
+/// Known peers, Verified, or Blocked. Tab cycles. Used for per-row
+/// action targeting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeopleFocus {
+    Known,
+    Verified,
+    Blocked,
+}
+
+impl Default for PeopleFocus {
+    fn default() -> Self {
+        PeopleFocus::Known
+    }
 }
 
 /// Modal overlays (mutually exclusive).
@@ -206,6 +321,12 @@ pub enum Modal {
     /// (HD-prefix / bare hex / username lookup) and dials via the
     /// usual flow.
     AddFriend(AddFriendState),
+    /// huddle 0.7: "message who?" — Compose-DM modal. Single field
+    /// with inline autocomplete; on confirm, resolves to a fingerprint
+    /// and starts a DM via `AppHandle::start_direct`. Falls back to
+    /// the AddFriend morph (same modal recycled) when input is
+    /// unrecognized — no modal-on-modal.
+    ComposeDm(ComposeDmState),
     /// Phase F: an owner just generated a short-lived join code for
     /// the current encrypted room. The modal shows it big so the
     /// owner can read it aloud / copy it / pass it OOB.
@@ -297,6 +418,13 @@ pub const GO_DARK_CONFIRM_PHRASE: &str = "DELETE EVERYTHING";
 
 #[derive(Debug, Clone, Default)]
 pub struct AddFriendState {
+    pub input: String,
+}
+
+/// huddle 0.7: Compose-DM modal state. Single-field input; autocomplete
+/// surfaces inline (rendered from `known_peers` + `peer_profiles` cache).
+#[derive(Debug, Clone, Default)]
+pub struct ComposeDmState {
     pub input: String,
 }
 
@@ -586,13 +714,8 @@ pub struct OpenRoom {
     pub unread: u32,
 }
 
-/// Which list the cursor is on in the lobby — known dial peers or
-/// discovered rooms. Used for `j/k` navigation and `Enter`/`r`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LobbyFocus {
-    KnownPeers,
-    Rooms,
-}
+// LobbyFocus removed in huddle 0.7: sidebar focus model replaces it.
+// `SidebarState::focus` is the new source of truth.
 
 /// huddle 0.6: a single entry in the status-history ring buffer.
 /// `timestamp` is wall-clock seconds since UNIX epoch (so the
@@ -606,7 +729,29 @@ pub struct StatusEntry {
 pub struct TuiApp {
     pub handle: AppHandle,
     pub mode: NetworkMode,
-    pub screen: Screen,
+    /// huddle 0.7: which pane the right side of the layout renders.
+    /// Driven by sidebar selection + jump-shortcuts.
+    pub pane: Pane,
+    /// huddle 0.7: sidebar state (selection, expansion, focus). The
+    /// pane router is read-only on this — sidebar owns its model.
+    pub sidebar: SidebarState,
+    /// huddle 0.7: centralized color/style palette. All renderers take
+    /// a `&Theme`. Default = dark.
+    pub theme: crate::ui::theme::Theme,
+    /// huddle 0.7: unread counts keyed by room_id. Increments on
+    /// `MessageReceived` for rooms that aren't the current pane;
+    /// clears when that room becomes the active pane.
+    pub unread: HashMap<String, u32>,
+    /// huddle 0.7: toggle the right-margin member list in Group panes.
+    /// Default on; Ctrl+I toggles.
+    pub show_member_margin: bool,
+    /// huddle 0.7: which People-pane sublist has focus (Known/Verified/
+    /// Blocked). Tab cycles.
+    pub people_focus: PeopleFocus,
+    /// huddle 0.7: cursor inside the People pane's Known sublist.
+    pub selected_known_idx: usize,
+    /// huddle 0.7: cursor inside the People pane's Blocked sublist.
+    pub selected_blocked_idx: usize,
     pub modal: Modal,
     /// huddle 0.6: a FIFO queue of async-event modals (errors, rotation
     /// requests, inbound dials) that arrived while another modal held
@@ -616,11 +761,7 @@ pub struct TuiApp {
     pub pending_modals: VecDeque<Modal>,
     pub discovered_rooms: Vec<DiscoveredRoom>,
     pub known_peers: Vec<KnownPeerStatus>,
-    pub lobby_focus: LobbyFocus,
-    pub selected_room_idx: usize,
-    pub selected_peer_idx: usize,
     pub open_rooms: Vec<OpenRoom>,
-    pub active_tab: usize,
     pub listen_addresses: Vec<String>,
     /// Bottom-bar status: text + expiry instant. After expiry, treated
     /// as None by the renderer.
@@ -665,11 +806,6 @@ impl TuiApp {
     pub fn new(handle: AppHandle) -> Self {
         let mode = handle.mode();
         let known_peers = handle.known_peers();
-        let lobby_focus = if mode == NetworkMode::Direct && !known_peers.is_empty() {
-            LobbyFocus::KnownPeers
-        } else {
-            LobbyFocus::Rooms
-        };
         // huddle 0.6: onboarding-pages-to-show is now version-driven.
         // First-launch users see every page; upgrading users see only
         // the "what's new in X.Y" page for releases newer than their
@@ -686,25 +822,24 @@ impl TuiApp {
         // we skip the modal. The prompt sits behind onboarding so new
         // users see the welcome card first.
         if handle.update_check_enabled().is_none() && legacy_seen {
-            // For brand-new users, the modal is part of the onboarding
-            // flow — we don't bother them with a separate yes/no on
-            // first launch. Returning users (legacy_seen=true) who
-            // haven't been asked yet get the prompt next.
             pending_modals.push_back(Modal::UpdateCheckOptIn);
         }
         Self {
             handle,
             mode,
-            screen: Screen::Lobby,
+            pane: Pane::Welcome,
+            sidebar: SidebarState::default(),
+            theme: crate::ui::theme::Theme::dark(),
+            unread: HashMap::new(),
+            show_member_margin: true,
+            people_focus: PeopleFocus::default(),
+            selected_known_idx: 0,
+            selected_blocked_idx: 0,
             modal: Modal::None,
             pending_modals,
             discovered_rooms: Vec::new(),
             known_peers,
-            lobby_focus,
-            selected_room_idx: 0,
-            selected_peer_idx: 0,
             open_rooms: Vec::new(),
-            active_tab: 0,
             listen_addresses: Vec::new(),
             status_message: None,
             status_history: VecDeque::new(),
@@ -716,10 +851,74 @@ impl TuiApp {
         }
     }
 
+    /// huddle 0.7: lookup an `OpenRoom` by its `room_id`. Replaces the
+    /// old `active_room()` access pattern which keyed by `active_tab`.
+    /// The Vec storage is kept for now; this method abstracts the
+    /// lookup so pane/sidebar code doesn't depend on the storage shape.
+    pub fn open_room(&self, room_id: &str) -> Option<&OpenRoom> {
+        self.open_rooms.iter().find(|r| r.room_id == room_id)
+    }
+
+    pub fn open_room_mut(&mut self, room_id: &str) -> Option<&mut OpenRoom> {
+        self.open_rooms.iter_mut().find(|r| r.room_id == room_id)
+    }
+
+    /// huddle 0.7: returns the room_id of the currently-active chat
+    /// pane (`Pane::Dm(id) | Pane::Group(id)`); `None` for non-chat
+    /// panes.
+    pub fn current_pane_room_id(&self) -> Option<&str> {
+        match &self.pane {
+            Pane::Dm(id) | Pane::Group(id) => Some(id.as_str()),
+            _ => None,
+        }
+    }
+
+    pub fn mode_str(&self) -> &'static str {
+        match self.mode {
+            NetworkMode::Mdns => "LAN (mDNS)",
+            NetworkMode::Direct => "Direct (manual dial)",
+        }
+    }
+
+    /// huddle 0.7: get unread count for a room (0 if untracked).
+    pub fn unread_count(&self, room_id: &str) -> u32 {
+        self.unread.get(room_id).copied().unwrap_or(0)
+    }
+
+    /// huddle 0.7: clear unread for a room. Called when that room
+    /// becomes the active pane.
+    pub fn clear_unread(&mut self, room_id: &str) {
+        self.unread.remove(room_id);
+    }
+
+    /// huddle 0.7: switch the active pane to a given room id. Routes
+    /// `Direct` rooms to `Pane::Dm`, anything else to `Pane::Group`.
+    /// Also clears the unread counter for that room.
+    pub fn switch_to_room(&mut self, room_id: &str) {
+        let kind = self
+            .handle
+            .active_room_info(room_id)
+            .map(|r| r.kind)
+            .or_else(|| {
+                self.handle
+                    .discovered_rooms()
+                    .into_iter()
+                    .find(|d| d.room_id == room_id)
+                    .map(|d| d.kind)
+            })
+            .unwrap_or(huddle_core::storage::repo::RoomKind::Group);
+        self.pane = match kind {
+            huddle_core::storage::repo::RoomKind::Direct => Pane::Dm(room_id.to_string()),
+            huddle_core::storage::repo::RoomKind::Group => Pane::Group(room_id.to_string()),
+        };
+        self.clear_unread(room_id);
+        self.sidebar.focus = SidebarFocus::Pane;
+    }
+
     pub fn refresh_known_peers(&mut self) {
         self.known_peers = self.handle.known_peers();
-        if self.selected_peer_idx >= self.known_peers.len() && !self.known_peers.is_empty() {
-            self.selected_peer_idx = self.known_peers.len() - 1;
+        if self.selected_known_idx >= self.known_peers.len() && !self.known_peers.is_empty() {
+            self.selected_known_idx = self.known_peers.len() - 1;
         }
     }
 
@@ -788,18 +987,17 @@ impl TuiApp {
     }
 
     pub fn active_room(&self) -> Option<&OpenRoom> {
-        self.open_rooms.get(self.active_tab)
+        let id = self.current_pane_room_id()?;
+        self.open_room(id)
     }
 
     pub fn active_room_mut(&mut self) -> Option<&mut OpenRoom> {
-        self.open_rooms.get_mut(self.active_tab)
+        let id = self.current_pane_room_id()?.to_string();
+        self.open_room_mut(&id)
     }
 
     pub fn refresh_discovered(&mut self) {
         self.discovered_rooms = self.handle.discovered_rooms();
-        if self.selected_room_idx >= self.discovered_rooms.len() && !self.discovered_rooms.is_empty() {
-            self.selected_room_idx = self.discovered_rooms.len() - 1;
-        }
     }
 
     /// Refresh attachments for every open room from the AppHandle. Called
@@ -858,7 +1056,8 @@ impl TuiApp {
                 let info = self.handle.active_room_info(&room_id);
                 let members = self.handle.room_members(&room_id);
                 let messages = self.handle.room_messages(&room_id, 200).unwrap_or_default();
-                if !self.open_rooms.iter().any(|r| r.room_id == room_id) {
+                let already_open = self.open_rooms.iter().any(|r| r.room_id == room_id);
+                if !already_open {
                     if let Some(info) = info {
                         let attachments = self
                             .handle
@@ -872,7 +1071,7 @@ impl TuiApp {
                             messages,
                             attachments,
                             input: String::new(),
-                            input_active: true,
+                            input_active: false,
                             last_typing_sent: None,
                             scroll: 0,
                             follow_mode: true,
@@ -881,20 +1080,26 @@ impl TuiApp {
                             focused_card_idx: 0,
                             unread: 0,
                         });
-                        self.active_tab = self.open_rooms.len() - 1;
-                        self.screen = Screen::InRoom;
                     }
+                }
+                // huddle 0.7 focus-steal policy: auto-switch the pane
+                // to the freshly-joined room only if the user is on
+                // Welcome / Profile (a "soft" pane). Don't steal focus
+                // away from another active chat — surface the new
+                // room in the sidebar (it'll appear via discovered_rooms)
+                // and let the user pick it.
+                let soft_pane = matches!(self.pane, Pane::Welcome | Pane::Profile);
+                if soft_pane {
+                    self.switch_to_room(&room_id);
                 }
             }
             AppEvent::RoomLeft { room_id } => {
                 if let Some(idx) = self.open_rooms.iter().position(|r| r.room_id == room_id) {
                     self.open_rooms.remove(idx);
-                    if self.open_rooms.is_empty() {
-                        self.screen = Screen::Lobby;
-                        self.active_tab = 0;
-                    } else if self.active_tab >= self.open_rooms.len() {
-                        self.active_tab = self.open_rooms.len() - 1;
+                    if self.current_pane_room_id() == Some(room_id.as_str()) {
+                        self.pane = Pane::Welcome;
                     }
+                    self.unread.remove(&room_id);
                 }
             }
             AppEvent::MemberJoined { room_id, fingerprint } => {
@@ -916,10 +1121,8 @@ impl TuiApp {
                 body,
                 sent_at,
             } => {
-                let idx_opt = self.open_rooms.iter().position(|r| r.room_id == room_id);
-                if let Some(idx) = idx_opt {
-                    let is_active = idx == self.active_tab && self.screen == Screen::InRoom;
-                    let r = &mut self.open_rooms[idx];
+                let is_active = self.current_pane_room_id() == Some(room_id.as_str());
+                if let Some(r) = self.open_room_mut(&room_id) {
                     r.messages.push(StoredRoomMessage {
                         id: 0,
                         room_id: room_id.clone(),
@@ -928,9 +1131,10 @@ impl TuiApp {
                         body,
                         sent_at,
                     });
-                    if !is_active {
-                        r.unread = r.unread.saturating_add(1);
-                    }
+                }
+                if !is_active {
+                    let count = self.unread.entry(room_id.clone()).or_insert(0);
+                    *count = count.saturating_add(1);
                 }
             }
             AppEvent::MessageSent {
@@ -993,16 +1197,12 @@ impl TuiApp {
                 size_bytes,
                 sender_fingerprint: _,
             } => {
-                let active_id = self
-                    .open_rooms
-                    .get(self.active_tab)
-                    .map(|r| r.room_id.clone());
-                let on_active = self.screen == Screen::InRoom && active_id.as_deref() == Some(&room_id);
-                if let Some(r) = self.open_rooms.iter_mut().find(|r| r.room_id == room_id) {
-                    if !on_active {
-                        r.unread = r.unread.saturating_add(1);
-                    }
+                let on_active = self.current_pane_room_id() == Some(room_id.as_str());
+                if !on_active {
+                    let count = self.unread.entry(room_id.clone()).or_insert(0);
+                    *count = count.saturating_add(1);
                 }
+                let _ = room_id;
                 self.set_status(format!(
                     "file offered: {} ({} KB)",
                     name,
@@ -1221,6 +1421,176 @@ fn owner_action_members(
     Some((room_id, members))
 }
 
+/// huddle 0.7: move the sidebar selection up (`delta < 0`) or down
+/// (`delta > 0`). Wraps within the ordered item list. Section headers
+/// are skipped over when the move would land on one and the original
+/// selection wasn't a section header — keeps j/k navigation snappy.
+fn sidebar_move(app: &mut TuiApp, delta: i32) {
+    let items = crate::ui::sidebar::ordered_items(app);
+    if items.is_empty() {
+        return;
+    }
+    let mut idx = items
+        .iter()
+        .position(|it| *it == app.sidebar.selection)
+        .unwrap_or(0) as i32;
+    idx += delta;
+    if idx < 0 {
+        idx = 0;
+    }
+    if idx as usize >= items.len() {
+        idx = items.len() as i32 - 1;
+    }
+    app.sidebar.selection = items[idx as usize].clone();
+    sync_pane_from_selection(app);
+}
+
+/// huddle 0.7: jump to the next/prev sidebar section (`delta = ±1`).
+/// Used by Tab / Shift+Tab. Lands on the section header (which the user
+/// can then j/k into).
+fn sidebar_jump_section(app: &mut TuiApp, delta: i32) {
+    use SidebarSection::*;
+    let order = [Profile, Direct, Group, People, Activity, Settings];
+    let current = match &app.sidebar.selection {
+        SidebarItem::Section(s) => *s,
+        SidebarItem::Profile => Profile,
+        SidebarItem::Dm(_) => Direct,
+        SidebarItem::Group(_) | SidebarItem::GroupDiscover => Group,
+        SidebarItem::Person(_) => People,
+        SidebarItem::Activity => Activity,
+        SidebarItem::Settings => Settings,
+    };
+    let cur_idx = order.iter().position(|s| *s == current).unwrap_or(0) as i32;
+    let mut next = cur_idx + delta;
+    if next < 0 {
+        next = order.len() as i32 - 1;
+    } else if next as usize >= order.len() {
+        next = 0;
+    }
+    app.sidebar.selection = SidebarItem::Section(order[next as usize]);
+}
+
+/// huddle 0.7: expand / collapse the currently-selected section.
+fn sidebar_toggle_expand(app: &mut TuiApp) {
+    let section = match &app.sidebar.selection {
+        SidebarItem::Section(s) => *s,
+        SidebarItem::Profile => SidebarSection::Profile,
+        SidebarItem::Dm(_) => SidebarSection::Direct,
+        SidebarItem::Group(_) | SidebarItem::GroupDiscover => SidebarSection::Group,
+        SidebarItem::Person(_) => SidebarSection::People,
+        SidebarItem::Activity => SidebarSection::Activity,
+        SidebarItem::Settings => SidebarSection::Settings,
+    };
+    if app.sidebar.expanded.contains(&section) {
+        app.sidebar.expanded.remove(&section);
+    } else {
+        app.sidebar.expanded.insert(section);
+    }
+}
+
+/// huddle 0.7: side-effect of moving the sidebar — if the selection is
+/// addressable (DM / Group / People / etc.), switch the pane to match
+/// so live preview is always available as the cursor moves. The dual
+/// "Enter to commit" model is unnecessary in a TUI with no mouse.
+fn sync_pane_from_selection(app: &mut TuiApp) {
+    if let Some(pane) = crate::ui::sidebar::pane_for_item(&app.sidebar.selection) {
+        match &pane {
+            Pane::Dm(id) | Pane::Group(id) => {
+                let id = id.clone();
+                app.clear_unread(&id);
+                if app.handle.active_room_info(&id).is_some() {
+                    open_existing_room_tab_quiet(app, &id);
+                }
+                app.pane = pane;
+            }
+            _ => app.pane = pane,
+        }
+    }
+}
+
+/// huddle 0.7: list of room ids in sidebar order (DMs first, then
+/// groups). Used by `switch_chat_relative` and `switch_chat_absolute`.
+fn chat_room_ids(app: &TuiApp) -> Vec<String> {
+    let discovered = app.handle.discovered_rooms();
+    let mut dms: Vec<_> = discovered
+        .iter()
+        .filter(|r| r.kind == huddle_core::storage::repo::RoomKind::Direct)
+        .map(|r| r.room_id.clone())
+        .collect();
+    let mut groups: Vec<_> = discovered
+        .iter()
+        .filter(|r| r.kind != huddle_core::storage::repo::RoomKind::Direct)
+        .map(|r| r.room_id.clone())
+        .collect();
+    dms.append(&mut groups);
+    dms
+}
+
+/// huddle 0.7: switch to the next / previous chat (DM or Group) in
+/// sidebar order, wrapping at the ends.
+fn switch_chat_relative(app: &mut TuiApp, delta: i32) {
+    let chats = chat_room_ids(app);
+    if chats.is_empty() {
+        return;
+    }
+    let current = app
+        .current_pane_room_id()
+        .and_then(|id| chats.iter().position(|c| c == id));
+    let next = match current {
+        Some(i) => {
+            let mut n = i as i32 + delta;
+            if n < 0 {
+                n = chats.len() as i32 - 1;
+            }
+            n as usize % chats.len()
+        }
+        None => 0,
+    };
+    let id = chats[next].clone();
+    app.switch_to_room(&id);
+}
+
+/// huddle 0.7: jump to the N-th chat (zero-based) in sidebar order.
+fn switch_chat_absolute(app: &mut TuiApp, n: usize) {
+    let chats = chat_room_ids(app);
+    if let Some(id) = chats.get(n).cloned() {
+        app.switch_to_room(&id);
+    }
+}
+
+/// huddle 0.7: hydrate OpenRoom if missing, without changing pane or
+/// stealing focus. Used by `sync_pane_from_selection` to ensure the
+/// chat pane has data on first sight.
+fn open_existing_room_tab_quiet(app: &mut TuiApp, room_id: &str) {
+    if app.open_room(room_id).is_some() {
+        return;
+    }
+    let info = match app.handle.active_room_info(room_id) {
+        Some(i) => i,
+        None => return,
+    };
+    let members = app.handle.room_members(room_id);
+    let messages = app.handle.room_messages(room_id, 200).unwrap_or_default();
+    let attachments = app.handle.list_room_attachments(room_id).unwrap_or_default();
+    app.open_rooms.push(OpenRoom {
+        room_id: room_id.to_string(),
+        name: info.name,
+        encrypted: info.encrypted,
+        members,
+        messages,
+        attachments,
+        input: String::new(),
+        input_active: false,
+        last_typing_sent: None,
+        scroll: 0,
+        follow_mode: true,
+        last_max_scroll: Cell::new(0),
+        card_focus: false,
+        focused_card_idx: 0,
+        unread: 0,
+    });
+}
+
 /// Scroll the active room by `delta` lines (negative = up). Maintains
 /// `follow_mode` semantics: scrolling up disables it, reaching the bottom
 /// enables it.
@@ -1240,36 +1610,38 @@ fn scroll_by(app: &mut TuiApp, delta: i32) {
     r.follow_mode = next >= max;
 }
 
-/// Open a tab for a room we're already subscribed to in `active_rooms`
-/// (e.g. one that was auto-restored at startup). Mirrors what the
-/// `AppEvent::RoomJoined` handler does, minus the actual join call.
+/// huddle 0.7: hydrate an OpenRoom for `room_id` if we're subscribed but
+/// don't have it open yet, then switch the active pane to it. Mirrors
+/// what the `AppEvent::RoomJoined` handler does, minus the actual join
+/// call.
 fn open_existing_room_tab(app: &mut TuiApp, room_id: &str) {
     let info = match app.handle.active_room_info(room_id) {
         Some(i) => i,
         None => return,
     };
-    let members = app.handle.room_members(room_id);
-    let messages = app.handle.room_messages(room_id, 200).unwrap_or_default();
-    let attachments = app.handle.list_room_attachments(room_id).unwrap_or_default();
-    app.open_rooms.push(OpenRoom {
-        room_id: room_id.to_string(),
-        name: info.name,
-        encrypted: info.encrypted,
-        members,
-        messages,
-        attachments,
-        input: String::new(),
-        input_active: true,
-        last_typing_sent: None,
-        scroll: 0,
-        follow_mode: true,
-        last_max_scroll: Cell::new(0),
-        card_focus: false,
-        focused_card_idx: 0,
-        unread: 0,
-    });
-    app.active_tab = app.open_rooms.len() - 1;
-    app.screen = Screen::InRoom;
+    if app.open_room(room_id).is_none() {
+        let members = app.handle.room_members(room_id);
+        let messages = app.handle.room_messages(room_id, 200).unwrap_or_default();
+        let attachments = app.handle.list_room_attachments(room_id).unwrap_or_default();
+        app.open_rooms.push(OpenRoom {
+            room_id: room_id.to_string(),
+            name: info.name,
+            encrypted: info.encrypted,
+            members,
+            messages,
+            attachments,
+            input: String::new(),
+            input_active: false,
+            last_typing_sent: None,
+            scroll: 0,
+            follow_mode: true,
+            last_max_scroll: Cell::new(0),
+            card_focus: false,
+            focused_card_idx: 0,
+            unread: 0,
+        });
+    }
+    app.switch_to_room(room_id);
 }
 
 /// Restores the terminal on drop — raw mode off, alternate screen left,
@@ -1680,7 +2052,7 @@ async fn main_loop(
                 }
                 Event::Mouse(m) => {
                     if matches!(m.kind, MouseEventKind::Down(MouseButton::Left))
-                        && app.screen == Screen::InRoom
+                        && app.current_pane_room_id().is_some()
                     {
                         // Click-to-toggle: clicking anywhere inside the
                         // chat area while we're in a room enters card
@@ -1735,33 +2107,11 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             Ok(false)
         }
         Action::LobbyNavigateUp => {
-            match app.lobby_focus {
-                LobbyFocus::Rooms => {
-                    if app.selected_room_idx > 0 {
-                        app.selected_room_idx -= 1;
-                    }
-                }
-                LobbyFocus::KnownPeers => {
-                    if app.selected_peer_idx > 0 {
-                        app.selected_peer_idx -= 1;
-                    }
-                }
-            }
+            sidebar_move(app, -1);
             Ok(false)
         }
         Action::LobbyNavigateDown => {
-            match app.lobby_focus {
-                LobbyFocus::Rooms => {
-                    if app.selected_room_idx + 1 < app.discovered_rooms.len() {
-                        app.selected_room_idx += 1;
-                    }
-                }
-                LobbyFocus::KnownPeers => {
-                    if app.selected_peer_idx + 1 < app.known_peers.len() {
-                        app.selected_peer_idx += 1;
-                    }
-                }
-            }
+            sidebar_move(app, 1);
             Ok(false)
         }
         Action::LobbyRefresh => {
@@ -1770,14 +2120,14 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             Ok(false)
         }
         Action::LobbyFocusToggle => {
-            app.lobby_focus = match app.lobby_focus {
-                LobbyFocus::Rooms => LobbyFocus::KnownPeers,
-                LobbyFocus::KnownPeers => LobbyFocus::Rooms,
-            };
+            // huddle 0.7: Tab now jumps to the next sidebar section
+            // (rather than toggling between two flat lists). Acts as
+            // pane-focus toggle when on the sidebar and a chat pane.
+            sidebar_jump_section(app, 1);
             Ok(false)
         }
         Action::LobbyReconnectPeer => {
-            if let Some(p) = app.known_peers.get(app.selected_peer_idx).cloned() {
+            if let Some(p) = app.known_peers.get(app.selected_known_idx).cloned() {
                 if let Err(e) = app.handle.redial(&p.address).await {
                     app.modal = Modal::Error(format!("dial failed: {e}"));
                 }
@@ -1785,13 +2135,13 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             Ok(false)
         }
         Action::LobbyForgetPeer => {
-            if let Some(p) = app.known_peers.get(app.selected_peer_idx).cloned() {
+            if let Some(p) = app.known_peers.get(app.selected_known_idx).cloned() {
                 if let Err(e) = app.handle.forget_peer(&p.address).await {
                     app.modal = Modal::Error(format!("forget failed: {e}"));
                 }
                 app.refresh_known_peers();
-                if app.selected_peer_idx >= app.known_peers.len() && !app.known_peers.is_empty() {
-                    app.selected_peer_idx = app.known_peers.len() - 1;
+                if app.selected_known_idx >= app.known_peers.len() && !app.known_peers.is_empty() {
+                    app.selected_known_idx = app.known_peers.len() - 1;
                 }
             }
             Ok(false)
@@ -1836,34 +2186,72 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             Ok(false)
         }
         Action::LobbyJoinSelected => {
-            if let Some(room) = app.discovered_rooms.get(app.selected_room_idx).cloned() {
-                // Already have a tab open — just focus it.
-                if let Some(idx) = app
-                    .open_rooms
-                    .iter()
-                    .position(|r| r.room_id == room.room_id)
-                {
-                    app.active_tab = idx;
-                    app.screen = Screen::InRoom;
-                    return Ok(false);
+            // huddle 0.7: Enter on the sidebar commits the selection.
+            // For Dm/Group items, switch the pane. For GroupDiscover
+            // children, walk the discovered list and join the first
+            // unjoined group.
+            match app.sidebar.selection.clone() {
+                SidebarItem::Dm(room_id) | SidebarItem::Group(room_id) => {
+                    if app.handle.active_room_info(&room_id).is_some() {
+                        open_existing_room_tab(app, &room_id);
+                        return Ok(false);
+                    }
+                    let room = app
+                        .handle
+                        .discovered_rooms()
+                        .into_iter()
+                        .find(|d| d.room_id == room_id);
+                    if let Some(room) = room {
+                        if room.encrypted {
+                            app.modal = Modal::JoinRoom(JoinRoomState {
+                                room_id: room.room_id.clone(),
+                                room_name: room.name.clone(),
+                                encrypted: true,
+                                passphrase: String::new(),
+                            });
+                        } else if let Err(e) = app.handle.join_room(&room.room_id, None).await {
+                            app.modal = Modal::Error(format!("join failed: {e}"));
+                        }
+                    }
                 }
-                // Already an active room (auto-restored, or joined earlier
-                // this session) — open a tab without re-running the join
-                // flow. Applies to encrypted rooms too: we already hold the
-                // passphrase-derived key, so re-prompting would be wrong.
-                if app.handle.active_room_info(&room.room_id).is_some() {
-                    open_existing_room_tab(app, &room.room_id);
-                    return Ok(false);
+                SidebarItem::Section(s) => {
+                    // Enter on a section header toggles its expand state.
+                    if app.sidebar.expanded.contains(&s) {
+                        app.sidebar.expanded.remove(&s);
+                    } else {
+                        app.sidebar.expanded.insert(s);
+                    }
                 }
-                if room.encrypted {
-                    app.modal = Modal::JoinRoom(JoinRoomState {
-                        room_id: room.room_id.clone(),
-                        room_name: room.name.clone(),
-                        encrypted: true,
-                        passphrase: String::new(),
-                    });
-                } else if let Err(e) = app.handle.join_room(&room.room_id, None).await {
-                    app.modal = Modal::Error(format!("join failed: {e}"));
+                SidebarItem::Profile => app.pane = Pane::Profile,
+                SidebarItem::Person(_) => app.pane = Pane::People,
+                SidebarItem::Activity => app.pane = Pane::Activity,
+                SidebarItem::Settings => app.pane = Pane::Settings,
+                SidebarItem::GroupDiscover => {
+                    // Find first unjoined group room and open its join modal.
+                    if let Some(room) = app
+                        .handle
+                        .discovered_rooms()
+                        .into_iter()
+                        .find(|r| {
+                            r.kind != huddle_core::storage::repo::RoomKind::Direct
+                                && !app
+                                    .handle
+                                    .active_room_ids()
+                                    .iter()
+                                    .any(|aid| aid == &r.room_id)
+                        })
+                    {
+                        if room.encrypted {
+                            app.modal = Modal::JoinRoom(JoinRoomState {
+                                room_id: room.room_id.clone(),
+                                room_name: room.name.clone(),
+                                encrypted: true,
+                                passphrase: String::new(),
+                            });
+                        } else if let Err(e) = app.handle.join_room(&room.room_id, None).await {
+                            app.modal = Modal::Error(format!("join failed: {e}"));
+                        }
+                    }
                 }
             }
             Ok(false)
@@ -1937,7 +2325,11 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             }
             app.modal = Modal::None;
             let pp = if encrypted { Some(passphrase.as_str()) } else { None };
-            if let Err(e) = app.handle.start_room(&name, encrypted, pp).await {
+            if let Err(e) = app
+                .handle
+                .start_room(&name, encrypted, pp, huddle_core::storage::repo::RoomKind::Group)
+                .await
+            {
                 app.modal = Modal::Error(format!("start failed: {e}"));
             }
             Ok(false)
@@ -1966,38 +2358,32 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             Ok(false)
         }
         Action::TabNext => {
-            if !app.open_rooms.is_empty() {
-                app.active_tab = (app.active_tab + 1) % app.open_rooms.len();
-                if let Some(r) = app.active_room_mut() {
-                    r.unread = 0;
-                }
-            }
+            // huddle 0.7: Tab-next now walks DM + Group rooms in
+            // sidebar order. Retired the tab-bar concept; sidebar is
+            // the navigation source of truth.
+            switch_chat_relative(app, 1);
             Ok(false)
         }
         Action::TabPrev => {
-            if !app.open_rooms.is_empty() {
-                app.active_tab = if app.active_tab == 0 {
-                    app.open_rooms.len() - 1
-                } else {
-                    app.active_tab - 1
-                };
-                if let Some(r) = app.active_room_mut() {
-                    r.unread = 0;
-                }
-            }
+            switch_chat_relative(app, -1);
             Ok(false)
         }
         Action::TabSelect(n) => {
-            if n < app.open_rooms.len() {
-                app.active_tab = n;
-                if let Some(r) = app.active_room_mut() {
-                    r.unread = 0;
-                }
-            }
+            // huddle 0.7: Alt+1..9 jumps to the Nth chat (DM + Group
+            // combined, sidebar order).
+            switch_chat_absolute(app, n);
             Ok(false)
         }
         Action::BackToLobby => {
-            app.screen = Screen::Lobby;
+            // huddle 0.7: "back to lobby" is now "focus the sidebar".
+            // The Welcome pane is the home screen.
+            app.sidebar.focus = SidebarFocus::Sidebar;
+            if matches!(app.pane, Pane::Dm(_) | Pane::Group(_)) {
+                // Don't actually change pane — let the user choose. The
+                // explicit way to leave a chat is `Ctrl+L` (LeaveRoom).
+            } else {
+                app.pane = Pane::Welcome;
+            }
             Ok(false)
         }
         Action::LeaveRoom => {
@@ -2652,8 +3038,8 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             // detected addr isn't reachable from outside.
             let host_multiaddr = format!("{}/p2p/{}", listen, our_peer);
 
-            let room = match (app.screen, app.active_room()) {
-                (Screen::InRoom, Some(r)) => {
+            let room = match app.active_room() {
+                Some(r) => {
                     if let Some(info) = app.handle.active_room_info(&r.room_id) {
                         let salt_b64 = info.passphrase_salt.as_ref().map(|s| {
                             base64::engine::general_purpose::STANDARD.encode(s)
@@ -2779,13 +3165,22 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             Ok(false)
         }
         Action::OpenJoinWithCode => {
-            // Only meaningful on the Rooms focus + encrypted selection.
-            if !matches!(app.lobby_focus, LobbyFocus::Rooms) {
-                return Ok(false);
-            }
-            let room = match app.discovered_rooms.get(app.selected_room_idx).cloned() {
+            // huddle 0.7: meaningful on a Group sidebar item or the
+            // GroupDiscover row.
+            let room = match &app.sidebar.selection {
+                SidebarItem::Group(id) | SidebarItem::Dm(id) => app
+                    .handle
+                    .discovered_rooms()
+                    .into_iter()
+                    .find(|d| d.room_id == *id),
+                _ => None,
+            };
+            let room = match room {
                 Some(r) => r,
-                None => return Ok(false),
+                None => {
+                    app.set_status("select an encrypted group in the sidebar first");
+                    return Ok(false);
+                }
             };
             if !room.encrypted {
                 app.set_status("code-join only applies to encrypted rooms");
@@ -3279,7 +3674,156 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             }
             Ok(false)
         }
+        // huddle 0.7 sidebar/pane helpers
+        Action::SidebarSectionPrev => {
+            sidebar_jump_section(app, -1);
+            Ok(false)
+        }
+        Action::SidebarToggleExpand => {
+            sidebar_toggle_expand(app);
+            Ok(false)
+        }
+        Action::JumpToPeoplePane => {
+            app.pane = Pane::People;
+            app.sidebar.selection = SidebarItem::Section(SidebarSection::People);
+            Ok(false)
+        }
+        Action::JumpToSettingsPane => {
+            app.pane = Pane::Settings;
+            app.sidebar.selection = SidebarItem::Section(SidebarSection::Settings);
+            Ok(false)
+        }
+        Action::OpenComposeDm => {
+            app.modal = Modal::ComposeDm(ComposeDmState::default());
+            Ok(false)
+        }
+        Action::ComposeDmTypeChar(c) => {
+            if let Modal::ComposeDm(s) = &mut app.modal {
+                s.input.push(c);
+            }
+            Ok(false)
+        }
+        Action::ComposeDmBackspace => {
+            if let Modal::ComposeDm(s) = &mut app.modal {
+                s.input.pop();
+            }
+            Ok(false)
+        }
+        Action::ComposeDmCancel => {
+            app.modal = Modal::None;
+            Ok(false)
+        }
+        Action::ComposeDmConfirm => {
+            let input = match &app.modal {
+                Modal::ComposeDm(s) => s.input.trim().to_string(),
+                _ => return Ok(false),
+            };
+            if input.is_empty() {
+                return Ok(false);
+            }
+            // Resolve input to a fingerprint via lookup helpers, then
+            // start the DM. On unresolvable input we morph to AddFriend.
+            let resolved = resolve_dm_target(app, &input);
+            match resolved {
+                Some(fp) => {
+                    app.modal = Modal::None;
+                    match app.handle.start_direct(&fp).await {
+                        Ok(room_id) => {
+                            app.switch_to_room(&room_id);
+                            app.set_status(format!("DM with {}", short_fp(&fp)));
+                        }
+                        Err(e) => app.modal = Modal::Error(format!("DM failed: {e}")),
+                    }
+                }
+                None => {
+                    // State C: unrecognized text → morph into AddFriend.
+                    app.modal = Modal::AddFriend(AddFriendState { input });
+                }
+            }
+            Ok(false)
+        }
+        Action::ToggleMemberMargin => {
+            app.show_member_margin = !app.show_member_margin;
+            Ok(false)
+        }
+        Action::PeopleFocusNext => {
+            app.people_focus = match app.people_focus {
+                PeopleFocus::Known => PeopleFocus::Verified,
+                PeopleFocus::Verified => PeopleFocus::Blocked,
+                PeopleFocus::Blocked => PeopleFocus::Known,
+            };
+            Ok(false)
+        }
+        Action::PeoplePersonReconnect => {
+            if let Some(p) = app.known_peers.get(app.selected_known_idx).cloned() {
+                if let Err(e) = app.handle.redial(&p.address).await {
+                    app.modal = Modal::Error(format!("dial failed: {e}"));
+                }
+            }
+            Ok(false)
+        }
+        Action::PeoplePersonBlock => {
+            if let Some(p) = app.known_peers.get(app.selected_known_idx).cloned() {
+                if let Some(fp) = p.label.as_deref() {
+                    let _ = app.handle.block_peer(fp);
+                    app.set_status(format!("blocked {}", short_fp(fp)));
+                }
+            }
+            Ok(false)
+        }
+        Action::PeoplePersonUnblock => {
+            let blocked = app.handle.list_blocked_peers();
+            if let Some(fp) = blocked.get(app.selected_blocked_idx).cloned() {
+                let _ = app.handle.unblock_peer(&fp);
+                app.set_status(format!("unblocked {}", short_fp(&fp)));
+            }
+            Ok(false)
+        }
+        Action::PeoplePersonForget => {
+            if let Some(p) = app.known_peers.get(app.selected_known_idx).cloned() {
+                let _ = app.handle.forget_peer(&p.address).await;
+                app.refresh_known_peers();
+            }
+            Ok(false)
+        }
+        Action::PeoplePersonStartDm => {
+            if let Some(p) = app.known_peers.get(app.selected_known_idx).cloned() {
+                if let Some(fp) = p.label.clone() {
+                    match app.handle.start_direct(&fp).await {
+                        Ok(rid) => app.switch_to_room(&rid),
+                        Err(e) => app.modal = Modal::Error(format!("DM failed: {e}")),
+                    }
+                }
+            }
+            Ok(false)
+        }
     }
+}
+
+/// huddle 0.7: resolve user-typed compose-DM input to a fingerprint.
+/// Accepts:
+///   - exact HD-... ID (branded)
+///   - bare 24-char hex
+///   - any peer username (from `peer_profiles`) — first match wins
+///   - any known-peer label
+fn resolve_dm_target(app: &TuiApp, input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    // Reuse the dial-by-id-or-username normalizer for HD/hex paths.
+    let normalized = huddle_core::app::normalize_to_fingerprint(trimmed);
+    if let Some(fp) = normalized {
+        return Some(fp);
+    }
+    // Username lookup — peer_profiles cache keyed by username.
+    for p in &app.known_peers {
+        if let Some(label) = &p.label {
+            if let Some(name) = app.handle.lookup_username(label) {
+                if name.eq_ignore_ascii_case(trimmed) {
+                    return Some(label.clone());
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Extract (room_id, file_id, status, encrypted) for the active room's
@@ -3423,7 +3967,8 @@ pub async fn run_palette_action(label: &str, app: &mut TuiApp) -> Result<bool> {
             return Box::pin(handle_action(Action::LeaveRoom, app)).await;
         }
         "back to lobby" => {
-            app.screen = Screen::Lobby;
+            app.pane = Pane::Welcome;
+            app.sidebar.focus = SidebarFocus::Sidebar;
         }
         "search room history" => {
             return Box::pin(handle_action(Action::OpenSearch, app)).await;

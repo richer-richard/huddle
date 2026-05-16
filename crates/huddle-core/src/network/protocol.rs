@@ -9,6 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::files::encryption::EncryptedFileMeta;
+use crate::storage::repo::RoomKind;
 
 pub const ROOMS_TOPIC: &str = "huddle-rooms-v1";
 pub const ROOM_TOPIC_PREFIX: &str = "huddle-room-";
@@ -117,6 +118,13 @@ pub struct RoomAnnouncement {
     /// requiring an invite link.
     #[serde(default)]
     pub host_addrs: Vec<String>,
+    /// huddle 0.7: explicit room kind. `RoomKind::Direct` (1-1 DM) is
+    /// filtered out by honest 0.7+ consumers if neither member is them —
+    /// DMs never leak past the two participants' sidebars. Pre-0.7
+    /// peers omit the field, which `#[serde(default)]` resolves to
+    /// `RoomKind::Group` (`Default` impl) — they keep working unchanged.
+    #[serde(default)]
+    pub kind: RoomKind,
 }
 
 /// All messages on a room's per-room topic.
@@ -303,11 +311,52 @@ mod tests {
             owner_fingerprints: vec!["creator-fp".into()],
             verified_only: false,
             host_addrs: vec![],
+            kind: RoomKind::Group,
         };
         let json = serde_json::to_vec(&ann).unwrap();
         let back: RoomAnnouncement = serde_json::from_slice(&json).unwrap();
         assert_eq!(back.name, "general");
         assert_eq!(back.passphrase_salt, Some(vec![1, 2, 3, 4]));
+        assert_eq!(back.kind, RoomKind::Group);
+    }
+
+    #[test]
+    fn room_announcement_direct_kind_round_trip() {
+        let ann = RoomAnnouncement {
+            room_id: "dm-rid".into(),
+            name: "dm".into(),
+            encrypted: false,
+            passphrase_salt: None,
+            member_count: 2,
+            creator_fingerprint: "alice-fp".into(),
+            announced_at: 100,
+            owner_fingerprints: vec![],
+            verified_only: false,
+            host_addrs: vec![],
+            kind: RoomKind::Direct,
+        };
+        let json = serde_json::to_vec(&ann).unwrap();
+        let back: RoomAnnouncement = serde_json::from_slice(&json).unwrap();
+        assert_eq!(back.kind, RoomKind::Direct);
+    }
+
+    #[test]
+    fn room_announcement_missing_kind_defaults_to_group() {
+        // Simulates a pre-0.7 peer's announcement: same JSON shape
+        // without the `kind` field. The serde(default) attribute on the
+        // field must resolve to RoomKind::Group so older peers keep
+        // working unchanged.
+        let pre_0_7_json = serde_json::json!({
+            "room_id": "rid",
+            "name": "general",
+            "encrypted": false,
+            "passphrase_salt": null,
+            "member_count": 1,
+            "creator_fingerprint": "creator-fp",
+            "announced_at": 100,
+        });
+        let back: RoomAnnouncement = serde_json::from_value(pre_0_7_json).unwrap();
+        assert_eq!(back.kind, RoomKind::Group);
     }
 
     #[test]

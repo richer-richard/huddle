@@ -4,7 +4,7 @@
 // adaptive hint bar all read this table — adding a new key here is the
 // only place you have to touch. Keep this in sync with `input.rs`.
 
-use crate::app::{LobbyFocus, Modal, Screen, TuiApp};
+use crate::app::{Modal, Pane, TuiApp};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Context {
@@ -406,54 +406,72 @@ pub fn adaptive_hints(app: &TuiApp) -> Vec<(&'static str, &'static str)> {
     if !matches!(app.modal, Modal::None) {
         return out;
     }
-    match app.screen {
-        Screen::Lobby => {
-            // Highest-priority lobby actions depend on whether the user
-            // has any peers / rooms yet.
-            if app.known_peers.is_empty() && app.discovered_rooms.is_empty() {
+    let in_chat = matches!(app.pane, Pane::Dm(_) | Pane::Group(_));
+    if !in_chat {
+        // Sidebar / non-chat pane hints.
+        match &app.pane {
+            Pane::Welcome => {
+                out.push(("m", "DM someone"));
+                out.push(("g", "new group"));
                 out.push(("a", "add friend"));
-                out.push(("s", "start room"));
                 out.push(("v", "paste invite"));
-            } else if app.lobby_focus == LobbyFocus::KnownPeers && !app.known_peers.is_empty() {
-                out.push(("Enter", "reconnect"));
-                out.push(("r", "retry"));
-                out.push(("x", "forget"));
-                out.push(("s", "start room"));
-            } else if !app.discovered_rooms.is_empty() {
-                out.push(("Enter", "join"));
-                out.push(("s", "start room"));
-                out.push(("a", "add friend"));
-                out.push(("c", "join with code"));
-            }
-            out.push(("Tab", "switch focus"));
-            out.push(("?", "help"));
-            out.push(("Ctrl+P", "palette"));
-            out.push(("q", "quit"));
-        }
-        Screen::InRoom => {
-            let r = app.active_room();
-            let input_active = r.map(|r| r.input_active).unwrap_or(false);
-            let card_focus = r.map(|r| r.card_focus).unwrap_or(false);
-            if card_focus {
-                out.push(("j/k", "navigate"));
-                out.push(("Enter", "save"));
-                out.push(("o", "open"));
-                out.push(("Esc/f", "exit"));
-            } else if input_active {
-                out.push(("Enter", "send"));
-                out.push(("Alt+↵", "newline"));
-                out.push(("Esc", "blur"));
-                out.push(("PgUp", "scroll"));
+                out.push(("i", "QR"));
                 out.push(("Ctrl+P", "palette"));
-            } else {
-                out.push(("/", "type"));
-                out.push(("Tab", "next tab"));
-                out.push(("Ctrl+F", "search"));
-                out.push(("Ctrl+V", "verify"));
-                out.push(("Ctrl+L", "leave"));
-                out.push(("Ctrl+B", "lobby"));
+            }
+            Pane::Profile => {
+                out.push(("E", "edit name"));
+                out.push(("Q", "QR"));
+                out.push(("Shift+I", "invite"));
+                out.push((",", "settings"));
+            }
+            Pane::People => {
+                out.push(("Tab", "next list"));
+                out.push(("m", "DM"));
+                out.push(("r", "reconnect"));
+                out.push(("b", "block"));
+                out.push(("x", "forget"));
+            }
+            Pane::Activity => {
+                out.push(("c", "clear"));
                 out.push(("?", "help"));
             }
+            Pane::Settings => {
+                out.push(("V", "verified-only"));
+                out.push(("U", "update check"));
+                out.push(("E", "username"));
+                out.push(("!", "go dark"));
+            }
+            _ => {}
+        }
+        out.push(("?", "help"));
+        out.push(("q", "quit"));
+    } else {
+            let r = app.active_room();
+        let room = app.active_room();
+        let input_active = room.map(|r| r.input_active).unwrap_or(false);
+        let card_focus = room.map(|r| r.card_focus).unwrap_or(false);
+        let is_group = matches!(app.pane, Pane::Group(_));
+        if card_focus {
+            out.push(("j/k", "navigate"));
+            out.push(("Enter", "save"));
+            out.push(("o", "open"));
+            out.push(("Esc/f", "exit"));
+        } else if input_active {
+            out.push(("Enter", "send"));
+            out.push(("Alt+↵", "newline"));
+            out.push(("Esc", "blur"));
+            out.push(("PgUp", "scroll"));
+            out.push(("Ctrl+P", "palette"));
+        } else {
+            out.push(("/", "type"));
+            out.push(("Ctrl+V", "verify"));
+            out.push(("Ctrl+F", "search"));
+            out.push(("Ctrl+A", "attach"));
+            if is_group {
+                out.push(("Ctrl+I", "members"));
+            }
+            out.push(("Ctrl+L", "leave"));
+            out.push(("Esc", "sidebar"));
         }
     }
     out

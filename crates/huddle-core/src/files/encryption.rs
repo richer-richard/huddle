@@ -122,7 +122,7 @@ pub fn decrypt_file(
 mod tests {
     use super::*;
     use crate::storage::open_db_in_memory;
-    use crate::storage::repo::{insert_room, StoredRoom};
+    use crate::storage::repo::{insert_room, RoomKind, StoredRoom};
 
     fn make_room(id: &str) -> StoredRoom {
         StoredRoom {
@@ -133,6 +133,7 @@ mod tests {
             passphrase_salt: None,
             created_at: 1,
             last_active: None,
+            kind: RoomKind::Group,
         }
     }
 

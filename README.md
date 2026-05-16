@@ -402,6 +402,88 @@ Phase 2 cap is 1 MiB per file.
 - The SAS emoji table follows Matrix MSC 2241 for future cross-client
   compatibility but is not yet interop-tested against any other client.
 
+## What's new in 0.7 — TUI 2.0
+
+`0.7.0` is a brand-new TUI built around a **sidebar + pane** layout
+(Discord/Slack-style), with explicit separation of **Direct messages**
+from **Group rooms**. The old `Screen::{Lobby, InRoom}` flat-screen
+model and the tab-bar are retired.
+
+### Sidebar sections
+
+| Section          | What it shows                                            |
+| ---------------- | -------------------------------------------------------- |
+| Profile          | you: username, HD-ID, NAT badge, listen addresses        |
+| Direct messages  | 1-1 DMs (`RoomKind::Direct`, 2-people-forever)           |
+| Group rooms      | every multi-peer room, plus a Discover row for unjoined  |
+| People           | known peers, verified peers, blocked peers in one block  |
+| Activity         | status history + in-flight file transfers                |
+| Settings         | global toggles + blocked-peer manager + go-dark          |
+
+### Key bindings (huddle 0.7)
+
+| Anywhere (sidebar focus or non-chat pane) | Action |
+| ----------------------------------------- | ------ |
+| `m`                                       | start a DM (Compose-DM modal) |
+| `g`                                       | start a group room |
+| `p`                                       | jump to People pane |
+| `,`                                       | jump to Settings pane |
+| `i`                                       | show QR / HD-ID |
+| `Shift+I`                                 | generate invite link |
+| `a`                                       | add friend by HD-ID / username |
+| `v`                                       | paste an invite link |
+| `c`                                       | join with code |
+| `Tab` / `Shift+Tab`                       | jump between sidebar sections |
+| `Space` / `←` / `→`                       | expand / collapse a section |
+| `j` / `k`                                 | move sidebar cursor |
+| `Enter`                                   | open the selected row |
+| `Ctrl+P` / `:`                            | command palette |
+| `Ctrl+H`                                  | notification quick-glance |
+| `?`                                       | help |
+| `R`                                       | mark all rooms read |
+| `q` / `Ctrl+C`                            | quit |
+
+| In a chat pane (DM or Group)              | Action |
+| ----------------------------------------- | ------ |
+| `/`                                       | focus the input |
+| `Esc`                                     | blur input / focus sidebar |
+| `Ctrl+V`                                  | SAS-verify partner |
+| `Ctrl+F`                                  | search room history |
+| `Ctrl+A`                                  | attach a file |
+| `Ctrl+L`                                  | leave the room |
+| `Ctrl+I` (group only)                     | toggle member margin |
+| `Ctrl+K` / `Ctrl+G` (group + owner)       | kick / grant-owner |
+| `Ctrl+R` (group + owner)                  | rotate room key |
+| `Ctrl+J` (group + owner)                  | generate join code |
+| `Ctrl+M` (group)                          | toggle mute |
+| `Ctrl+O` (group + owner)                  | toggle verified-only-join |
+| `Shift+B` (group + owner)                 | view bans |
+| `Alt+Enter` / `Ctrl+J`                    | newline in input |
+
+### Direct messages are 1-1 forever
+
+`RoomKind::Direct` is persisted on the rooms table; the canonical
+DM room ID is `sha256("huddle-dm-v1\0" || min(fp_a, fp_b) || "\0" ||
+max(fp_a, fp_b))`. Both peers, regardless of who clicks `m` first,
+derive the same room ID — `start_direct` is idempotent across both
+peers and across reinstalls. A third member cannot join a DM
+(`MemberAnnounce` past the 2-member cap is dropped locally), and
+DM-kind announcements are filtered out of third parties' discovery
+caches.
+
+> ⚠️ **v1 DMs are not E2E encrypted on the room layer** —
+> privacy comes from the canonical-ID + visibility-filter combo
+> plus libp2p Noise transport encryption. E2E for DMs is a v0.8
+> target.
+
+### Retired
+
+- `Screen::{Lobby, InRoom}` binary — replaced by `Pane` enum.
+- The tab-bar and numeric `1..9` tab jumps.
+- `Ctrl+B` (back-to-lobby in chat) — `Esc` focuses sidebar instead.
+- `LobbyFocus` (the two-list focus toggle) — sidebar focus model.
+- The flat `discovered_rooms` list — split into DM / Group sections.
+
 ## What's new in 0.6 (UX overhaul)
 
 `0.6.0` is a focused UX release. The protocol surface didn't change;

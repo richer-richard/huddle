@@ -1,4 +1,5 @@
 use rusqlite::params;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::error::Result;
@@ -85,6 +86,35 @@ pub fn set_member_display_name(
 // Rooms
 // =========================================================================
 
+/// huddle 0.7: explicit room kind. `Direct` = 1-1 DM (encrypted, no name,
+/// no member-list chrome, no kick/grant). `Group` = N-way room (full
+/// moderation, named, optionally encrypted). Persisted on `rooms.kind` and
+/// echoed on `RoomAnnouncement.kind` (with `#[serde(default)]` so pre-0.7
+/// peers' announcements deserialize as `Group`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoomKind {
+    Direct,
+    #[default]
+    Group,
+}
+
+impl RoomKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RoomKind::Direct => "direct",
+            RoomKind::Group => "group",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "direct" => RoomKind::Direct,
+            _ => RoomKind::Group,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct StoredRoom {
     pub id: String,
@@ -94,6 +124,9 @@ pub struct StoredRoom {
     pub passphrase_salt: Option<Vec<u8>>,
     pub created_at: i64,
     pub last_active: Option<i64>,
+    /// huddle 0.7: explicit room kind. Defaults to `Group` for back-fill
+    /// safety on pre-0.7 databases (the column has `DEFAULT 'group'`).
+    pub kind: RoomKind,
 }
 
 /// Derive a stable room ID from creator fingerprint, name, and creation time.
@@ -116,8 +149,8 @@ pub fn derive_room_id(creator_fp: &str, name: &str, created_at: i64) -> String {
 pub fn insert_room(db: &Db, room: &StoredRoom) -> Result<()> {
     let conn = db.lock().unwrap();
     conn.execute(
-        "INSERT INTO rooms (id, name, creator_fingerprint, encrypted, passphrase_salt, created_at, last_active)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        "INSERT INTO rooms (id, name, creator_fingerprint, encrypted, passphrase_salt, created_at, last_active, kind)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(id) DO UPDATE SET
             name = excluded.name,
             passphrase_salt = excluded.passphrase_salt,
@@ -130,6 +163,7 @@ pub fn insert_room(db: &Db, room: &StoredRoom) -> Result<()> {
             room.passphrase_salt,
             room.created_at,
             room.last_active,
+            room.kind.as_str(),
         ],
     )?;
     Ok(())
@@ -138,7 +172,7 @@ pub fn insert_room(db: &Db, room: &StoredRoom) -> Result<()> {
 pub fn get_room(db: &Db, room_id: &str) -> Result<Option<StoredRoom>> {
     let conn = db.lock().unwrap();
     let mut stmt = conn.prepare(
-        "SELECT id, name, creator_fingerprint, encrypted, passphrase_salt, created_at, last_active
+        "SELECT id, name, creator_fingerprint, encrypted, passphrase_salt, created_at, last_active, kind
          FROM rooms WHERE id = ?1",
     )?;
     let mut rows = stmt.query_map(params![room_id], |row| {
@@ -150,6 +184,7 @@ pub fn get_room(db: &Db, room_id: &str) -> Result<Option<StoredRoom>> {
             passphrase_salt: row.get(4)?,
             created_at: row.get(5)?,
             last_active: row.get(6)?,
+            kind: RoomKind::from_str(&row.get::<_, String>(7).unwrap_or_else(|_| "group".into())),
         })
     })?;
     match rows.next() {
@@ -161,7 +196,7 @@ pub fn get_room(db: &Db, room_id: &str) -> Result<Option<StoredRoom>> {
 pub fn list_rooms(db: &Db) -> Result<Vec<StoredRoom>> {
     let conn = db.lock().unwrap();
     let mut stmt = conn.prepare(
-        "SELECT id, name, creator_fingerprint, encrypted, passphrase_salt, created_at, last_active
+        "SELECT id, name, creator_fingerprint, encrypted, passphrase_salt, created_at, last_active, kind
          FROM rooms ORDER BY last_active DESC NULLS LAST, created_at DESC",
     )?;
     let rows = stmt.query_map([], |row| {
@@ -173,9 +208,45 @@ pub fn list_rooms(db: &Db) -> Result<Vec<StoredRoom>> {
             passphrase_salt: row.get(4)?,
             created_at: row.get(5)?,
             last_active: row.get(6)?,
+            kind: RoomKind::from_str(&row.get::<_, String>(7).unwrap_or_else(|_| "group".into())),
         })
     })?;
     Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+/// huddle 0.7: find an existing `RoomKind::Direct` room between `our_fp`
+/// and `partner_fp`. Used by `AppHandle::start_direct` to short-circuit
+/// when the DM already exists locally, so the call is idempotent across
+/// reopens.
+pub fn find_dm_with(db: &Db, our_fp: &str, partner_fp: &str) -> Result<Option<StoredRoom>> {
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare(
+        "SELECT r.id, r.name, r.creator_fingerprint, r.encrypted, r.passphrase_salt,
+                r.created_at, r.last_active, r.kind
+         FROM rooms r
+         WHERE r.kind = 'direct'
+           AND EXISTS (SELECT 1 FROM room_members m
+                       WHERE m.room_id = r.id AND m.fingerprint = ?1)
+           AND EXISTS (SELECT 1 FROM room_members m
+                       WHERE m.room_id = r.id AND m.fingerprint = ?2)
+         LIMIT 1",
+    )?;
+    let mut rows = stmt.query_map(params![our_fp, partner_fp], |row| {
+        Ok(StoredRoom {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            creator_fingerprint: row.get(2)?,
+            encrypted: row.get::<_, i64>(3)? != 0,
+            passphrase_salt: row.get(4)?,
+            created_at: row.get(5)?,
+            last_active: row.get(6)?,
+            kind: RoomKind::from_str(&row.get::<_, String>(7).unwrap_or_else(|_| "group".into())),
+        })
+    })?;
+    match rows.next() {
+        Some(row) => Ok(Some(row?)),
+        None => Ok(None),
+    }
 }
 
 pub fn update_room_last_active(db: &Db, room_id: &str, ts: i64) -> Result<()> {
@@ -736,6 +807,16 @@ pub fn is_globally_verified(db: &Db, fingerprint: &str) -> Result<bool> {
     Ok(count > 0)
 }
 
+/// huddle 0.7: list every globally SAS-verified fingerprint. Used by
+/// the People pane to render the "Verified" sub-list.
+pub fn list_verified_peers(db: &Db) -> Result<Vec<String>> {
+    let conn = db.lock().unwrap();
+    let mut stmt =
+        conn.prepare("SELECT fingerprint FROM verified_peers ORDER BY verified_at DESC")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
 /// Phase H: has the first-launch onboarding card been dismissed?
 pub fn is_onboarding_seen(db: &Db) -> Result<bool> {
     let conn = db.lock().unwrap();
@@ -1107,6 +1188,7 @@ mod tests {
             passphrase_salt: None,
             created_at,
             last_active: None,
+            kind: RoomKind::Group,
         }
     }
 

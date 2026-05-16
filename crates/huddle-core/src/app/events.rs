@@ -1,5 +1,7 @@
 use libp2p::PeerId;
 
+use crate::storage::repo::RoomKind;
+
 #[derive(Debug, Clone)]
 pub struct DiscoveredRoom {
     pub room_id: String,
@@ -18,6 +20,12 @@ pub struct DiscoveredRoom {
     /// to resolve an HD- ID or username back to a dialable address
     /// when the target is on our gossipsub mesh.
     pub host_addrs: Vec<String>,
+    /// huddle 0.7: routing hint for the sidebar — `Direct` lands in the
+    /// "Direct messages" section, `Group` in "Group rooms". The
+    /// `discovered_rooms()` accessor filters out Direct entries whose
+    /// two members don't include us, so a DM never leaks into a third
+    /// party's sidebar.
+    pub kind: RoomKind,
 }
 
 #[derive(Debug, Clone)]

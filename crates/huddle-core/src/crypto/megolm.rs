@@ -239,7 +239,7 @@ fn now_unix() -> i64 {
 mod tests {
     use super::*;
     use crate::storage::open_db_in_memory;
-    use crate::storage::repo::{derive_room_id, insert_room, StoredRoom};
+    use crate::storage::repo::{derive_room_id, insert_room, RoomKind, StoredRoom};
 
     fn setup_room(db: &Db, name: &str, creator_fp: &str) -> String {
         let created_at = 1000;
@@ -251,6 +251,7 @@ mod tests {
             passphrase_salt: None,
             created_at,
             last_active: None,
+            kind: RoomKind::Group,
         };
         let id = room.id.clone();
         insert_room(db, &room).unwrap();

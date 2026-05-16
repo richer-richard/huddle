@@ -194,6 +194,7 @@ fn run_doctor() -> Result<()> {
     use std::fs;
 
     println!("huddle {}", env!("CARGO_PKG_VERSION"));
+    println!("tui version: 2.0 (sidebar + pane)");
     println!("repository: https://github.com/richer-richard/huddle");
     println!();
     println!("paths:");

@@ -1203,6 +1203,100 @@ pub fn render_go_dark(f: &mut Frame, s: &crate::app::GoDarkState) {
     f.render_widget(para, area);
 }
 
+/// huddle 0.7: Compose-DM modal. Single-field input with inline
+/// suggestions pulled from `known_peers` + `peer_profiles`. On confirm
+/// the action handler calls `start_direct(fp)`; on unresolvable input
+/// it morphs into `AddFriend` semantics (same modal recycled).
+pub fn render_compose_dm(
+    f: &mut Frame,
+    s: &crate::app::ComposeDmState,
+    app: &crate::app::TuiApp,
+) {
+    let area = centered_rect(64, 16, f.area());
+    f.render_widget(Clear, area);
+    let displayed = if s.input.is_empty() {
+        Span::styled(
+            "type a username or HD-ID...",
+            Style::default().fg(Color::DarkGray),
+        )
+    } else {
+        Span::styled(s.input.clone(), Style::default().fg(Color::White).bold())
+    };
+    // Inline autocomplete: filter known_peers by label prefix.
+    let mut suggestions: Vec<String> = Vec::new();
+    if !s.input.is_empty() {
+        let q = s.input.to_ascii_lowercase();
+        for p in app.known_peers.iter().take(20) {
+            if let Some(label) = &p.label {
+                if let Some(name) = app.handle.lookup_username(label) {
+                    if name.to_ascii_lowercase().starts_with(&q) {
+                        suggestions.push(format!("{} ({})", name, crate::ui::short_fp(label)));
+                        continue;
+                    }
+                }
+                if label.to_ascii_lowercase().starts_with(&q) {
+                    suggestions.push(format!("HD-{}", &label.to_uppercase()));
+                }
+            }
+            if suggestions.len() >= 4 {
+                break;
+            }
+        }
+    }
+
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "  message who?",
+            Style::default().fg(Color::White),
+        )),
+        Line::from(Span::styled(
+            "  pick from your contacts, or paste an HD-ID.",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  > ", Style::default().fg(Color::Cyan).bold()),
+            displayed,
+        ]),
+    ];
+    if !suggestions.is_empty() {
+        lines.push(Line::from(""));
+        for s in &suggestions {
+            lines.push(Line::from(vec![
+                Span::styled("    · ", Style::default().fg(Color::DarkGray)),
+                Span::styled(s.clone(), Style::default().fg(Color::White)),
+            ]));
+        }
+    } else if !s.input.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "    (no match — Enter morphs into add-friend)",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled(" Enter", Style::default().fg(Color::Yellow)),
+        Span::styled(" start DM  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Esc", Style::default().fg(Color::Yellow)),
+        Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
+    ]));
+    let para = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan))
+                .padding(Padding::uniform(1))
+                .title(Span::styled(
+                    " compose DM ",
+                    Style::default().fg(Color::Cyan).bold(),
+                )),
+        );
+    f.render_widget(para, area);
+}
+
 pub fn render_add_friend(f: &mut Frame, s: &crate::app::AddFriendState) {
     let area = centered_rect(64, 14, f.area());
     f.render_widget(Clear, area);

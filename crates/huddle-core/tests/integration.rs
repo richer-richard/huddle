@@ -22,6 +22,7 @@ use huddle_core::app::events::AppEvent;
 use huddle_core::app::AppHandle;
 use huddle_core::network::NetworkMode;
 use huddle_core::storage;
+use huddle_core::storage::repo::RoomKind;
 use tokio::sync::broadcast;
 
 const DISCOVERY_TIMEOUT_SECS: u64 = 30;
@@ -46,7 +47,7 @@ async fn two_node_unencrypted_room_message_exchange() {
     let mut events_b = handle_b.subscribe();
 
     let room_id = handle_a
-        .start_room("test-room", false, None)
+        .start_room("test-room", false, None, RoomKind::Group)
         .await
         .unwrap();
 
@@ -128,7 +129,7 @@ async fn two_node_encrypted_room_message_exchange() {
     let mut events_b = handle_b.subscribe();
 
     let room_id = handle_a
-        .start_room("secret-room", true, Some("hunter2"))
+        .start_room("secret-room", true, Some("hunter2"), RoomKind::Group)
         .await
         .unwrap();
 
@@ -301,7 +302,7 @@ async fn phase_a_inbound_dial_accept_forms_mesh() {
 
     tokio::time::sleep(Duration::from_millis(1000)).await;
     let room_id = handle_a
-        .start_room("phase-a-accept", false, None)
+        .start_room("phase-a-accept", false, None, RoomKind::Group)
         .await
         .unwrap();
     let target = room_id.clone();
@@ -402,7 +403,7 @@ async fn phase_b_kick_rotates_key_and_excludes_banned() {
 
     // A starts an encrypted room; B and C join.
     let room_id = handle_a
-        .start_room("phase-b", true, Some("first-pass"))
+        .start_room("phase-b", true, Some("first-pass"), RoomKind::Group)
         .await
         .unwrap();
     let target = room_id.clone();
@@ -534,7 +535,7 @@ async fn phase_f_code_join_round_trip() {
     // A starts an encrypted room; B sees it via mDNS but DOES NOT have
     // the passphrase. We'll get B in by issuing a join code instead.
     let room_id = handle_a
-        .start_room("phase-f", true, Some("alice-only"))
+        .start_room("phase-f", true, Some("alice-only"), RoomKind::Group)
         .await
         .unwrap();
     let target = room_id.clone();

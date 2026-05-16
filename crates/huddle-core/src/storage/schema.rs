@@ -162,4 +162,14 @@ pub const MIGRATIONS: &[&str] = &[
         username TEXT,
         updated_at INTEGER NOT NULL
     );",
+    // huddle 0.7: explicit room kind ('direct' = 1-1 DM, 'group' = N-way
+    // room). Existing rooms back-fill to 'group' via the column default —
+    // they were created via the named `start_room` flow with group
+    // ergonomics from the start, so the back-fill is loss-free.
+    // RoomKind drives the sidebar split: DMs go in the Direct messages
+    // section, groups in Group rooms. Direct rooms also reject any
+    // MemberAnnounce that would push them past 2 members (honest-client
+    // enforcement) and are filtered out of third parties' discovery
+    // caches.
+    "ALTER TABLE rooms ADD COLUMN kind TEXT NOT NULL DEFAULT 'group';",
 ];

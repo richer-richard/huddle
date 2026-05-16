@@ -1,18 +1,22 @@
 pub mod file_card;
-pub mod lobby;
+pub mod layout;
 pub mod modal;
+pub mod pane;
 pub mod picker;
-pub mod room;
+pub mod sidebar;
+pub mod theme;
 
 use ratatui::prelude::*;
 
-use crate::app::{Modal, Screen, TuiApp};
+use crate::app::{Modal, TuiApp};
 
 pub fn render(f: &mut Frame, app: &TuiApp) {
-    match app.screen {
-        Screen::Lobby => lobby::render_lobby(f, f.area(), app),
-        Screen::InRoom => room::render_room_screen(f, f.area(), app),
-    }
+    // huddle 0.7: outer layout = header + (sidebar | pane) + status.
+    let rects = layout::outer_split(f.area());
+    sidebar::render_top_header(f, rects.header, app, &app.theme);
+    sidebar::render(f, rects.sidebar, app, &app.theme);
+    pane::render(f, rects.pane, app, &app.theme);
+    sidebar::render_status_footer(f, rects.status, app, &app.theme);
 
     match &app.modal {
         Modal::None => {}
@@ -45,6 +49,7 @@ pub fn render(f: &mut Frame, app: &TuiApp) {
         Modal::Help => modal::render_help(f, app.help_scroll),
         Modal::Error(msg) => modal::render_error(f, msg),
         Modal::Info(msg) => modal::render_info(f, msg),
+        Modal::ComposeDm(s) => modal::render_compose_dm(f, s, app),
     }
 }
 

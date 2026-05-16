@@ -22,7 +22,7 @@ use crate::network::events::NetworkEvent;
 use crate::network::protocol::{encode_wire, RoomAnnouncement, RoomMessage, WireMessage};
 use crate::network::{self, NetworkHandle, NetworkMode};
 use crate::storage::repo::{
-    self, derive_room_id, AttachmentStatus, KnownPeer, StoredAttachment, StoredRoom,
+    self, derive_room_id, AttachmentStatus, KnownPeer, RoomKind, StoredAttachment, StoredRoom,
     StoredRoomMember,
 };
 use crate::storage::{self, Db};
@@ -37,6 +37,27 @@ pub struct KnownPeerStatus {
     pub label: Option<String>,
     pub last_connected_at: Option<i64>,
     pub connected_peer_id: Option<PeerId>,
+}
+
+/// huddle 0.7: compute the deterministic room_id for a 1-1 DM between two
+/// fingerprints. Both peers, regardless of who calls `start_direct` first,
+/// derive identical IDs — no `created_at` mixing, no creator-fingerprint
+/// asymmetry. The pair is sorted lexicographically so the function is
+/// commutative.
+///
+/// Format: `hex(sha256("huddle-dm-v1\0" || min(a, b) || "\0" || max(a, b)))`
+/// truncated to 16 bytes (32 hex chars), matching the `derive_room_id`
+/// output length so the new DM IDs are indistinguishable from group IDs
+/// at the topic-name layer (small attacker uniformity benefit).
+pub fn canonical_dm_room_id(a: &str, b: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+    let mut hasher = Sha256::new();
+    hasher.update(b"huddle-dm-v1\0");
+    hasher.update(lo.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(hi.as_bytes());
+    hex::encode(&hasher.finalize()[..16])
 }
 
 /// Parse a user-entered dial address into a libp2p `Multiaddr`.
@@ -302,6 +323,7 @@ impl AppHandle {
 
     pub fn discovered_rooms(&self) -> Vec<DiscoveredRoom> {
         let now = now_unix();
+        let our_fp = self.identity.fingerprint().to_string();
         let mut by_id: HashMap<String, DiscoveredRoom> = self
             .discovered_rooms
             .lock()
@@ -321,6 +343,7 @@ impl AppHandle {
                 last_seen: now,
                 restorable: false,
                 host_addrs: Vec::new(),
+                kind: room.info.kind,
             };
             by_id
                 .entry(room.info.id.clone())
@@ -330,6 +353,7 @@ impl AppHandle {
                         d.member_count = entry.member_count;
                     }
                     d.restorable = false;
+                    d.kind = entry.kind;
                 })
                 .or_insert(entry);
         }
@@ -352,13 +376,57 @@ impl AppHandle {
                     last_seen: stored.last_active.unwrap_or(stored.created_at),
                     restorable: true,
                     host_addrs: Vec::new(),
+                    kind: stored.kind,
                 },
             );
         }
 
+        // huddle 0.7 DM-visibility filter: drop any `Direct` room we're
+        // not a member of. A DM's canonical room_id is
+        // `canonical_dm_room_id(fp_a, fp_b)`. If we're one of the pair we
+        // pass; otherwise we drop. Honest 0.7+ peers enforce this at the
+        // consumer; combined with the canonical-ID scheme it keeps DMs
+        // out of any third party's sidebar even if they happen to relay
+        // the gossipsub announcement.
+        by_id.retain(|room_id, d| {
+            if d.kind != RoomKind::Direct {
+                return true;
+            }
+            // Active rooms we host pass unconditionally — we always know
+            // we're a member of our own DM.
+            if self
+                .active_rooms
+                .lock()
+                .unwrap()
+                .contains_key(room_id)
+            {
+                return true;
+            }
+            // Otherwise: the announcer must be the other partner, AND
+            // the canonical pair must include us.
+            canonical_dm_room_id(&our_fp, &d.creator_fingerprint) == *room_id
+        });
+
         let mut v: Vec<DiscoveredRoom> = by_id.into_values().collect();
         v.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
         v
+    }
+
+    /// huddle 0.7: returns the fingerprint of the other party in a 1-1
+    /// DM. `None` for rooms that are `Group`, missing, or somehow have a
+    /// non-2-member state. Used by the DM-pane header to render the
+    /// partner's username + HD-ID.
+    pub fn dm_partner_fingerprint(&self, room_id: &str) -> Option<String> {
+        let our_fp = self.identity.fingerprint().to_string();
+        let rooms = self.active_rooms.lock().unwrap();
+        let room = rooms.get(room_id)?;
+        if room.info.kind != RoomKind::Direct {
+            return None;
+        }
+        room.members
+            .iter()
+            .find(|m| **m != our_fp)
+            .cloned()
     }
 
     pub fn active_room_ids(&self) -> Vec<String> {
@@ -400,11 +468,18 @@ impl AppHandle {
     }
 
     /// Create a new room. Returns its room_id.
+    ///
+    /// huddle 0.7: `kind` is now required. `RoomKind::Group` (the default)
+    /// preserves pre-0.7 behavior. `RoomKind::Direct` is reserved for
+    /// callers that have already computed a deterministic DM room_id via
+    /// `canonical_dm_room_id` — most clients should call `start_direct`
+    /// instead, which handles idempotency, kind, and naming.
     pub async fn start_room(
         &self,
         name: &str,
         encrypted: bool,
         passphrase: Option<&str>,
+        kind: RoomKind,
     ) -> Result<String> {
         if encrypted && passphrase.is_none() {
             return Err(HuddleError::Other(
@@ -432,6 +507,7 @@ impl AppHandle {
             passphrase_salt: passphrase_salt.clone(),
             created_at,
             last_active: Some(created_at),
+            kind,
         };
         repo::insert_room(&self.db, &info)?;
 
@@ -499,6 +575,162 @@ impl AppHandle {
         Ok(room_id)
     }
 
+    /// huddle 0.7: start (or open) a 1-1 DM with `partner_fingerprint`.
+    ///
+    /// Idempotent across peers and reopens:
+    /// 1. Refuses to DM yourself.
+    /// 2. Computes `room_id = canonical_dm_room_id(our_fp, partner_fp)`.
+    ///    Both peers, regardless of who clicks first, derive identical
+    ///    IDs.
+    /// 3. If a DM room already exists locally (active or stored), returns
+    ///    its id — no new room, no second announcement.
+    /// 4. Otherwise creates a `RoomKind::Direct`, unencrypted room. v1
+    ///    DMs rely on the canonical-ID + visibility-filter combo for
+    ///    privacy; E2E for DMs is a v0.8 follow-up.
+    /// 5. Subscribes to the room topic and announces on the global topic.
+    ///    The announcement is visibility-filtered at honest 0.7+ peers,
+    ///    so only the partner sees it in their `discovered_rooms()`.
+    pub async fn start_direct(&self, partner_fingerprint: &str) -> Result<String> {
+        let our_fp = self.identity.fingerprint().to_string();
+        if partner_fingerprint == our_fp {
+            return Err(HuddleError::Other("cannot DM yourself".into()));
+        }
+        let room_id = canonical_dm_room_id(&our_fp, partner_fingerprint);
+
+        // Idempotent reopen: if the room already exists on disk or in
+        // memory, surface its id without creating a duplicate. This
+        // handles both "I already DM'd them" and "they DM'd me first
+        // and we auto-accepted" paths.
+        if self.active_rooms.lock().unwrap().contains_key(&room_id) {
+            let _ = self.app_event_tx.send(AppEvent::RoomJoined {
+                room_id: room_id.clone(),
+            });
+            return Ok(room_id);
+        }
+        if repo::get_room(&self.db, &room_id)?.is_some() {
+            // Re-bootstrap the in-memory active room from disk.
+            return self.bootstrap_direct_room(&room_id, partner_fingerprint).await;
+        }
+
+        let created_at = now_unix();
+        // The name is internal/derived — the DM pane renders the partner
+        // username + HD-ID instead. Including the short fp keeps the row
+        // navigable in `sqlite3` if someone digs into the DB.
+        let name = format!("dm-{}", short_fp_for_msg(partner_fingerprint));
+
+        let info = StoredRoom {
+            id: room_id.clone(),
+            name,
+            creator_fingerprint: our_fp.clone(),
+            encrypted: false,
+            passphrase_salt: None,
+            created_at,
+            last_active: Some(created_at),
+            kind: RoomKind::Direct,
+        };
+        repo::insert_room(&self.db, &info)?;
+
+        let mut members = HashSet::new();
+        members.insert(our_fp.clone());
+        repo::upsert_room_member(
+            &self.db,
+            &StoredRoomMember {
+                room_id: room_id.clone(),
+                peer_id: String::new(),
+                fingerprint: our_fp.clone(),
+                last_seen: Some(created_at),
+                verified: true,
+                ed25519_pubkey: Some(B64.encode(self.identity.public_bytes())),
+                role: "member".into(),
+            },
+        )?;
+
+        self.active_rooms.lock().unwrap().insert(
+            room_id.clone(),
+            ActiveRoom {
+                info: info.clone(),
+                crypto: None,
+                passphrase_key: None,
+                members,
+                typers: HashMap::new(),
+                read_only: false,
+                issued_codes: Vec::new(),
+            },
+        );
+
+        self.network.subscribe_room(room_id.clone()).await;
+        self.announce_room_now(&info, 1).await;
+
+        let app = self.clone();
+        let rid = room_id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            if let Err(e) = app.broadcast_member_announce(&rid).await {
+                warn!(%e, "broadcast member announce for DM");
+            }
+        });
+
+        let _ = self.app_event_tx.send(AppEvent::RoomJoined {
+            room_id: room_id.clone(),
+        });
+        Ok(room_id)
+    }
+
+    /// Internal: re-hydrate an existing on-disk DM room into
+    /// `active_rooms` and re-subscribe / re-announce. Used by
+    /// `start_direct` when the room exists on disk but not in memory
+    /// (e.g. process restart) and by the auto-accept path when a DM
+    /// announcement arrives from the partner.
+    async fn bootstrap_direct_room(
+        &self,
+        room_id: &str,
+        partner_fingerprint: &str,
+    ) -> Result<String> {
+        let our_fp = self.identity.fingerprint().to_string();
+        let info = repo::get_room(&self.db, room_id)?
+            .ok_or_else(|| HuddleError::Other(format!("DM room {room_id} not found on disk")))?;
+        let mut members = HashSet::new();
+        members.insert(our_fp.clone());
+        members.insert(partner_fingerprint.to_string());
+
+        // Pull persisted members so re-bootstrap doesn't lose them.
+        if let Ok(stored_members) = repo::list_room_members(&self.db, room_id) {
+            for m in stored_members {
+                members.insert(m.fingerprint);
+            }
+        }
+
+        self.active_rooms.lock().unwrap().insert(
+            room_id.to_string(),
+            ActiveRoom {
+                info: info.clone(),
+                crypto: None,
+                passphrase_key: None,
+                members,
+                typers: HashMap::new(),
+                read_only: false,
+                issued_codes: Vec::new(),
+            },
+        );
+
+        self.network.subscribe_room(room_id.to_string()).await;
+        self.announce_room_now(&info, 2).await;
+
+        let app = self.clone();
+        let rid = room_id.to_string();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            if let Err(e) = app.broadcast_member_announce(&rid).await {
+                warn!(%e, "broadcast member announce on DM bootstrap");
+            }
+        });
+
+        let _ = self.app_event_tx.send(AppEvent::RoomJoined {
+            room_id: room_id.to_string(),
+        });
+        Ok(room_id.to_string())
+    }
+
     /// Join an existing room. The room may come from a live announcement
     /// (preferred), our restorable set, or the DB directly — whichever has
     /// the freshest copy. For encrypted rooms `passphrase` is required.
@@ -543,6 +775,24 @@ impl AppHandle {
             None
         };
 
+        // huddle 0.7: preserve the kind that came from the announcement
+        // / restorable cache / DB. If we don't have it (very old row),
+        // default to Group — matches the schema column default and the
+        // back-fill policy.
+        let kind = self
+            .discovered_rooms
+            .lock()
+            .unwrap()
+            .get(room_id)
+            .map(|d| d.kind)
+            .or_else(|| {
+                repo::get_room(&self.db, room_id)
+                    .ok()
+                    .flatten()
+                    .map(|r| r.kind)
+            })
+            .unwrap_or_default();
+
         let info = StoredRoom {
             id: room_id.to_string(),
             name,
@@ -551,6 +801,7 @@ impl AppHandle {
             passphrase_salt: salt_opt.clone(),
             created_at: now_unix(),
             last_active: Some(now_unix()),
+            kind,
         };
         repo::insert_room(&self.db, &info)?;
 
@@ -1135,6 +1386,7 @@ impl AppHandle {
             owner_fingerprints,
             verified_only,
             host_addrs,
+            kind: info.kind,
         };
         self.network.announce_room(ann).await;
     }
@@ -1300,6 +1552,7 @@ impl AppHandle {
                     last_seen: now_unix(),
                     restorable: false,
                     host_addrs: ann.host_addrs.clone(),
+                    kind: ann.kind,
                 };
                 // If we're already in this room, cache the announcement so
                 // others can still discover it through us, but don't emit
@@ -1310,6 +1563,48 @@ impl AppHandle {
                         .lock()
                         .unwrap()
                         .insert(ann.room_id.clone(), discovered);
+                    return;
+                }
+                // huddle 0.7 DM-visibility filter (consumer side): a
+                // `Direct` announcement is only valid for the two members
+                // implied by `canonical_dm_room_id`. If we're not one of
+                // them, silently drop — DMs never appear in third
+                // parties' discovery caches. A malicious 0.7+ peer can
+                // ignore this, but they'd have to subscribe to the
+                // canonical DM topic with full knowledge of both
+                // fingerprints, which is a stronger threat than the v1
+                // sidebar split is trying to mitigate.
+                if ann.kind == RoomKind::Direct {
+                    let our_fp_for_filter = self.identity.fingerprint().to_string();
+                    if canonical_dm_room_id(&our_fp_for_filter, &ann.creator_fingerprint)
+                        != ann.room_id
+                    {
+                        debug!(
+                            announcer = %ann.creator_fingerprint,
+                            room_id = %ann.room_id,
+                            "dropping Direct announcement: not addressed to us"
+                        );
+                        return;
+                    }
+                    // Targeted at us. Cache the discovery so the sidebar
+                    // can show "DM from <partner>" and auto-bootstrap a
+                    // local active room so we can receive messages
+                    // immediately without waiting for a user action.
+                    self.discovered_rooms
+                        .lock()
+                        .unwrap()
+                        .insert(ann.room_id.clone(), discovered.clone());
+                    let _ = self
+                        .app_event_tx
+                        .send(AppEvent::RoomDiscovered(discovered.clone()));
+                    let app = self.clone();
+                    let partner = ann.creator_fingerprint.clone();
+                    let rid = ann.room_id.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = app.start_direct(&partner).await {
+                            debug!(%e, room_id = %rid, "auto-bootstrap of inbound DM failed");
+                        }
+                    });
                     return;
                 }
                 self.discovered_rooms
@@ -1716,6 +2011,23 @@ impl AppHandle {
                         Some(r) => r,
                         None => return,
                     };
+                    // huddle 0.7: Direct rooms are 1-1 forever. If a
+                    // third fingerprint announces, drop it locally and
+                    // skip the persist/wrap-session path. This is honest-
+                    // client enforcement — a malicious peer with the
+                    // canonical DM passphrase-equivalent could still
+                    // chat, but they'd never be visible in our sidebar
+                    // or render in the DM pane.
+                    if room.info.kind == RoomKind::Direct
+                        && !room.members.contains(&sender_fingerprint)
+                        && room.members.len() >= 2
+                    {
+                        info!(
+                            %sender_fingerprint, %room_id,
+                            "dropping MemberAnnounce on Direct room: already at 2-member cap"
+                        );
+                        return;
+                    }
                     let newly_added = room.members.insert(sender_fingerprint.clone());
                     if newly_added {
                         let _ = self.app_event_tx.send(AppEvent::MemberJoined {
@@ -2968,6 +3280,9 @@ impl AppHandle {
                     passphrase_salt: None, // unused on code-join path
                     created_at: now_unix(),
                     last_active: Some(now_unix()),
+                    // huddle 0.7: code-join is groups-only by design — DMs
+                    // are 1-1 and don't use the code flow.
+                    kind: d.kind,
                 },
                 None => {
                     return Err(HuddleError::Other(format!(
@@ -3226,6 +3541,12 @@ impl AppHandle {
     /// Phase A: list every globally-blocked peer (one fingerprint per
     /// row). Surfaced in the Settings modal alongside a clear-all
     /// action that calls `unblock_peer` in a loop.
+    /// huddle 0.7: every globally SAS-verified peer. Surfaced in the
+    /// People pane's "Verified" sub-list.
+    pub fn list_verified_peers(&self) -> Vec<String> {
+        repo::list_verified_peers(&self.db).unwrap_or_default()
+    }
+
     pub fn list_blocked_peers(&self) -> Vec<String> {
         repo::list_blocked_peers(&self.db).unwrap_or_default()
     }
@@ -3235,6 +3556,13 @@ impl AppHandle {
     /// back to the regular inbound-dial accept/reject prompt.
     pub fn unblock_peer(&self, fingerprint: &str) -> Result<()> {
         repo::unblock_peer(&self.db, fingerprint)
+    }
+
+    /// huddle 0.7: add `fingerprint` to the persistent blocklist. Used
+    /// by the People pane's per-row "block" action. Subsequent inbound
+    /// dials from this fingerprint are auto-rejected without prompting.
+    pub fn block_peer(&self, fingerprint: &str) -> Result<()> {
+        repo::block_peer(&self.db, fingerprint, now_unix())
     }
 
     /// Phase F: rooms entered via a join code don't have the passphrase
@@ -3688,7 +4016,7 @@ impl AppHandle {
 /// matches `identity::compute_fingerprint`'s output. Returns None for
 /// anything that isn't a syntactic ID (the caller falls back to
 /// username lookup).
-fn normalize_to_fingerprint(input: &str) -> Option<String> {
+pub fn normalize_to_fingerprint(input: &str) -> Option<String> {
     let s = input
         .trim()
         .trim_start_matches("HD-")
@@ -3962,5 +4290,44 @@ mod transport_preference_tests {
         assert_eq!(normalize_to_fingerprint(canon).as_deref(), Some(canon));
         assert!(normalize_to_fingerprint("alice").is_none());
         assert!(normalize_to_fingerprint("HD-ZZZZ").is_none());
+    }
+}
+
+#[cfg(test)]
+mod canonical_dm_room_id_tests {
+    use super::canonical_dm_room_id;
+
+    #[test]
+    fn dm_room_id_is_commutative() {
+        // The single load-bearing property: both peers, no matter who
+        // calls `start_direct` first, derive identical IDs.
+        let a = "aaaa-bbbb-cccc-dddd-eeee-ffff";
+        let b = "1111-2222-3333-4444-5555-6666";
+        assert_eq!(canonical_dm_room_id(a, b), canonical_dm_room_id(b, a));
+    }
+
+    #[test]
+    fn dm_room_id_differs_per_pair() {
+        let a = "aaaa-bbbb-cccc-dddd-eeee-ffff";
+        let b = "1111-2222-3333-4444-5555-6666";
+        let c = "9999-8888-7777-6666-5555-4444";
+        assert_ne!(canonical_dm_room_id(a, b), canonical_dm_room_id(a, c));
+        assert_ne!(canonical_dm_room_id(a, b), canonical_dm_room_id(b, c));
+    }
+
+    #[test]
+    fn dm_room_id_is_stable() {
+        // Deterministic by construction; this guards against
+        // accidentally mixing in a timestamp or nonce in a future
+        // refactor — that would break idempotency across peers.
+        let a = "aaaa-bbbb-cccc-dddd-eeee-ffff";
+        let b = "1111-2222-3333-4444-5555-6666";
+        let id1 = canonical_dm_room_id(a, b);
+        let id2 = canonical_dm_room_id(a, b);
+        assert_eq!(id1, id2);
+        // Same length as `derive_room_id` output (32 hex chars / 16
+        // bytes) so DM IDs are indistinguishable from group IDs at the
+        // topic-name layer.
+        assert_eq!(id1.len(), 32);
     }
 }

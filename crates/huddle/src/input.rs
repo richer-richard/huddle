@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::app::{LobbyFocus, Modal, Screen, TuiApp};
+use crate::app::{Modal, Pane, SidebarFocus, SidebarItem, TuiApp};
 
 #[derive(Debug)]
 pub enum Action {
@@ -10,7 +10,8 @@ pub enum Action {
     CloseModal,
     OpenStartRoom,
     OpenHelp,
-    // Lobby
+    // Lobby / Sidebar (huddle 0.7 — names retained for back-compat;
+    // semantics rewritten to drive the new sidebar widget).
     LobbyNavigateUp,
     LobbyNavigateDown,
     LobbyJoinSelected,
@@ -19,6 +20,23 @@ pub enum Action {
     LobbyReconnectPeer,
     LobbyForgetPeer,
     OpenDialPeer,
+    // huddle 0.7: sidebar-specific helpers
+    SidebarSectionPrev,
+    SidebarToggleExpand,
+    JumpToPeoplePane,
+    JumpToSettingsPane,
+    OpenComposeDm,
+    ComposeDmTypeChar(char),
+    ComposeDmBackspace,
+    ComposeDmConfirm,
+    ComposeDmCancel,
+    ToggleMemberMargin,
+    PeopleFocusNext,
+    PeoplePersonReconnect,
+    PeoplePersonBlock,
+    PeoplePersonUnblock,
+    PeoplePersonForget,
+    PeoplePersonStartDm,
     // Start room modal
     StartRoomNextField,
     StartRoomToggleEncrypted,
@@ -210,7 +228,7 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
                     .active_room()
                     .map(|r| r.input_active)
                     .unwrap_or(false);
-                let in_room = matches!(app.screen, Screen::InRoom);
+                let in_room = matches!(app.pane, Pane::Dm(_) | Pane::Group(_));
                 if !(in_room && input_active) {
                     return Action::OpenCommandPalette;
                 }
@@ -441,51 +459,70 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
             KeyCode::Enter => Action::MemberActionConfirm,
             _ => Action::Nothing,
         },
+        Modal::ComposeDm(_) => match key.code {
+            KeyCode::Esc => Action::ComposeDmCancel,
+            KeyCode::Enter => Action::ComposeDmConfirm,
+            KeyCode::Backspace => Action::ComposeDmBackspace,
+            KeyCode::Char(c) => Action::ComposeDmTypeChar(c),
+            _ => Action::Nothing,
+        },
         Modal::None => map_normal(key, app),
     }
 }
 
 fn map_normal(key: KeyEvent, app: &TuiApp) -> Action {
-    match app.screen {
-        Screen::Lobby => map_lobby(key, app),
-        Screen::InRoom => map_in_room(key, app),
+    // huddle 0.7: when the sidebar has focus OR we're on a non-chat pane,
+    // we use sidebar navigation. Chat panes (DM/Group) with `pane` focus
+    // route through `map_in_room`.
+    let sidebar_has_focus = matches!(app.sidebar.focus, SidebarFocus::Sidebar);
+    let chat_pane = matches!(app.pane, Pane::Dm(_) | Pane::Group(_));
+    if !chat_pane || sidebar_has_focus {
+        map_sidebar(key, app)
+    } else {
+        map_in_room(key, app)
     }
 }
 
-fn map_lobby(key: KeyEvent, app: &TuiApp) -> Action {
+fn map_sidebar(key: KeyEvent, app: &TuiApp) -> Action {
+    // Cross-pane shortcuts first — these work anywhere the sidebar has
+    // focus, including from People/Activity/Settings panes.
     match key.code {
-        KeyCode::Char('q') => Action::OpenQuitConfirm,
-        KeyCode::Char('s') => Action::OpenStartRoom,
-        KeyCode::Char('?') => Action::OpenHelp,
-        // huddle 0.6: vim-style command-line opens the palette. Works
-        // even on terminals where Ctrl+P is captured by the shell.
-        KeyCode::Char(':') => Action::OpenCommandPalette,
-        KeyCode::Char('a') => Action::OpenAddFriend,
-        KeyCode::Char('d') => Action::OpenDialPeer,
-        KeyCode::Char('i') => Action::OpenQrIdentity,
-        KeyCode::Char(',') => Action::OpenSettings,
-        KeyCode::Char('c') => Action::OpenJoinWithCode,
-        KeyCode::Char('I') => Action::GenerateInvite,
-        KeyCode::Char('v') => Action::OpenPasteInvite,
-        // huddle 0.6: capital R = mark every room read. Lowercase r
-        // stays the refresh / reconnect key (context-dependent on
-        // lobby focus) — the case split keeps both reachable.
-        KeyCode::Char('R') => Action::MarkAllRead,
+        KeyCode::Char('q') => return Action::OpenQuitConfirm,
+        KeyCode::Char('s') | KeyCode::Char('g') => return Action::OpenStartRoom,
+        KeyCode::Char('m') => return Action::OpenComposeDm,
+        KeyCode::Char('?') => return Action::OpenHelp,
+        KeyCode::Char(':') => return Action::OpenCommandPalette,
+        KeyCode::Char('a') => return Action::OpenAddFriend,
+        KeyCode::Char('d') => return Action::OpenDialPeer,
+        KeyCode::Char('i') => return Action::OpenQrIdentity,
+        KeyCode::Char(',') => return Action::JumpToSettingsPane,
+        KeyCode::Char('p') => return Action::JumpToPeoplePane,
+        KeyCode::Char('c') => return Action::OpenJoinWithCode,
+        KeyCode::Char('I') => return Action::GenerateInvite,
+        KeyCode::Char('v') => return Action::OpenPasteInvite,
+        KeyCode::Char('R') => return Action::MarkAllRead,
+        _ => {}
+    }
+    match key.code {
         KeyCode::Tab => Action::LobbyFocusToggle,
+        KeyCode::BackTab => Action::SidebarSectionPrev,
         KeyCode::Char('j') | KeyCode::Down => Action::LobbyNavigateDown,
         KeyCode::Char('k') | KeyCode::Up => Action::LobbyNavigateUp,
-        KeyCode::Char('r') => match app.lobby_focus {
-            LobbyFocus::KnownPeers => Action::LobbyReconnectPeer,
-            LobbyFocus::Rooms => Action::LobbyRefresh,
+        KeyCode::Char(' ') | KeyCode::Right | KeyCode::Left => Action::SidebarToggleExpand,
+        KeyCode::Char('r') => {
+            // Context-sensitive: on a Person, reconnect. On a section
+            // header or any item, refresh discovered rooms + peers.
+            match &app.sidebar.selection {
+                SidebarItem::Person(_) => Action::LobbyReconnectPeer,
+                _ => Action::LobbyRefresh,
+            }
+        }
+        KeyCode::Char('x') => match &app.sidebar.selection {
+            SidebarItem::Person(_) => Action::LobbyForgetPeer,
+            _ => Action::Nothing,
         },
-        KeyCode::Char('x') => match app.lobby_focus {
-            LobbyFocus::KnownPeers => Action::LobbyForgetPeer,
-            LobbyFocus::Rooms => Action::Nothing,
-        },
-        KeyCode::Enter => match app.lobby_focus {
-            LobbyFocus::KnownPeers => Action::LobbyReconnectPeer,
-            LobbyFocus::Rooms => Action::LobbyJoinSelected,
-        },
+        KeyCode::Enter => Action::LobbyJoinSelected,
+        KeyCode::Esc => Action::Nothing,
         _ => Action::Nothing,
     }
 }
