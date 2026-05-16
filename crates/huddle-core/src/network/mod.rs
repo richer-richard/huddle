@@ -230,7 +230,7 @@ pub fn start_network_with(
 
             let identify = identify::Behaviour::new(
                 identify::Config::new("/huddle/1.0.0".into(), key.public())
-                    .with_agent_version("huddle/0.4".into()),
+                    .with_agent_version("huddle/0.5".into()),
             );
 
             let ping = ping::Behaviour::default();

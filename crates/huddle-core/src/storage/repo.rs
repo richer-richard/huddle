@@ -795,6 +795,49 @@ pub fn unblock_peer(db: &Db, fingerprint: &str) -> Result<()> {
 }
 
 // =========================================================================
+// Peer profiles (huddle 0.5)
+// =========================================================================
+
+/// Upsert the cached username for a peer iff the incoming `updated_at` is
+/// strictly newer than what we have stored — last-write-wins on the
+/// sender's monotonic ms. A None username here means the peer cleared
+/// their name; render as `[anonymous]`.
+pub fn upsert_peer_profile(
+    db: &Db,
+    fingerprint: &str,
+    username: Option<&str>,
+    updated_at: i64,
+) -> Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "INSERT INTO peer_profiles (fingerprint, username, updated_at)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(fingerprint) DO UPDATE SET
+            username   = excluded.username,
+            updated_at = excluded.updated_at
+         WHERE excluded.updated_at > peer_profiles.updated_at",
+        params![fingerprint, username, updated_at],
+    )?;
+    Ok(())
+}
+
+/// Cached username for a peer if we've ever seen a signed ProfileUpdate
+/// from them. Returns None for unknown peers and for peers who set
+/// `username = None` (explicit anonymous) — caller renders `[anonymous]`.
+pub fn get_peer_username(db: &Db, fingerprint: &str) -> Result<Option<String>> {
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare(
+        "SELECT username FROM peer_profiles WHERE fingerprint = ?1",
+    )?;
+    let mut rows = stmt.query(params![fingerprint])?;
+    if let Some(row) = rows.next()? {
+        Ok(row.get::<_, Option<String>>(0)?)
+    } else {
+        Ok(None)
+    }
+}
+
+// =========================================================================
 // Room attachments
 // =========================================================================
 

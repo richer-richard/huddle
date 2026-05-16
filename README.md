@@ -93,7 +93,7 @@ cargo build --release
 | `i`                | Show your identity as a QR code         |
 | `I` (Shift+I)      | Generate an invite link (peer-only)     |
 | `v`                | Paste an invite link (`huddle://invite#…`) |
-| `,`                | Settings (global verified-only, clear blocks) |
+| `,`                | Settings (username, verified-only, clear blocks, go dark) |
 | `Enter`            | Join / reconnect the selected entry     |
 | `Tab`              | Toggle focus rooms ↔ known peers        |
 | `j/k` or arrows    | Navigate                                |
@@ -131,6 +131,22 @@ cargo build --release
 | `?`       | Help                                         |
 | `q`       | Quit (in-room, when input not focused)       |
 | `Ctrl-C`  | Quit (always — confirms first)               |
+
+## Username & ID display (huddle 0.5)
+
+Every peer has a 96-bit fingerprint rendered as a branded
+`HD-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX` ID. Same security as before, just a
+friendlier format. The lobby header shows yours.
+
+Set an optional username from Settings (`,` → `u`). The username is
+broadcast in a *signed* `ProfileUpdate` event — peers receiving it
+verify the Ed25519 signature against the claimed fingerprint, so
+nobody can spoof "alice" by stuffing a string into a packet. If you
+clear the field (empty input), you broadcast as `[anonymous]`.
+
+In chat, your message label shows the username (or `[anonymous]`).
+SAS-verified peers also get a green `✓` next to their name in chat,
+matching the existing badge in the room member list.
 
 ## SAS verification
 
@@ -229,6 +245,28 @@ Code-joined members are **read-only**: they can read and send, but
 without the passphrase they can't wrap session keys for newer
 joiners. The room tab renders `(read-only)` next to the name. To
 upgrade, an owner can re-onboard them with the actual passphrase.
+
+## Go dark — irreversible account deletion (huddle 0.5)
+
+Settings → `!` opens the **go dark** modal. Two-factor gate:
+
+1. Your **master passphrase** (re-derived and constant-time compared
+   to the in-memory SQLCipher subkey).
+2. Type the literal phrase `DELETE EVERYTHING` in the second field.
+
+On confirm, huddle:
+
+- best-effort `MemberLeave`s every joined room (2-second cap so a
+  flapping transport can't hang the wipe),
+- shuts down the network task,
+- zeroes-then-deletes `huddle.db`, `huddle.db-shm`, `huddle.db-wal`,
+  `keychain.salt`, `huddle.log` (and any rotated logs), and
+  `config.toml` from the data dir,
+- removes the now-empty data dir, and
+- shows a brief goodbye modal before exiting.
+
+There is no recovery. Restarting huddle after a go-dark generates a
+fresh identity from scratch.
 
 ## Architecture
 

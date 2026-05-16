@@ -1,6 +1,6 @@
 [package]
 name = "huddle"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 description = "Decentralized, terminal-native chat rooms — LAN mDNS or direct dial, Megolm-encrypted."
 license = "MIT OR Apache-2.0"
@@ -15,7 +15,7 @@ name = "huddle"
 path = "src/main.rs"
 
 [dependencies]
-huddle-core = { path = "../huddle-core", version = "0.4.0" }
+huddle-core = { path = "../huddle-core", version = "0.5.0" }
 libp2p = { version = "0.56", features = ["ed25519"] }
 ratatui = "0.30"
 crossterm = "0.29"

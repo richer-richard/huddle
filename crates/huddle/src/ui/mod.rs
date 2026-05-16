@@ -29,6 +29,8 @@ pub fn render(f: &mut Frame, app: &TuiApp) {
         Modal::MemberAction(s) => modal::render_member_action(f, s),
         Modal::Sas(s) => modal::render_sas(f, s),
         Modal::Settings(s) => modal::render_settings(f, s),
+        Modal::EditUsername(s) => modal::render_edit_username(f, s),
+        Modal::GoDark(s) => modal::render_go_dark(f, s),
         Modal::ShowJoinCode(s) => modal::render_show_join_code(f, s),
         Modal::JoinWithCode(s) => modal::render_join_with_code(f, s),
         Modal::ShowInvite(s) => modal::render_show_invite(f, s),
@@ -66,4 +68,29 @@ pub fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
 /// Truncate a fingerprint to its first group (4 hex chars).
 pub fn short_fp(fp: &str) -> String {
     fp.split('-').next().unwrap_or(fp).to_string()
+}
+
+/// Render a full fingerprint as a branded huddle ID: `HD-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX`.
+/// Tolerant of inputs that are already `HD-`-prefixed (returned as-is), already
+/// dash-separated lowercase (the canonical `identity::compute_fingerprint`
+/// output — uppercased and prefixed), or a bare 24-char hex run (grouped into
+/// 4-char blocks and prefixed). Anything else is returned uppercased with the
+/// `HD-` prefix on a best-effort basis.
+pub fn display_id(fp: &str) -> String {
+    if fp.starts_with("HD-") {
+        return fp.to_string();
+    }
+    let upper = fp.to_ascii_uppercase();
+    if upper.contains('-') {
+        return format!("HD-{}", upper);
+    }
+    if upper.len() == 24 && upper.chars().all(|c| c.is_ascii_hexdigit()) {
+        let groups: Vec<String> = upper
+            .as_bytes()
+            .chunks(4)
+            .map(|c| std::str::from_utf8(c).unwrap().to_string())
+            .collect();
+        return format!("HD-{}", groups.join("-"));
+    }
+    format!("HD-{}", upper)
 }

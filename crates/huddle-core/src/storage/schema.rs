@@ -151,4 +151,15 @@ pub const MIGRATIONS: &[&str] = &[
     // onboarding card to this user". Persisted on identity (single
     // row) so it doesn't reappear next launch.
     "ALTER TABLE identity ADD COLUMN onboarding_seen INTEGER NOT NULL DEFAULT 0;",
+    // huddle 0.5: per-peer profile cache populated by signed
+    // ProfileUpdate broadcasts. `username = NULL` means the peer has
+    // explicitly cleared their username and should render as
+    // `[anonymous]`. `updated_at` is the sender's claimed monotonic ms;
+    // last-write-wins so an out-of-order replay can't downgrade a
+    // newer name.
+    "CREATE TABLE IF NOT EXISTS peer_profiles (
+        fingerprint TEXT PRIMARY KEY,
+        username TEXT,
+        updated_at INTEGER NOT NULL
+    );",
 ];

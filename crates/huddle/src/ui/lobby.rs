@@ -78,7 +78,15 @@ fn render_header(f: &mut Frame, area: Rect, app: &TuiApp) {
         Line::from(vec![
             Span::styled("  you  ", Style::default().fg(Color::DarkGray)),
             Span::styled(
-                app.handle.fingerprint(),
+                match app.handle.display_name() {
+                    Some(n) if !n.is_empty() => n,
+                    _ => "[anonymous]".into(),
+                },
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  ", Style::default()),
+            Span::styled(
+                super::display_id(app.handle.fingerprint()),
                 Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
             ),
         ]),

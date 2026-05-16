@@ -111,6 +111,15 @@ pub enum Modal {
     /// Phase E: app-wide settings (currently just the global
     /// verified-only inbound toggle). Opened with `,` from lobby.
     Settings(SettingsState),
+    /// huddle 0.5: single-field text editor for the local user's
+    /// self-declared username. Empty input clears (None) and the user
+    /// renders as `[anonymous]` to themselves and peers. On confirm,
+    /// triggers a signed ProfileUpdate broadcast to every joined room.
+    EditUsername(EditUsernameState),
+    /// huddle 0.5: irreversible account-delete modal. Two fields:
+    /// master passphrase + a `DELETE EVERYTHING` confirmation phrase.
+    /// Hitting Confirm with both filled calls `AppHandle::go_dark`.
+    GoDark(GoDarkState),
     /// Phase F: an owner just generated a short-lived join code for
     /// the current encrypted room. The modal shows it big so the
     /// owner can read it aloud / copy it / pass it OOB.
@@ -144,7 +153,35 @@ pub struct SettingsState {
     /// opens. Re-snapped after `ClearBlockedPeers` so the row updates
     /// without a modal re-open.
     pub blocked_peer_count: usize,
+    /// huddle 0.5: snapshot of the local user's self-declared username
+    /// (None ⇒ `[anonymous]`). Refreshed when the Settings modal is
+    /// re-opened so an edit propagates without a tab away.
+    pub username: Option<String>,
 }
+
+#[derive(Debug, Clone, Default)]
+pub struct EditUsernameState {
+    pub input: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GoDarkField {
+    #[default]
+    Passphrase,
+    Confirm,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct GoDarkState {
+    pub passphrase: String,
+    pub confirm: String,
+    pub focus: GoDarkField,
+    /// Set after a wrong-passphrase attempt so the modal can flash an
+    /// inline error without dismissing.
+    pub last_error: Option<String>,
+}
+
+pub const GO_DARK_CONFIRM_PHRASE: &str = "DELETE EVERYTHING";
 
 #[derive(Debug, Clone)]
 pub struct ShowJoinCodeState {
@@ -464,7 +501,16 @@ pub struct TuiApp {
     /// later disappears (all probes failing). The TUI maps this to
     /// '🌐 reachable' / '🏠 private' emoji in `lobby::render_status`.
     pub nat_status: Option<String>,
+    /// huddle 0.5: set to `Instant::now()` when `AppEvent::WentDark`
+    /// arrives. The main loop polls this and quits the process once
+    /// `GO_DARK_FAREWELL` has elapsed so the goodbye modal stays
+    /// visible for a beat.
+    pub went_dark_at: Option<Instant>,
 }
+
+/// huddle 0.5: how long the goodbye modal stays on screen after
+/// `WentDark` before the process exits.
+pub const GO_DARK_FAREWELL: Duration = Duration::from_secs(2);
 
 impl TuiApp {
     pub fn new(handle: AppHandle) -> Self {
@@ -499,6 +545,7 @@ impl TuiApp {
             listen_addresses: Vec::new(),
             status_message: None,
             nat_status: None,
+            went_dark_at: None,
         }
     }
 
@@ -878,6 +925,30 @@ impl TuiApp {
                     format!("direct connection to …{}", peer_label),
                     Duration::from_secs(10),
                 );
+            }
+            AppEvent::PeerProfileUpdated { fingerprint, username } => {
+                // huddle 0.5: a peer set / changed / cleared their
+                // username. The chat + member list pull from the DB
+                // every render, so a redraw is enough — but show a
+                // transient hint so the user notices the rename live.
+                let new_label = match &username {
+                    Some(n) if !n.is_empty() => n.clone(),
+                    _ => "[anonymous]".into(),
+                };
+                let short: String = fingerprint.chars().take(4).collect();
+                self.set_status_for(
+                    format!("{}… is now {}", short, new_label),
+                    Duration::from_secs(4),
+                );
+            }
+            AppEvent::WentDark => {
+                // huddle 0.5: go_dark wiped everything. Show the final
+                // farewell, then schedule a quit. The status TTL also
+                // serves as the visibility window before exit.
+                self.modal = Modal::Info(
+                    "Goodbye. huddle has gone dark. Restart to begin fresh.".into(),
+                );
+                self.went_dark_at = Some(std::time::Instant::now());
             }
         }
     }
@@ -1339,6 +1410,16 @@ async fn main_loop(
 
         // Drop expired status-bar messages.
         app.tick_status();
+
+        // huddle 0.5: if go_dark fired, hold the goodbye modal on
+        // screen for `GO_DARK_FAREWELL`, then quit. The data dir is
+        // already wiped at this point; the network task is down.
+        if let Some(t) = app.went_dark_at {
+            if t.elapsed() >= GO_DARK_FAREWELL {
+                should_quit = true;
+                continue;
+            }
+        }
 
         // Phase A: auto-reject an inbound-dial modal that's been
         // ignored for 15s. We don't want to leave an unknown peer
@@ -2351,8 +2432,123 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             app.modal = Modal::Settings(SettingsState {
                 verified_only_inbound: app.handle.verified_only_inbound(),
                 blocked_peer_count: app.handle.list_blocked_peers().len(),
+                username: app.handle.display_name(),
             });
             Ok(false)
+        }
+        Action::OpenEditUsername => {
+            // Pre-fill the editor with the current username so the user
+            // can tweak rather than retype. Empty submission clears.
+            let current = app.handle.display_name().unwrap_or_default();
+            app.modal = Modal::EditUsername(EditUsernameState { input: current });
+            Ok(false)
+        }
+        Action::EditUsernameTypeChar(c) => {
+            if let Modal::EditUsername(s) = &mut app.modal {
+                if s.input.chars().count() < 32 {
+                    s.input.push(c);
+                }
+            }
+            Ok(false)
+        }
+        Action::EditUsernameBackspace => {
+            if let Modal::EditUsername(s) = &mut app.modal {
+                s.input.pop();
+            }
+            Ok(false)
+        }
+        Action::EditUsernameConfirm => {
+            let input = match &app.modal {
+                Modal::EditUsername(s) => s.input.clone(),
+                _ => return Ok(false),
+            };
+            let trimmed = input.trim();
+            let new_name = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
+            app.modal = Modal::None;
+            if let Err(e) = app.handle.set_username(new_name.as_deref()).await {
+                app.modal = Modal::Error(format!("set username failed: {e}"));
+            } else {
+                app.set_status(match &new_name {
+                    Some(n) => format!("username set to {n}"),
+                    None => "username cleared — you are now [anonymous]".into(),
+                });
+            }
+            Ok(false)
+        }
+        Action::OpenGoDarkModal => {
+            app.modal = Modal::GoDark(GoDarkState::default());
+            Ok(false)
+        }
+        Action::GoDarkNextField => {
+            if let Modal::GoDark(s) = &mut app.modal {
+                s.focus = match s.focus {
+                    GoDarkField::Passphrase => GoDarkField::Confirm,
+                    GoDarkField::Confirm => GoDarkField::Passphrase,
+                };
+            }
+            Ok(false)
+        }
+        Action::GoDarkTypeChar(c) => {
+            if let Modal::GoDark(s) = &mut app.modal {
+                let field = s.focus;
+                let target = match field {
+                    GoDarkField::Passphrase => &mut s.passphrase,
+                    GoDarkField::Confirm => &mut s.confirm,
+                };
+                if target.chars().count() < 128 {
+                    target.push(c);
+                }
+            }
+            Ok(false)
+        }
+        Action::GoDarkBackspace => {
+            if let Modal::GoDark(s) = &mut app.modal {
+                let field = s.focus;
+                match field {
+                    GoDarkField::Passphrase => {
+                        s.passphrase.pop();
+                    }
+                    GoDarkField::Confirm => {
+                        s.confirm.pop();
+                    }
+                };
+            }
+            Ok(false)
+        }
+        Action::GoDarkConfirm => {
+            let (passphrase, confirm) = match &app.modal {
+                Modal::GoDark(s) => (s.passphrase.clone(), s.confirm.clone()),
+                _ => return Ok(false),
+            };
+            if confirm != GO_DARK_CONFIRM_PHRASE {
+                if let Modal::GoDark(s) = &mut app.modal {
+                    s.last_error = Some(format!(
+                        "type `{}` exactly to confirm",
+                        GO_DARK_CONFIRM_PHRASE
+                    ));
+                }
+                return Ok(false);
+            }
+            match app.handle.go_dark(&passphrase).await {
+                Ok(()) => {
+                    // WentDark event fires from go_dark; the handler
+                    // schedules the actual exit so the goodbye modal
+                    // is visible for a beat.
+                    Ok(false)
+                }
+                Err(e) => {
+                    if let Modal::GoDark(s) = &mut app.modal {
+                        s.last_error = Some(format!("{e}"));
+                        s.passphrase.clear();
+                        s.focus = GoDarkField::Passphrase;
+                    }
+                    Ok(false)
+                }
+            }
         }
         Action::SettingsToggleGlobalVerifiedOnly => {
             if let Modal::Settings(s) = &mut app.modal {

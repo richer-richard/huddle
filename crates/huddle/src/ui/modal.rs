@@ -375,11 +375,11 @@ pub fn render_qr_identity(f: &mut Frame, app: &crate::app::TuiApp) {
 
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(Span::styled(
-        "  fingerprint:",
+        "  your id:",
         Style::default().fg(Color::DarkGray),
     )));
     lines.push(Line::from(Span::styled(
-        format!("  {}", fingerprint),
+        format!("  {}", super::display_id(&fingerprint)),
         Style::default()
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
@@ -551,14 +551,14 @@ pub fn render_verify(f: &mut Frame, s: &VerifyState) {
         ));
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(vec![
-        Span::styled("  your fingerprint: ", Style::default().fg(Color::DarkGray)),
+        Span::styled("  your id: ", Style::default().fg(Color::DarkGray)),
         Span::styled(
-            s.our_fingerprint.clone(),
+            super::display_id(&s.our_fingerprint),
             Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
         ),
     ]));
     lines.push(Line::from(Span::styled(
-        "  compare each peer's fingerprint with them out-of-band",
+        "  compare each peer's id with them out-of-band",
         Style::default().fg(Color::DarkGray),
     )));
     lines.push(Line::from(Span::styled(
@@ -582,7 +582,7 @@ pub fn render_verify(f: &mut Frame, s: &VerifyState) {
         lines.push(Line::from(vec![
             Span::styled(format!("  {}", marker), Style::default().fg(Color::Yellow)),
             Span::styled(check, check_style),
-            Span::styled(fp.clone(), name_style),
+            Span::styled(super::display_id(fp), name_style),
         ]));
     }
     lines.push(Line::from(""));
@@ -726,14 +726,14 @@ pub fn render_inbound_dial(f: &mut Frame, s: &InboundDialState) {
         )),
         Line::from(""),
         Line::from(vec![
-            Span::styled("  fingerprint: ", Style::default().fg(Color::DarkGray)),
+            Span::styled("  id:      ", Style::default().fg(Color::DarkGray)),
             Span::styled(
-                s.fingerprint.clone(),
+                super::display_id(&s.fingerprint),
                 Style::default().fg(Color::Yellow).bold(),
             ),
         ]),
         Line::from(vec![
-            Span::styled("  address:     ", Style::default().fg(Color::DarkGray)),
+            Span::styled("  address: ", Style::default().fg(Color::DarkGray)),
             Span::styled(s.address.clone(), Style::default().fg(Color::White)),
         ]),
         Line::from(""),
@@ -807,7 +807,7 @@ pub fn render_member_action(f: &mut Frame, s: &MemberActionState) {
         };
         lines.push(Line::from(vec![
             Span::styled(format!(" {} ", marker), style),
-            Span::styled(fp.clone(), style),
+            Span::styled(super::display_id(fp), style),
             Span::styled(badge, Style::default().fg(Color::DarkGray)),
         ]));
     }
@@ -864,7 +864,7 @@ pub fn render_sas(f: &mut Frame, s: &SasState) {
     lines.push(Line::from(vec![
         Span::styled("  verifying  ", Style::default().fg(Color::DarkGray)),
         Span::styled(
-            s.partner_fingerprint.clone(),
+            super::display_id(&s.partner_fingerprint),
             Style::default().fg(Color::Yellow).bold(),
         ),
         Span::styled(
@@ -949,7 +949,7 @@ pub fn render_sas(f: &mut Frame, s: &SasState) {
 
 /// Phase E: settings modal (global verified-only-inbound toggle).
 pub fn render_settings(f: &mut Frame, s: &SettingsState) {
-    let area = centered_rect(64, 16, f.area());
+    let area = centered_rect(68, 22, f.area());
     f.render_widget(Clear, area);
     let check = if s.verified_only_inbound { "[x]" } else { "[ ]" };
     let blocked = s.blocked_peer_count;
@@ -965,7 +965,27 @@ pub fn render_settings(f: &mut Frame, s: &SettingsState) {
             Span::styled(" to clear all.", Style::default().fg(Color::DarkGray)),
         ])
     };
+    let username_label = match &s.username {
+        Some(n) if !n.is_empty() => n.clone(),
+        _ => "[anonymous]".into(),
+    };
     let lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" username: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                username_label,
+                Style::default().fg(Color::Cyan).bold(),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  press ", Style::default().fg(Color::DarkGray)),
+            Span::styled("u", Style::default().fg(Color::Yellow).bold()),
+            Span::styled(
+                " to edit (empty input clears).",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
         Line::from(""),
         Line::from(vec![
             Span::styled(" ", Style::default()),
@@ -975,17 +995,8 @@ pub fn render_settings(f: &mut Frame, s: &SettingsState) {
                 Style::default().fg(Color::White),
             ),
         ]),
-        Line::from(""),
         Line::from(Span::styled(
-            "  when on: a peer dialing us is auto-rejected unless their",
-            Style::default().fg(Color::DarkGray),
-        )),
-        Line::from(Span::styled(
-            "  fingerprint is in your SAS-verified set (^V → s) or you've",
-            Style::default().fg(Color::DarkGray),
-        )),
-        Line::from(Span::styled(
-            "  previously trusted them on an inbound prompt.",
+            "  press v / Space / Enter to toggle.",
             Style::default().fg(Color::DarkGray),
         )),
         Line::from(""),
@@ -999,9 +1010,16 @@ pub fn render_settings(f: &mut Frame, s: &SettingsState) {
         clear_hint,
         Line::from(""),
         Line::from(vec![
-            Span::styled(" Enter / Space / v", Style::default().fg(Color::Yellow)),
-            Span::styled(" toggle  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("Esc", Style::default().fg(Color::Yellow)),
+            Span::styled(" [!]", Style::default().fg(Color::Red).bold()),
+            Span::styled(
+                " delete account (go dark) — press ",
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled("!", Style::default().fg(Color::Red).bold()),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" Esc", Style::default().fg(Color::Yellow)),
             Span::styled(" close", Style::default().fg(Color::DarkGray)),
         ]),
     ];
@@ -1014,6 +1032,175 @@ pub fn render_settings(f: &mut Frame, s: &SettingsState) {
                 .padding(Padding::uniform(1))
                 .title(Span::styled(
                     " settings ",
+                    Style::default().fg(Color::Cyan).bold(),
+                )),
+        );
+    f.render_widget(para, area);
+}
+
+pub fn render_go_dark(f: &mut Frame, s: &crate::app::GoDarkState) {
+    use crate::app::{GoDarkField, GO_DARK_CONFIRM_PHRASE};
+    let area = centered_rect(70, 22, f.area());
+    f.render_widget(Clear, area);
+    let mask = |v: &str| -> String { "•".repeat(v.chars().count()) };
+    let pp_focused = matches!(s.focus, GoDarkField::Passphrase);
+    let cf_focused = matches!(s.focus, GoDarkField::Confirm);
+    let cf_ok = s.confirm == GO_DARK_CONFIRM_PHRASE;
+    let mut lines: Vec<Line> = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "  THIS WILL:",
+            Style::default().fg(Color::Red).bold(),
+        )),
+        Line::from(Span::styled(
+            "   • leave every room you've joined",
+            Style::default().fg(Color::White),
+        )),
+        Line::from(Span::styled(
+            "   • permanently delete your identity",
+            Style::default().fg(Color::White),
+        )),
+        Line::from(Span::styled(
+            "   • delete all messages, files, peers",
+            Style::default().fg(Color::White),
+        )),
+        Line::from(Span::styled(
+            "   • wipe the database and keychain",
+            Style::default().fg(Color::White),
+        )),
+        Line::from(Span::styled(
+            "   • exit huddle",
+            Style::default().fg(Color::White),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  This CANNOT be undone.",
+            Style::default().fg(Color::Red).bold(),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                if pp_focused { "› " } else { "  " },
+                Style::default().fg(Color::Yellow),
+            ),
+            Span::styled("master passphrase: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                mask(&s.passphrase),
+                if pp_focused {
+                    Style::default().fg(Color::Cyan).bold()
+                } else {
+                    Style::default().fg(Color::White)
+                },
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                if cf_focused { "› " } else { "  " },
+                Style::default().fg(Color::Yellow),
+            ),
+            Span::styled(
+                format!("type '{}': ", GO_DARK_CONFIRM_PHRASE),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                s.confirm.clone(),
+                if cf_focused {
+                    Style::default().fg(Color::Cyan).bold()
+                } else if cf_ok {
+                    Style::default().fg(Color::Red).bold()
+                } else {
+                    Style::default().fg(Color::White)
+                },
+            ),
+        ]),
+        Line::from(""),
+    ];
+    if let Some(err) = &s.last_error {
+        lines.push(Line::from(Span::styled(
+            format!("  {}", err),
+            Style::default().fg(Color::Red),
+        )));
+    }
+    let enabled_hint = if cf_ok {
+        Span::styled(
+            " Enter ",
+            Style::default().fg(Color::Red).bold(),
+        )
+    } else {
+        Span::styled(" Enter ", Style::default().fg(Color::DarkGray))
+    };
+    lines.push(Line::from(vec![
+        Span::styled(" Tab", Style::default().fg(Color::Yellow)),
+        Span::styled(" switch  ", Style::default().fg(Color::DarkGray)),
+        enabled_hint,
+        Span::styled(
+            if cf_ok { "delete  " } else { "(confirm phrase to enable)  " },
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled("Esc", Style::default().fg(Color::Yellow)),
+        Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
+    ]));
+    let para = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Red))
+                .padding(Padding::uniform(1))
+                .title(Span::styled(
+                    " ⚠ delete account (go dark) ",
+                    Style::default().fg(Color::Red).bold(),
+                )),
+        );
+    f.render_widget(para, area);
+}
+
+pub fn render_edit_username(f: &mut Frame, s: &crate::app::EditUsernameState) {
+    let area = centered_rect(60, 10, f.area());
+    f.render_widget(Clear, area);
+    let displayed = if s.input.is_empty() {
+        Span::styled(
+            " (empty — submit to clear → [anonymous])",
+            Style::default().fg(Color::DarkGray),
+        )
+    } else {
+        Span::styled(
+            s.input.clone(),
+            Style::default().fg(Color::White).bold(),
+        )
+    };
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "  pick a self-declared username (32 chars max).",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(Span::styled(
+            "  signed and broadcast to every joined room.",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  > ", Style::default().fg(Color::Cyan).bold()),
+            displayed,
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" Enter", Style::default().fg(Color::Yellow)),
+            Span::styled(" save  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Esc", Style::default().fg(Color::Yellow)),
+            Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
+        ]),
+    ];
+    let para = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan))
+                .padding(Padding::uniform(1))
+                .title(Span::styled(
+                    " edit username ",
                     Style::default().fg(Color::Cyan).bold(),
                 )),
         );
@@ -1222,14 +1409,14 @@ pub fn render_confirm_invite(f: &mut Frame, s: &ConfirmInviteState) {
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
-        Span::styled("  fingerprint: ", Style::default().fg(Color::DarkGray)),
+        Span::styled("  id:   ", Style::default().fg(Color::DarkGray)),
         Span::styled(
-            s.invite.fingerprint.clone(),
+            super::display_id(&s.invite.fingerprint),
             Style::default().fg(Color::Yellow).bold(),
         ),
     ]));
     lines.push(Line::from(vec![
-        Span::styled("  dial:        ", Style::default().fg(Color::DarkGray)),
+        Span::styled("  dial: ", Style::default().fg(Color::DarkGray)),
         Span::styled(s.invite.host_multiaddr.clone(), Style::default().fg(Color::White)),
     ]));
     if let Some(room) = &s.invite.room {

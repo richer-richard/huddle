@@ -159,4 +159,17 @@ pub enum AppEvent {
     /// line ("direct connection to <peer>"). Fires only on success;
     /// failures stay in the debug log.
     DcutrSucceeded { peer_label: String },
+    /// huddle 0.5: a peer announced or cleared their self-declared
+    /// username via a signed `ProfileUpdate`. `username = None` means
+    /// the peer is now `[anonymous]`. TUI consumers redraw the chat
+    /// + member list so the new label flows through.
+    PeerProfileUpdated {
+        fingerprint: String,
+        username: Option<String>,
+    },
+    /// huddle 0.5: the local user's `go_dark` call succeeded — every
+    /// joined room got a best-effort `MemberLeave`, the network task
+    /// shut down, and the data dir was wiped. TUI shows a final
+    /// "Goodbye" modal and exits the process.
+    WentDark,
 }

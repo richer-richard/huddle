@@ -130,10 +130,25 @@ fn render_header(f: &mut Frame, area: Rect, app: &TuiApp) {
             member_spans.push(Span::styled(" ", Style::default()));
         }
         first = false;
-        let label = if fp == &me {
-            format!("{}*", short_fp(fp))
+        // huddle 0.5: render `{username}·{short_fp}` for set users,
+        // bare short_fp for [anonymous]. Self gets a trailing `*`.
+        let name = if fp == &me {
+            app.handle.display_name()
         } else {
-            short_fp(fp)
+            app.handle.lookup_username(fp)
+        };
+        let short = short_fp(fp);
+        let base = match name {
+            Some(n) if !n.is_empty() => {
+                let trunc: String = n.chars().take(10).collect();
+                format!("{}·{}", trunc, short)
+            }
+            _ => short,
+        };
+        let label = if fp == &me {
+            format!("{}*", base)
+        } else {
+            base
         };
         member_spans.push(Span::styled(
             label,
@@ -191,7 +206,8 @@ fn render_header(f: &mut Frame, area: Rect, app: &TuiApp) {
 /// Width (in cols) of the "  HH:MM  label   " prefix. Continuation lines
 /// of a wrapped or multiline message are indented this many spaces so
 /// they sit under the body column.
-const MSG_PREFIX_WIDTH: usize = 2 + 5 + 2 + 6 + 2; // 17
+const MSG_LABEL_WIDTH: usize = 12;
+const MSG_PREFIX_WIDTH: usize = 2 + 5 + 2 + MSG_LABEL_WIDTH + 2; // 23
 
 fn render_messages(f: &mut Frame, area: Rect, app: &TuiApp) {
     let r = match app.active_room() {
@@ -199,6 +215,14 @@ fn render_messages(f: &mut Frame, area: Rect, app: &TuiApp) {
         None => return,
     };
     let me = app.handle.fingerprint().to_string();
+    // huddle 0.5 / Phase 3: precompute the verified set once so each
+    // message-line render is a constant-time lookup. The set is
+    // per-room and tiny (usually < 32 members).
+    let verified: std::collections::HashSet<String> = app
+        .handle
+        .verified_fingerprints(&r.room_id)
+        .into_iter()
+        .collect();
 
     // Available width for body text — account for borders + padding.
     let inner_w = area.width.saturating_sub(4) as usize;
@@ -225,35 +249,54 @@ fn render_messages(f: &mut Frame, area: Rect, app: &TuiApp) {
         match row {
             Row::Text(m) => {
                 let is_me = m.sender_fingerprint == me || m.direction == "out";
+                // huddle 0.5: prefer the signed `lookup_username`. Fall
+                // back to `[anonymous]` so peers who haven't set a name
+                // still get a label rather than a bare fingerprint.
                 let label = if is_me {
                     app.handle
                         .display_name()
                         .unwrap_or_else(|| "you".to_string())
                 } else {
                     app.handle
-                        .lookup_member_display_name(&m.sender_fingerprint)
-                        .unwrap_or_else(|| short_fp(&m.sender_fingerprint))
+                        .lookup_username(&m.sender_fingerprint)
+                        .unwrap_or_else(|| "[anonymous]".to_string())
                 };
-                // Truncate names to fit in the 6-char label column.
-                let label: String = label.chars().take(6).collect();
+                let label: String = label.chars().take(MSG_LABEL_WIDTH).collect();
                 let label_style = if is_me {
                     Style::default().fg(Color::Yellow).bold()
                 } else {
                     Style::default().fg(Color::Cyan).bold()
                 };
+                // Phase 3: green ✓ in the sender column for peers we've
+                // SAS-verified. Suppressed for our own outbound messages
+                // (tautological).
+                let is_verified = !is_me && verified.contains(&m.sender_fingerprint);
                 let time = format_time(m.sent_at);
                 let chunks = wrap_body(&m.body, body_w);
                 for (i, chunk) in chunks.iter().enumerate() {
                     if i == 0 {
-                        lines.push(Line::from(vec![
+                        let mut spans = vec![
                             Span::styled(
                                 format!("  {}  ", time),
                                 Style::default().fg(Color::DarkGray),
                             ),
-                            Span::styled(format!("{:<6}", label), label_style),
+                            Span::styled(
+                                format!("{:<width$}", label, width = MSG_LABEL_WIDTH),
+                                label_style,
+                            ),
                             Span::styled("  ", Style::default()),
-                            Span::styled(chunk.clone(), Style::default().fg(Color::White)),
-                        ]));
+                        ];
+                        if is_verified {
+                            spans.push(Span::styled(
+                                "✓ ",
+                                Style::default().fg(Color::Green).bold(),
+                            ));
+                        }
+                        spans.push(Span::styled(
+                            chunk.clone(),
+                            Style::default().fg(Color::White),
+                        ));
+                        lines.push(Line::from(spans));
                     } else {
                         lines.push(Line::from(vec![
                             Span::styled(

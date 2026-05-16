@@ -115,6 +115,17 @@ pub enum Action {
     OpenSettings,
     SettingsToggleGlobalVerifiedOnly,
     ToggleRoomVerifiedOnly,
+    // huddle 0.5: optional self-declared username
+    OpenEditUsername,
+    EditUsernameTypeChar(char),
+    EditUsernameBackspace,
+    EditUsernameConfirm,
+    // huddle 0.5: go-dark account deletion flow
+    OpenGoDarkModal,
+    GoDarkNextField,
+    GoDarkTypeChar(char),
+    GoDarkBackspace,
+    GoDarkConfirm,
     // Phase F: short-lived join codes
     OpenGenerateJoinCode,
     OpenJoinWithCode,
@@ -229,6 +240,23 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
                 Action::SettingsToggleGlobalVerifiedOnly
             }
             KeyCode::Char('c') => Action::ClearBlockedPeers,
+            KeyCode::Char('u') => Action::OpenEditUsername,
+            KeyCode::Char('!') => Action::OpenGoDarkModal,
+            _ => Action::Nothing,
+        },
+        Modal::EditUsername(_) => match key.code {
+            KeyCode::Esc => Action::CloseModal,
+            KeyCode::Enter => Action::EditUsernameConfirm,
+            KeyCode::Backspace => Action::EditUsernameBackspace,
+            KeyCode::Char(c) => Action::EditUsernameTypeChar(c),
+            _ => Action::Nothing,
+        },
+        Modal::GoDark(_) => match key.code {
+            KeyCode::Esc => Action::CloseModal,
+            KeyCode::Tab => Action::GoDarkNextField,
+            KeyCode::Enter => Action::GoDarkConfirm,
+            KeyCode::Backspace => Action::GoDarkBackspace,
+            KeyCode::Char(c) => Action::GoDarkTypeChar(c),
             _ => Action::Nothing,
         },
         Modal::ShowJoinCode(_) => match key.code {

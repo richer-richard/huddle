@@ -243,6 +243,51 @@ third machine.
 - [ ] If a third machine C joins the room later (while B is still
       announcing), C connects to B and gets the session key
 
+## 20. Username & verified ✓ in chat (huddle 0.5)
+
+- [ ] In any room with two peers, on A press `,` to open Settings,
+      then `u` to edit username. Type `alice`, Enter.
+- [ ] On A, status line briefly shows "username set to alice"
+- [ ] On B, within ~1 s the chat label for A's prior messages
+      renders as `alice` instead of the short fingerprint, and an
+      in-band status "{abcd}… is now alice" flashes for 4 s
+- [ ] On A, send "hi from alice" — both sides see the message with
+      sender label `alice`
+- [ ] On A, press `,` then `u` again, clear input, Enter — username
+      reverts to `[anonymous]`. On B, A's messages now render as
+      `[anonymous]`.
+- [ ] If A and B have completed SAS verification (scenario 10), each
+      side sees a green `✓` after the sender name on every chat line
+      from the verified counterpart. Suppressed for one's own
+      outbound messages.
+
+## 21. Go dark — account deletion (huddle 0.5)
+
+**Use a throwaway data dir for this.** Set a non-default `HOME` or
+move `~/Library/Application Support/huddle` (macOS) / `~/.local/share/huddle`
+(Linux) aside before starting.
+
+- [ ] Start huddle, set a master passphrase at first launch, join
+      one or two rooms with another peer.
+- [ ] On peer B, confirm A's fingerprint is in the member list.
+- [ ] On A, press `,` for Settings, then `!` to open the go-dark
+      modal. Try the wrong master passphrase first → inline
+      "incorrect master passphrase" appears; passphrase field
+      clears.
+- [ ] Type the correct master passphrase. `Tab` to the second
+      field. Type `DELETE EVERYTHING` (exact case). Enter.
+- [ ] On B, within ~2 s A leaves every shared room. A's
+      `MemberLeave` arrives; the member list updates.
+- [ ] On A, a "Goodbye. huddle has gone dark." modal shows for
+      ~2 s, then the process exits.
+- [ ] Inspect the data dir — `huddle.db`, `huddle.db-shm`,
+      `huddle.db-wal`, `keychain.salt`, `huddle.log`, and
+      `config.toml` are all gone. The dir itself is removed if it
+      was empty.
+- [ ] Relaunch huddle on A. Onboarding card reappears, a fresh
+      fingerprint is generated, no memory of previous rooms /
+      peers / messages.
+
 ## Troubleshooting
 
 - **Peers don't discover** — same-subnet? Some Wi-Fi networks have AP

@@ -185,12 +185,24 @@ pub struct AppHandle {
     /// arrives carrying `host_addrs` — we re-dial the same announcer
     /// at most once per `HOST_ADDR_DIAL_BACKOFF_SECS`.
     host_addr_dial_attempts: Arc<Mutex<HashMap<String, i64>>>,
+    /// huddle 0.5: per-peer last-broadcast timestamp (ms) for our own
+    /// `ProfileUpdate`. The `PeerIdentified` handler re-broadcasts our
+    /// current username to a newly-identified peer so they learn it
+    /// without waiting for a change, but we dedupe with a
+    /// `PROFILE_REBROADCAST_FLOOR_MS` floor so a noisy reconnect cycle
+    /// doesn't spam the gossipsub mesh.
+    last_profile_broadcast_at_ms: Arc<Mutex<HashMap<String, i64>>>,
     app_event_tx: broadcast::Sender<AppEvent>,
 }
 
 /// Phase D follow-up: minimum seconds between two opportunistic
 /// `host_addrs` dials to the same announcer fingerprint.
 const HOST_ADDR_DIAL_BACKOFF_SECS: i64 = 300;
+
+/// huddle 0.5: minimum ms between two `PeerIdentified`-triggered
+/// re-broadcasts of our own `ProfileUpdate` to the same peer
+/// fingerprint. Prevents storm-on-reconnect on flaky transports.
+const PROFILE_REBROADCAST_FLOOR_MS: i64 = 60_000;
 
 impl AppHandle {
     pub async fn start() -> Result<Self> {
@@ -259,6 +271,7 @@ impl AppHandle {
             nat_reachable_addrs: Arc::new(Mutex::new(HashSet::new())),
             relay_circuit_addrs: Arc::new(Mutex::new(HashSet::new())),
             host_addr_dial_attempts: Arc::new(Mutex::new(HashMap::new())),
+            last_profile_broadcast_at_ms: Arc::new(Mutex::new(HashMap::new())),
             app_event_tx,
         };
 
@@ -1331,6 +1344,52 @@ impl AppHandle {
                         },
                     );
                 }
+                // huddle 0.5: tell the newly-identified peer our current
+                // username via a signed ProfileUpdate, but only if we
+                // have one set locally and we haven't already pushed
+                // ours to this peer in the last
+                // `PROFILE_REBROADCAST_FLOOR_MS`. Without the floor a
+                // flapping transport (relay reconnect storms) would
+                // republish on every identify event.
+                let our_username = repo::get_display_name(&self.db).unwrap_or(None);
+                if our_username.is_some() {
+                    let now_ms = now_unix_ms();
+                    let should_send = {
+                        let mut last = self.last_profile_broadcast_at_ms.lock().unwrap();
+                        match last.get(&fingerprint) {
+                            Some(prev) if now_ms - prev < PROFILE_REBROADCAST_FLOOR_MS => false,
+                            _ => {
+                                last.insert(fingerprint.clone(), now_ms);
+                                true
+                            }
+                        }
+                    };
+                    if should_send {
+                        let msg = RoomMessage::ProfileUpdate {
+                            sender_fingerprint: self.identity.fingerprint().to_string(),
+                            username: our_username,
+                            updated_at: now_ms,
+                        };
+                        if let Ok(env) = crate::crypto::sign_message(&self.identity, &msg) {
+                            if let Ok(bytes) =
+                                crate::network::protocol::encode_wire_signed(&env)
+                            {
+                                let rooms: Vec<String> = self
+                                    .active_rooms
+                                    .lock()
+                                    .unwrap()
+                                    .keys()
+                                    .cloned()
+                                    .collect();
+                                for room_id in rooms {
+                                    self.network
+                                        .publish_room_message(room_id, bytes.clone())
+                                        .await;
+                                }
+                            }
+                        }
+                    }
+                }
             }
             NetworkEvent::RelayReservationEstablished { address } => {
                 // Treat the circuit address like any other listen
@@ -2226,6 +2285,48 @@ impl AppHandle {
                     }
                 }
             }
+            RoomMessage::ProfileUpdate {
+                sender_fingerprint,
+                username,
+                updated_at,
+            } => {
+                // huddle 0.5: username spoof defense. Drop any
+                // ProfileUpdate that didn't arrive inside a Signed
+                // envelope, or whose signer doesn't match the claimed
+                // sender_fingerprint. Without this anyone could pretend
+                // to be "alice" by stuffing the field.
+                let signer = match verified_signer {
+                    Some(fp) => fp,
+                    None => {
+                        warn!(
+                            sender = %sender_fingerprint,
+                            "dropping unsigned ProfileUpdate"
+                        );
+                        return;
+                    }
+                };
+                if signer != sender_fingerprint {
+                    warn!(
+                        signer = %signer,
+                        claimed = %sender_fingerprint,
+                        "dropping ProfileUpdate with signer != sender"
+                    );
+                    return;
+                }
+                if let Err(e) = repo::upsert_peer_profile(
+                    &self.db,
+                    &sender_fingerprint,
+                    username.as_deref(),
+                    updated_at,
+                ) {
+                    warn!(%e, "upsert_peer_profile failed");
+                    return;
+                }
+                let _ = self.app_event_tx.send(AppEvent::PeerProfileUpdated {
+                    fingerprint: sender_fingerprint,
+                    username,
+                });
+            }
         }
     }
 
@@ -2897,9 +2998,42 @@ impl AppHandle {
         repo::set_display_name(&self.db, name)
     }
 
-    /// Look up the display name we've seen for a peer in any room.
+    /// huddle 0.5: set the local user's self-declared username (or clear
+    /// it with None) and broadcast a signed `ProfileUpdate` to every
+    /// joined room. Receivers cache the latest per-fingerprint username
+    /// in `peer_profiles`; unsigned envelopes are dropped at the receive
+    /// arm so the username can't be spoofed.
+    pub async fn set_username(&self, name: Option<&str>) -> Result<()> {
+        repo::set_display_name(&self.db, name)?;
+        let msg = RoomMessage::ProfileUpdate {
+            sender_fingerprint: self.identity.fingerprint().to_string(),
+            username: name.map(|s| s.to_string()),
+            updated_at: now_unix_ms(),
+        };
+        let env = crate::crypto::sign_message(&self.identity, &msg)?;
+        let bytes = crate::network::protocol::encode_wire_signed(&env)?;
+        let rooms: Vec<String> = self.active_rooms.lock().unwrap().keys().cloned().collect();
+        for room_id in rooms {
+            self.network
+                .publish_room_message(room_id, bytes.clone())
+                .await;
+        }
+        Ok(())
+    }
+
+    /// huddle 0.5: cached username for a peer (any peer we've ever
+    /// received a signed `ProfileUpdate` from), or None if unknown or
+    /// the peer cleared their username. Callers render `[anonymous]` on
+    /// None.
+    pub fn lookup_username(&self, fingerprint: &str) -> Option<String> {
+        repo::get_peer_username(&self.db, fingerprint).unwrap_or(None)
+    }
+
+    /// Look up the display name we've seen for a peer. Forwards to
+    /// `lookup_username` (the new signed-source-of-truth) so existing
+    /// call sites get the authenticated value without churn.
     pub fn lookup_member_display_name(&self, fingerprint: &str) -> Option<String> {
-        repo::lookup_display_name(&self.db, fingerprint).unwrap_or(None)
+        self.lookup_username(fingerprint)
     }
 
     pub fn is_room_muted(&self, room_id: &str) -> bool {
@@ -3274,6 +3408,109 @@ impl AppHandle {
             .ok_or_else(|| HuddleError::Session("missing room crypto".into()))?;
         file_encryption::decrypt_file(ciphertext, meta, crypto, sender_fingerprint)
     }
+
+    /// huddle 0.5: irreversibly delete this account. Verifies the
+    /// master passphrase, best-effort `MemberLeave`s every joined room
+    /// (capped at 2 s so a single unresponsive transport can't hang
+    /// the wipe), shuts down the network, then deletes the database,
+    /// keychain salt, log, and config files from `config::data_dir()`.
+    /// Emits `AppEvent::WentDark` on success so the TUI can show a
+    /// goodbye modal and exit.
+    ///
+    /// In `--no-master-passphrase` mode (`self.session_persist_key`
+    /// is all-zero), the passphrase check is skipped — the typed
+    /// `DELETE EVERYTHING` confirmation in the TUI is the only gate.
+    pub async fn go_dark(&self, master_passphrase: &str) -> Result<()> {
+        let no_master = self.session_persist_key == [0u8; 32];
+        if !no_master {
+            let salt = storage::keychain::load_or_create_salt()?;
+            let candidate_master =
+                storage::keychain::derive_master_key(master_passphrase, &salt)?;
+            let candidate_subkey =
+                storage::keychain::derive_subkey(&candidate_master, b"megolm-persist");
+            if !ct_eq_32(&candidate_subkey, &self.session_persist_key) {
+                return Err(HuddleError::Other(
+                    "incorrect master passphrase".into(),
+                ));
+            }
+        }
+
+        let room_ids: Vec<String> = self
+            .active_rooms
+            .lock()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        let _ = tokio::time::timeout(Duration::from_secs(2), async {
+            for room_id in &room_ids {
+                if let Err(e) = self.leave_room(room_id).await {
+                    warn!(%room_id, %e, "go_dark: leave_room failed");
+                }
+            }
+        })
+        .await;
+
+        self.network.shutdown().await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let data_dir = config::data_dir();
+        let candidates = [
+            "huddle.db",
+            "huddle.db-shm",
+            "huddle.db-wal",
+            "keychain.salt",
+            "huddle.log",
+            "config.toml",
+        ];
+        for name in &candidates {
+            let path = data_dir.join(name);
+            wipe_file(&path);
+        }
+        if let Ok(read) = std::fs::read_dir(&data_dir) {
+            for entry in read.flatten() {
+                if let Some(name) = entry.file_name().to_str() {
+                    if name.starts_with("huddle.log.") {
+                        wipe_file(&entry.path());
+                    }
+                }
+            }
+        }
+        let _ = std::fs::remove_dir(&data_dir);
+
+        let _ = self.app_event_tx.send(AppEvent::WentDark);
+        Ok(())
+    }
+}
+
+/// Constant-time 32-byte equality. Used by `go_dark` to compare a
+/// re-derived HKDF subkey to the in-memory `session_persist_key`
+/// without leaking timing information about which byte differed.
+fn ct_eq_32(a: &[u8; 32], b: &[u8; 32]) -> bool {
+    let mut diff = 0u8;
+    for i in 0..32 {
+        diff |= a[i] ^ b[i];
+    }
+    diff == 0
+}
+
+/// Best-effort file wipe: overwrite with zeros, then delete. Missing /
+/// permission-denied files are logged and skipped. Called from
+/// `go_dark` only — not a general-purpose util.
+fn wipe_file(path: &Path) {
+    use std::io::Write;
+    if let Ok(meta) = std::fs::metadata(path) {
+        if let Ok(mut f) = std::fs::OpenOptions::new().write(true).open(path) {
+            let zeros = vec![0u8; meta.len() as usize];
+            let _ = f.write_all(&zeros);
+            let _ = f.sync_all();
+        }
+    }
+    if let Err(e) = std::fs::remove_file(path) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            warn!(?path, %e, "wipe_file: remove failed");
+        }
+    }
 }
 
 /// Use the platform's default opener on `path`.
@@ -3314,6 +3551,13 @@ fn now_unix() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64
+}
+
+fn now_unix_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
 }
 
 /// Phase B: generate a fresh 24-char base64-ish passphrase for the

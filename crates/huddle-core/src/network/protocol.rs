@@ -31,6 +31,8 @@ pub fn room_topic(room_id: &str) -> String {
 ///     owner)
 ///   - `JoinRefused` (signer is a room owner; tells the rejected joiner
 ///     it really came from the room)
+///   - `ProfileUpdate` (signer must equal the claimed `sender_fingerprint`;
+///     prevents anyone from spoofing another peer's username)
 ///
 /// Verification happens via `crate::crypto::verify_signed`: it re-derives
 /// the fingerprint from `ed25519_pubkey_b64`, asserts equality with
@@ -271,6 +273,16 @@ pub enum RoomMessage {
         owner_session_id: String,
         wrapped_session_key_b64: String,
         nonce_b64: String,
+    },
+    /// Phase 0.5: a peer is announcing (or clearing) their self-declared
+    /// username. MUST be sent inside `WireMessage::Signed` — receivers
+    /// require `verified_signer == sender_fingerprint`. Last-write-wins
+    /// by `updated_at` (monotonic ms). `username = None` clears the
+    /// previously-set username and the peer renders as `[anonymous]`.
+    ProfileUpdate {
+        sender_fingerprint: String,
+        username: Option<String>,
+        updated_at: i64,
     },
 }
 
