@@ -64,8 +64,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme) {
     lines.push(Line::from(vec![
         Span::styled("  !", theme.err_style()),
         Span::raw("    "),
-        Span::styled("go dark", theme.err_style()),
-        Span::raw("                   "),
+        Span::styled(format!("{:<28}", "go dark"), theme.err_style()),
         Span::styled("delete account, wipe data, exit", theme.dim()),
     ]));
 
@@ -82,7 +81,7 @@ fn row<'a>(theme: &Theme, key: &'a str, label: &'a str, value: String) -> Line<'
     Line::from(vec![
         Span::styled(format!("  {}", key), theme.warn_style()),
         Span::raw("    "),
-        Span::styled(format!("{:<24}", label), theme.text_style()),
+        Span::styled(format!("{:<28}", label), theme.text_style()),
         Span::styled(value, theme.dim()),
     ])
 }

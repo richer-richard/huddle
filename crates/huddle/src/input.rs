@@ -17,6 +17,11 @@ pub enum Action {
     LobbyJoinSelected,
     LobbyRefresh,
     LobbyFocusToggle,
+    /// huddle 0.7.2: tmux-style focus jump. Ctrl+Left → sidebar,
+    /// Ctrl+Right → pane. Single-stroke, works from any context
+    /// (including while typing in chat input).
+    FocusSidebar,
+    FocusPane,
     LobbyReconnectPeer,
     LobbyForgetPeer,
     OpenDialPeer,
@@ -207,6 +212,16 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
     // Ctrl+H = status history, Shift+? = re-open onboarding.
     if matches!(app.modal, Modal::None) {
         if key.modifiers.contains(KeyModifiers::CONTROL) {
+            // huddle 0.7.2: Ctrl+Left / Ctrl+Right = focus jump
+            // between sidebar and pane. Works from any context,
+            // including chat input mode. macOS users may need to
+            // disable Mission Control's "Move left/right a space"
+            // shortcut in System Settings.
+            match key.code {
+                KeyCode::Left => return Action::FocusSidebar,
+                KeyCode::Right => return Action::FocusPane,
+                _ => {}
+            }
             // Ctrl+H — note: crossterm sometimes delivers this as
             // KeyCode::Backspace on certain terminals because of the
             // ASCII collision. We accept both.

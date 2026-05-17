@@ -2146,6 +2146,27 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             sidebar_jump_section(app, 1);
             Ok(false)
         }
+        Action::FocusSidebar => {
+            // huddle 0.7.2: Ctrl+Left. Blur chat input if active so
+            // typing keystrokes route to sidebar nav, not into the
+            // last-active chat.
+            if let Some(r) = app.active_room_mut() {
+                r.input_active = false;
+            }
+            app.sidebar.focus = SidebarFocus::Sidebar;
+            Ok(false)
+        }
+        Action::FocusPane => {
+            // huddle 0.7.2: Ctrl+Right. On chat panes, also focus the
+            // input so typing goes straight into the composer.
+            app.sidebar.focus = SidebarFocus::Pane;
+            if matches!(app.pane, Pane::Dm(_) | Pane::Group(_)) {
+                if let Some(r) = app.active_room_mut() {
+                    r.input_active = true;
+                }
+            }
+            Ok(false)
+        }
         Action::LobbyReconnectPeer => {
             if let Some(p) = app.known_peers.get(app.selected_known_idx).cloned() {
                 if let Err(e) = app.handle.redial(&p.address).await {

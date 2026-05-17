@@ -75,6 +75,19 @@ pub const BINDINGS: &[Binding] = &[
         description: "command palette",
         palette_label: None,
     },
+    // huddle 0.7.2: tmux-style focus jump between sidebar and pane.
+    Binding {
+        keys: "Ctrl+←",
+        context: Context::Global,
+        description: "focus sidebar (mac: disable Mission Control's Move-left-a-space)",
+        palette_label: Some("focus sidebar"),
+    },
+    Binding {
+        keys: "Ctrl+→",
+        context: Context::Global,
+        description: "focus pane (mac: disable Mission Control's Move-right-a-space)",
+        palette_label: Some("focus pane"),
+    },
     // Lobby
     Binding {
         keys: "s",
@@ -443,6 +456,7 @@ pub fn adaptive_hints(app: &TuiApp) -> Vec<(&'static str, &'static str)> {
             }
             _ => {}
         }
+        out.push(("Ctrl+→", "pane"));
         out.push(("?", "help"));
         out.push(("q", "quit"));
     } else {
@@ -460,7 +474,7 @@ pub fn adaptive_hints(app: &TuiApp) -> Vec<(&'static str, &'static str)> {
             out.push(("Enter", "send"));
             out.push(("Alt+↵", "newline"));
             out.push(("Esc", "blur"));
-            out.push(("PgUp", "scroll"));
+            out.push(("Ctrl+←", "sidebar"));
             out.push(("Ctrl+P", "palette"));
         } else {
             out.push(("/", "type"));
@@ -471,7 +485,7 @@ pub fn adaptive_hints(app: &TuiApp) -> Vec<(&'static str, &'static str)> {
                 out.push(("Ctrl+I", "members"));
             }
             out.push(("Ctrl+L", "leave"));
-            out.push(("Esc", "sidebar"));
+            out.push(("Ctrl+←", "sidebar"));
         }
     }
     out

@@ -103,8 +103,17 @@ from the actual key map.
 | `?`                | Help                                    |
 | `:` or `Ctrl+P`    | Command palette — fuzzy search every action |
 | `Ctrl+H`           | Notification history (last 100 status events) |
+| `Ctrl+←` / `Ctrl+→`| Focus sidebar / pane (tmux-style; see macOS note below) |
 | `Esc`              | Close modal / blur input / focus sidebar |
 | `q` / `Ctrl+C`     | Quit (confirms first)                   |
+
+> **macOS note (huddle 0.7.2+):** `Ctrl+←` / `Ctrl+→` are captured by
+> Mission Control as "Move left/right a space" by default and never
+> reach the terminal. Disable in **System Settings → Keyboard →
+> Keyboard Shortcuts → Mission Control** to use them in huddle.
+> Linux + Windows terminals forward them natively. The fallback in
+> every context is still `Esc` (focus sidebar) and `/` (focus chat
+> input).
 
 ### Sidebar / non-chat panes
 | Key                | Action                                  |
@@ -428,6 +437,23 @@ your platform's Downloads folder. Phase 2 cap is 1 MiB per file.
   two parties (Megolm message keys still ratchet, but the wrap key
   doesn't). Per-DM ephemeral ratchets (Double Ratchet-style) are a
   candidate follow-up.
+
+## What's new in 0.7.2 — UX polish
+
+- **`Ctrl+←` / `Ctrl+→` focus jump** between sidebar and pane (works
+  from any context, including while typing in chat input). One
+  keystroke instead of `Esc` → `Tab`. macOS users may need to disable
+  Mission Control's Move-left/right-a-space shortcut (System Settings
+  → Keyboard → Keyboard Shortcuts → Mission Control). When focus
+  jumps to a chat pane, the input is auto-activated so you can type
+  immediately.
+- **Settings pane padding fix.** The value column was jammed flush
+  against the label column when a label was exactly 24 chars wide
+  (`update check (crates.io)on` rendered with no gap). Labels now pad
+  to 28 chars, guaranteeing visible whitespace before every value.
+- **Sidebar focus border** continues to highlight which region owns
+  the keystrokes (already shipped in 0.7; surfaced more clearly with
+  the new focus-jump bindings).
 
 ## What's new in 0.7.1 — E2E DMs
 
