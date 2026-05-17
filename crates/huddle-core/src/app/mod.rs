@@ -575,7 +575,7 @@ impl AppHandle {
         Ok(room_id)
     }
 
-    /// huddle 0.7: start (or open) a 1-1 DM with `partner_fingerprint`.
+    /// huddle 0.7.1: start (or open) a 1-1 DM with `partner_fingerprint`.
     ///
     /// Idempotent across peers and reopens:
     /// 1. Refuses to DM yourself.
@@ -584,10 +584,18 @@ impl AppHandle {
     ///    IDs.
     /// 3. If a DM room already exists locally (active or stored), returns
     ///    its id — no new room, no second announcement.
-    /// 4. Otherwise creates a `RoomKind::Direct`, unencrypted room. v1
-    ///    DMs rely on the canonical-ID + visibility-filter combo for
-    ///    privacy; E2E for DMs is a v0.8 follow-up.
-    /// 5. Subscribes to the room topic and announces on the global topic.
+    /// 4. Otherwise creates a `RoomKind::Direct`, **end-to-end encrypted**
+    ///    room. The key is derived from Ed25519→X25519 ECDH between the
+    ///    two parties' identity keys (see `crypto::dm::derive_dm_key`).
+    ///    No shared passphrase, no central key agreement — both peers
+    ///    independently derive the same 32-byte room key from their
+    ///    own seed + the other's pubkey.
+    /// 5. If we don't yet know the partner's Ed25519 pubkey, the room
+    ///    is still created encrypted; the key is derived lazily once
+    ///    `MemberAnnounce` arrives with the partner's pubkey, after
+    ///    which we send our wrapped Megolm session key in a follow-up
+    ///    announce.
+    /// 6. Subscribes to the room topic and announces on the global topic.
     ///    The announcement is visibility-filtered at honest 0.7+ peers,
     ///    so only the partner sees it in their `discovered_rooms()`.
     pub async fn start_direct(&self, partner_fingerprint: &str) -> Result<String> {
@@ -618,12 +626,19 @@ impl AppHandle {
         // navigable in `sqlite3` if someone digs into the DB.
         let name = format!("dm-{}", short_fp_for_msg(partner_fingerprint));
 
+        // huddle 0.7.1: DMs are always encrypted. The salt slot stores
+        // the canonical room_id (16 raw bytes from the SHA-256 prefix)
+        // so a re-bootstrap can re-derive the same key. The actual key
+        // comes from ECDH below, not from this salt — but we keep the
+        // salt slot non-NULL so legacy code paths (which assume
+        // encrypted rooms have salts) don't choke.
+        let dm_salt = hex::decode(&room_id).unwrap_or_else(|_| room_id.as_bytes().to_vec());
         let info = StoredRoom {
             id: room_id.clone(),
             name,
             creator_fingerprint: our_fp.clone(),
-            encrypted: false,
-            passphrase_salt: None,
+            encrypted: true,
+            passphrase_salt: Some(dm_salt),
             created_at,
             last_active: Some(created_at),
             kind: RoomKind::Direct,
@@ -645,12 +660,31 @@ impl AppHandle {
             },
         )?;
 
+        // Try to derive the ECDH key now. If the partner's pubkey
+        // hasn't been observed yet (we know their fingerprint from a
+        // QR / invite / username lookup, but never seen a signed
+        // message from them), the key is None and gets populated by
+        // the `MemberAnnounce` handler below the moment partner's
+        // first announcement lands.
+        let passphrase_key = self.try_derive_dm_key(&room_id, partner_fingerprint);
+
+        // Always create our outbound Megolm session so we can encrypt
+        // *something* the moment the key materializes. RoomCrypto
+        // works the same as it does for group rooms — the only
+        // difference is where `passphrase_key` comes from.
+        let crypto = Some(RoomCrypto::new_for_room(
+            self.db.clone(),
+            room_id.clone(),
+            our_fp.clone(),
+            self.session_persist_key,
+        )?);
+
         self.active_rooms.lock().unwrap().insert(
             room_id.clone(),
             ActiveRoom {
                 info: info.clone(),
-                crypto: None,
-                passphrase_key: None,
+                crypto,
+                passphrase_key,
                 members,
                 typers: HashMap::new(),
                 read_only: false,
@@ -674,6 +708,59 @@ impl AppHandle {
             room_id: room_id.clone(),
         });
         Ok(room_id)
+    }
+
+    /// huddle 0.7.1: derive a DM key from a base64-encoded partner
+    /// pubkey. Mirrors `try_derive_dm_key` but operates on a pubkey we
+    /// just received (e.g. via `MemberAnnounce.sender_ed25519_pubkey`)
+    /// without re-querying the DB.
+    fn derive_dm_key_from_pubkey_b64(
+        &self,
+        room_id: &str,
+        pubkey_b64: &str,
+    ) -> Option<[u8; KEY_LEN]> {
+        let bytes = B64.decode(pubkey_b64).ok()?;
+        if bytes.len() != 32 {
+            return None;
+        }
+        let mut pubkey = [0u8; 32];
+        pubkey.copy_from_slice(&bytes);
+        let our_seed = self.identity.secret_bytes();
+        match crate::crypto::dm::derive_dm_key(&our_seed, &pubkey, room_id) {
+            Ok(k) => Some(k),
+            Err(e) => {
+                warn!(%e, "DM key derivation (from announce) failed");
+                None
+            }
+        }
+    }
+
+    /// huddle 0.7.1: look up partner's Ed25519 pubkey (from anywhere
+    /// we've persisted it) and derive the DM room key via ECDH. Returns
+    /// `None` when the pubkey isn't known yet — the caller proceeds
+    /// without a key and the `MemberAnnounce` handler retries later.
+    fn try_derive_dm_key(
+        &self,
+        room_id: &str,
+        partner_fingerprint: &str,
+    ) -> Option<[u8; KEY_LEN]> {
+        let pubkey_b64 = repo::lookup_peer_ed25519_pubkey(&self.db, partner_fingerprint)
+            .ok()
+            .flatten()?;
+        let bytes = B64.decode(&pubkey_b64).ok()?;
+        if bytes.len() != 32 {
+            return None;
+        }
+        let mut pubkey = [0u8; 32];
+        pubkey.copy_from_slice(&bytes);
+        let our_seed = self.identity.secret_bytes();
+        match crate::crypto::dm::derive_dm_key(&our_seed, &pubkey, room_id) {
+            Ok(k) => Some(k),
+            Err(e) => {
+                warn!(%e, %partner_fingerprint, "DM key derivation failed");
+                None
+            }
+        }
     }
 
     /// Internal: re-hydrate an existing on-disk DM room into
@@ -700,12 +787,41 @@ impl AppHandle {
             }
         }
 
+        // huddle 0.7.1: rehydrate the ECDH key + Megolm session if the
+        // partner's pubkey is on disk (which it always is after at
+        // least one previous MemberAnnounce). For older DMs that
+        // pre-date 0.7.1 (when DMs were unencrypted on the room
+        // layer), `info.encrypted` is false — preserve that and skip
+        // the ECDH derivation; the room continues operating as it did
+        // before. New 0.7.1+ DMs all have `encrypted = true`.
+        let (passphrase_key, crypto) = if info.encrypted {
+            let pk = self.try_derive_dm_key(room_id, partner_fingerprint);
+            let c = Some(RoomCrypto::load(
+                self.db.clone(),
+                room_id.to_string(),
+                our_fp.clone(),
+                self.session_persist_key,
+            )?
+            .unwrap_or_else(|| {
+                RoomCrypto::new_for_room(
+                    self.db.clone(),
+                    room_id.to_string(),
+                    our_fp.clone(),
+                    self.session_persist_key,
+                )
+                .expect("create RoomCrypto for DM re-bootstrap")
+            }));
+            (pk, c)
+        } else {
+            (None, None)
+        };
+
         self.active_rooms.lock().unwrap().insert(
             room_id.to_string(),
             ActiveRoom {
                 info: info.clone(),
-                crypto: None,
-                passphrase_key: None,
+                crypto,
+                passphrase_key,
                 members,
                 typers: HashMap::new(),
                 read_only: false,
@@ -1401,11 +1517,26 @@ impl AppHandle {
             if room.info.encrypted {
                 let crypto = room.crypto.as_mut().unwrap();
                 let session_key = crypto.our_session_key_b64();
-                let passphrase_key = room
-                    .passphrase_key
-                    .as_ref()
-                    .ok_or_else(|| HuddleError::Session("missing passphrase key".into()))?;
-                Some(passphrase::wrap(session_key.as_bytes(), passphrase_key)?)
+                match room.passphrase_key.as_ref() {
+                    Some(passphrase_key) => {
+                        Some(passphrase::wrap(session_key.as_bytes(), passphrase_key)?)
+                    }
+                    None if room.info.kind == RoomKind::Direct => {
+                        // huddle 0.7.1: DM-specific path — partner's
+                        // pubkey hasn't been observed yet, so we can't
+                        // derive the ECDH key. Send announce without
+                        // a wrapped key — it carries our Ed25519
+                        // pubkey, which lets the partner derive the
+                        // key on their side. They'll respond with
+                        // their own wrapped key in a follow-up
+                        // announce; once we receive it we re-broadcast
+                        // ours with the wrap filled in.
+                        None
+                    }
+                    None => {
+                        return Err(HuddleError::Session("missing passphrase key".into()));
+                    }
+                }
             } else {
                 None
             }
@@ -2066,6 +2197,44 @@ impl AppHandle {
                     }
                     room.info.encrypted && wrapped_session_key.is_some()
                 };
+
+                // huddle 0.7.1: for Direct rooms, the passphrase_key is
+                // derived from ECDH between our identity key and the
+                // partner's. The partner's pubkey may arrive in *this*
+                // MemberAnnounce — so we lazily compute the key now,
+                // before the unwrap path runs. Idempotent: if we
+                // already have the key, this is a no-op.
+                if matches!(
+                    self.active_rooms
+                        .lock()
+                        .unwrap()
+                        .get(room_id)
+                        .map(|r| (r.info.kind, r.passphrase_key.is_none())),
+                    Some((RoomKind::Direct, true))
+                ) {
+                    if let Some(pubkey_b64) = sender_ed25519_pubkey.as_deref() {
+                        if let Some(key) =
+                            self.derive_dm_key_from_pubkey_b64(room_id, pubkey_b64)
+                        {
+                            let mut rooms = self.active_rooms.lock().unwrap();
+                            if let Some(room) = rooms.get_mut(room_id) {
+                                room.passphrase_key = Some(key);
+                            }
+                            drop(rooms);
+                            // We just got the key — re-broadcast our
+                            // MemberAnnounce so the partner gets our
+                            // wrapped session key. Fire-and-forget;
+                            // failures are logged.
+                            let app = self.clone();
+                            let rid = room_id.to_string();
+                            tokio::spawn(async move {
+                                if let Err(e) = app.broadcast_member_announce(&rid).await {
+                                    warn!(%e, "re-broadcast DM announce after key derivation");
+                                }
+                            });
+                        }
+                    }
+                }
 
                 if need_inbound {
                     let wrapped = wrapped_session_key.unwrap();

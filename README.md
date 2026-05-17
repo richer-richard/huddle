@@ -402,6 +402,26 @@ Phase 2 cap is 1 MiB per file.
 - The SAS emoji table follows Matrix MSC 2241 for future cross-client
   compatibility but is not yet interop-tested against any other client.
 
+## What's new in 0.7.1 — E2E DMs
+
+Direct messages are now end-to-end encrypted on the room layer.
+
+- New `crate::crypto::dm::derive_dm_key` derives a 32-byte room key
+  from one side's Ed25519 secret seed and the other side's Ed25519
+  public key via X25519 ECDH + HKDF-SHA256.
+- `start_direct` creates DMs as `encrypted = true` with the
+  ECDH-derived key as the Megolm wrap key. The "passphrase salt"
+  slot stores the canonical room_id so re-bootstraps re-derive
+  identically.
+- When we don't yet have the partner's pubkey (e.g. fingerprint
+  resolved from a QR / invite / username), the room is created with
+  no wrap key. The next `MemberAnnounce` from the partner carries
+  their pubkey; we derive the key lazily, then re-broadcast our own
+  `MemberAnnounce` with the wrapped Megolm session key.
+- Backward compatibility: DMs created against pre-0.7.1 peers stay
+  in their original `encrypted=false` mode (the rooms table records
+  it). New 0.7.1+ DMs are always E2E.
+
 ## What's new in 0.7 — TUI 2.0
 
 `0.7.0` is a brand-new TUI built around a **sidebar + pane** layout
@@ -460,7 +480,7 @@ model and the tab-bar are retired.
 | `Shift+B` (group + owner)                 | view bans |
 | `Alt+Enter` / `Ctrl+J`                    | newline in input |
 
-### Direct messages are 1-1 forever
+### Direct messages are 1-1 forever and end-to-end encrypted
 
 `RoomKind::Direct` is persisted on the rooms table; the canonical
 DM room ID is `sha256("huddle-dm-v1\0" || min(fp_a, fp_b) || "\0" ||
@@ -471,10 +491,20 @@ peers and across reinstalls. A third member cannot join a DM
 DM-kind announcements are filtered out of third parties' discovery
 caches.
 
-> ⚠️ **v1 DMs are not E2E encrypted on the room layer** —
-> privacy comes from the canonical-ID + visibility-filter combo
-> plus libp2p Noise transport encryption. E2E for DMs is a v0.8
-> target.
+**End-to-end encryption (huddle 0.7.1+):** every DM uses a Megolm
+group session whose wrap key comes from an Ed25519→X25519 ECDH
+between the two parties' long-term identity keys, expanded with
+HKDF-SHA256 bound to the canonical room_id. Both peers
+independently derive the same 32-byte key without any shared
+passphrase or out-of-band handshake — see
+`crates/huddle-core/src/crypto/dm.rs`. The wrapped session key
+travels in `MemberAnnounce` exactly like a group room's; the only
+difference is where the wrap key came from.
+
+The first `MemberAnnounce` carries each party's pubkey, which the
+other side uses to derive the ECDH key. Once both keys are known,
+session-key wrapping resumes the normal Megolm flow and all
+subsequent traffic is E2E.
 
 ### Retired
 

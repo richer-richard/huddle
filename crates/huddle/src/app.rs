@@ -142,6 +142,26 @@ pub const ONBOARDING_PAGES: &[OnboardingPage] = &[
         ],
         min_version: "0.7.0",
     },
+    OnboardingPage {
+        title: "what's new in 0.7.1 — E2E DMs",
+        body: &[
+            "DMs are now end-to-end encrypted on the room layer.",
+            "",
+            "Each DM derives a Megolm wrap key from an Ed25519→X25519",
+            "ECDH between you and the other party's identity keys,",
+            "bound to the canonical room_id via HKDF-SHA256. No shared",
+            "passphrase, no extra prompt — `m` starts a DM and it's",
+            "E2E from the first wrapped session key onward.",
+            "",
+            "The wire shape didn't change: DMs ride the same MemberAnnounce",
+            "+ wrapped-Megolm-session-key flow as encrypted group rooms.",
+            "Only the derivation of the wrap key changed.",
+            "",
+            "DMs created on 0.7.0 stay in their original (encrypted=false)",
+            "mode for back-compat; new DMs created on 0.7.1 are E2E.",
+        ],
+        min_version: "0.7.1",
+    },
 ];
 
 /// huddle 0.6: pages that should be shown to a user with the given

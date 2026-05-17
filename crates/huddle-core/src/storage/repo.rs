@@ -330,6 +330,21 @@ pub fn upsert_room_member(db: &Db, member: &StoredRoomMember) -> Result<()> {
     Ok(())
 }
 
+/// huddle 0.7.1: find an Ed25519 pubkey for a fingerprint across all
+/// rooms we've ever seen the peer in. A peer's identity key is global
+/// (not per-room), so any non-null row works. Used by DM E2E to derive
+/// the ECDH room key without re-asking the network.
+pub fn lookup_peer_ed25519_pubkey(db: &Db, fingerprint: &str) -> Result<Option<String>> {
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare(
+        "SELECT ed25519_pubkey FROM room_members
+         WHERE fingerprint = ?1 AND ed25519_pubkey IS NOT NULL
+         LIMIT 1",
+    )?;
+    let mut rows = stmt.query_map(params![fingerprint], |row| row.get::<_, Option<String>>(0))?;
+    Ok(rows.next().and_then(|r| r.ok()).flatten())
+}
+
 pub fn list_room_members(db: &Db, room_id: &str) -> Result<Vec<StoredRoomMember>> {
     let conn = db.lock().unwrap();
     let mut stmt = conn.prepare(

@@ -1,3 +1,4 @@
+pub mod dm;
 pub mod megolm;
 pub mod passphrase;
 pub mod sas;
