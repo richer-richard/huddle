@@ -44,15 +44,25 @@ pub fn outer_split(area: Rect) -> OuterRects {
         (body.width * 4 / 10).max(20)
     };
 
+    // huddle 0.7.3: 2-col gutter between sidebar's right border and
+    // pane content. Panes with `Borders::NONE` (Welcome, Profile) were
+    // rendering text flush against the sidebar separator line, which
+    // looked cramped. Bordered panes (Settings, People, Activity, chat)
+    // get the same gutter — it just becomes blank space between two
+    // borders, which is fine.
     let hparts = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(sidebar_w), Constraint::Min(0)])
+        .constraints([
+            Constraint::Length(sidebar_w),
+            Constraint::Length(2),
+            Constraint::Min(0),
+        ])
         .split(body);
 
     OuterRects {
         header: vparts[0],
         sidebar: hparts[0],
-        pane: hparts[1],
+        pane: hparts[2],
         status: vparts[2],
     }
 }

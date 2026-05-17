@@ -103,17 +103,16 @@ from the actual key map.
 | `?`                | Help                                    |
 | `:` or `Ctrl+P`    | Command palette — fuzzy search every action |
 | `Ctrl+H`           | Notification history (last 100 status events) |
-| `Ctrl+←` / `Ctrl+→`| Focus sidebar / pane (tmux-style; see macOS note below) |
+| `Shift+←` / `Shift+→`| Focus sidebar / pane (tmux-style)     |
 | `Esc`              | Close modal / blur input / focus sidebar |
 | `q` / `Ctrl+C`     | Quit (confirms first)                   |
 
-> **macOS note (huddle 0.7.2+):** `Ctrl+←` / `Ctrl+→` are captured by
-> Mission Control as "Move left/right a space" by default and never
-> reach the terminal. Disable in **System Settings → Keyboard →
-> Keyboard Shortcuts → Mission Control** to use them in huddle.
-> Linux + Windows terminals forward them natively. The fallback in
-> every context is still `Esc` (focus sidebar) and `/` (focus chat
-> input).
+> **About the focus-jump binding (huddle 0.7.3+):** `Shift+←` /
+> `Shift+→` toggle keyboard focus between the sidebar and the pane,
+> including while typing in chat input. Shift+arrows are unclaimed at
+> OS and terminal level on macOS, Linux, and Windows — no Mission
+> Control / Spaces conflict. (0.7.2 briefly used `Ctrl+←` / `Ctrl+→`
+> but those collide with macOS's Move-between-Spaces shortcut.)
 
 ### Sidebar / non-chat panes
 | Key                | Action                                  |
@@ -437,6 +436,32 @@ your platform's Downloads folder. Phase 2 cap is 1 MiB per file.
   two parties (Megolm message keys still ratchet, but the wrap key
   doesn't). Per-DM ephemeral ratchets (Double Ratchet-style) are a
   candidate follow-up.
+
+## What's new in 0.7.3 — UX polish round 2
+
+- **Focus-jump rebound to `Shift+←` / `Shift+→`.** 0.7.2's `Ctrl+←` /
+  `Ctrl+→` collided with macOS Mission Control's Move-between-Spaces
+  shortcut (and `Cmd+←` / `Cmd+→` is Terminal/iTerm2 tab-switching,
+  ruling that out too). Shift+arrows are unclaimed everywhere.
+- **Sidebar cursor is visible again.** The previous bg-only highlight
+  on the selected row used `Color::Rgb(40, 40, 60)` which is
+  near-indistinguishable from default terminal bg on Terminal.app.
+  Selected rows now recolor every span's foreground to **yellow**
+  (warn) when the sidebar is focused, dim text when not — readable
+  on every dark theme.
+- **2-col gutter between sidebar and pane.** Panes with `Borders::NONE`
+  (Welcome, Profile) used to render text flush against the sidebar
+  separator line. The outer layout now inserts a 2-column gap before
+  the pane rect, so every pane has visible breathing room.
+- **Settings pane keybindings actually fire.** The pane displays
+  `V verified-only / U update check / E username / W replay
+  onboarding / ! go dark` — but 0.7.0–0.7.2 only dispatched those
+  inside the Settings *modal*, leaving the pane rows inert. They now
+  fire from the pane itself.
+- **`!` (go dark) is global.** Previously only available from the
+  Settings modal; now reachable from any non-chat pane. The modal's
+  two-factor passphrase + "DELETE EVERYTHING" confirm protects
+  against accidental triggers.
 
 ## What's new in 0.7.2 — UX polish
 

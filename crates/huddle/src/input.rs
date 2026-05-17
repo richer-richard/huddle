@@ -211,17 +211,19 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
     // would conflict otherwise). Ctrl+P = command palette,
     // Ctrl+H = status history, Shift+? = re-open onboarding.
     if matches!(app.modal, Modal::None) {
-        if key.modifiers.contains(KeyModifiers::CONTROL) {
-            // huddle 0.7.2: Ctrl+Left / Ctrl+Right = focus jump
-            // between sidebar and pane. Works from any context,
-            // including chat input mode. macOS users may need to
-            // disable Mission Control's "Move left/right a space"
-            // shortcut in System Settings.
+        // huddle 0.7.3: Shift+Left / Shift+Right = focus jump between
+        // sidebar and pane. Swapped from Ctrl+arrows in 0.7.2 because
+        // macOS claims Ctrl+arrows for Mission Control Space-switching
+        // and Cmd+arrows for Terminal/iTerm2 tab-switching. Shift+arrows
+        // are unclaimed at OS and terminal levels on all three platforms.
+        if key.modifiers.contains(KeyModifiers::SHIFT) {
             match key.code {
                 KeyCode::Left => return Action::FocusSidebar,
                 KeyCode::Right => return Action::FocusPane,
                 _ => {}
             }
+        }
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
             // Ctrl+H — note: crossterm sometimes delivers this as
             // KeyCode::Backspace on certain terminals because of the
             // ASCII collision. We accept both.
@@ -499,8 +501,25 @@ fn map_normal(key: KeyEvent, app: &TuiApp) -> Action {
 }
 
 fn map_sidebar(key: KeyEvent, app: &TuiApp) -> Action {
-    // Cross-pane shortcuts first — these work anywhere the sidebar has
-    // focus, including from People/Activity/Settings panes.
+    // huddle 0.7.3: Settings-pane row bindings. The pane visibly
+    // displays "V verified-only / U update check / E username /
+    // W replay onboarding / ! go dark" — previously those rows were
+    // inert because only the Settings *modal* dispatched them. Now
+    // they fire from the pane itself.
+    if matches!(app.pane, Pane::Settings) {
+        match key.code {
+            KeyCode::Char('V') => return Action::SettingsToggleGlobalVerifiedOnly,
+            KeyCode::Char('U') => return Action::ToggleUpdateCheck,
+            KeyCode::Char('E') => return Action::OpenEditUsername,
+            KeyCode::Char('W') => return Action::OpenWhatsNew,
+            _ => {}
+        }
+    }
+    // Cross-pane shortcuts — work anywhere the sidebar has focus,
+    // including from Welcome/People/Activity/Settings panes. `!` is
+    // a global because it's the most consistently advertised
+    // go-dark shortcut, and the modal itself enforces the
+    // two-factor destructive confirm.
     match key.code {
         KeyCode::Char('q') => return Action::OpenQuitConfirm,
         KeyCode::Char('s') | KeyCode::Char('g') => return Action::OpenStartRoom,
@@ -516,6 +535,7 @@ fn map_sidebar(key: KeyEvent, app: &TuiApp) -> Action {
         KeyCode::Char('I') => return Action::GenerateInvite,
         KeyCode::Char('v') => return Action::OpenPasteInvite,
         KeyCode::Char('R') => return Action::MarkAllRead,
+        KeyCode::Char('!') => return Action::OpenGoDarkModal,
         _ => {}
     }
     match key.code {

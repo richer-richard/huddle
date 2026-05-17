@@ -75,17 +75,20 @@ pub const BINDINGS: &[Binding] = &[
         description: "command palette",
         palette_label: None,
     },
-    // huddle 0.7.2: tmux-style focus jump between sidebar and pane.
+    // huddle 0.7.3: tmux-style focus jump between sidebar and pane.
+    // Swapped from Ctrl+arrows in 0.7.2 because macOS claims Ctrl+arrows
+    // for Mission Control Spaces and Cmd+arrows for terminal tabs.
+    // Shift+arrows are unclaimed at every level on Mac/Linux/Windows.
     Binding {
-        keys: "Ctrl+←",
+        keys: "Shift+←",
         context: Context::Global,
-        description: "focus sidebar (mac: disable Mission Control's Move-left-a-space)",
+        description: "focus sidebar",
         palette_label: Some("focus sidebar"),
     },
     Binding {
-        keys: "Ctrl+→",
+        keys: "Shift+→",
         context: Context::Global,
-        description: "focus pane (mac: disable Mission Control's Move-right-a-space)",
+        description: "focus pane",
         palette_label: Some("focus pane"),
     },
     // Lobby
@@ -456,7 +459,7 @@ pub fn adaptive_hints(app: &TuiApp) -> Vec<(&'static str, &'static str)> {
             }
             _ => {}
         }
-        out.push(("Ctrl+→", "pane"));
+        out.push(("Shift+→", "pane"));
         out.push(("?", "help"));
         out.push(("q", "quit"));
     } else {
@@ -474,7 +477,7 @@ pub fn adaptive_hints(app: &TuiApp) -> Vec<(&'static str, &'static str)> {
             out.push(("Enter", "send"));
             out.push(("Alt+↵", "newline"));
             out.push(("Esc", "blur"));
-            out.push(("Ctrl+←", "sidebar"));
+            out.push(("Shift+←", "sidebar"));
             out.push(("Ctrl+P", "palette"));
         } else {
             out.push(("/", "type"));
@@ -485,7 +488,7 @@ pub fn adaptive_hints(app: &TuiApp) -> Vec<(&'static str, &'static str)> {
                 out.push(("Ctrl+I", "members"));
             }
             out.push(("Ctrl+L", "leave"));
-            out.push(("Ctrl+←", "sidebar"));
+            out.push(("Shift+←", "sidebar"));
         }
     }
     out

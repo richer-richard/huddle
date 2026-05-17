@@ -148,6 +148,29 @@ fn highlight(theme: &Theme, focused: bool, is_sel: bool, base: Style) -> Style {
     }
 }
 
+/// huddle 0.7.3: when a sidebar row is selected, force every span's
+/// foreground to yellow (or text_dim when the sidebar isn't focused).
+/// Ratatui's `Line.style` only affects padding, not Span text, so a bg
+/// highlight alone is barely visible on dark terminals. Recoloring
+/// each span gives a clearly visible cursor without relying on
+/// background contrast.
+fn apply_selection_fg<'a>(line: Line<'a>, theme: &Theme, focused: bool, is_sel: bool) -> Line<'a> {
+    if !is_sel {
+        return line;
+    }
+    let fg = if focused { theme.warn } else { theme.text_dim };
+    let line_style = line.style;
+    let spans: Vec<Span<'a>> = line
+        .spans
+        .into_iter()
+        .map(|s| {
+            let style = s.style.fg(fg).add_modifier(Modifier::BOLD);
+            Span::styled(s.content, style)
+        })
+        .collect();
+    Line::from(spans).style(line_style)
+}
+
 fn render_item<'a>(
     app: &TuiApp,
     theme: &Theme,
@@ -179,7 +202,8 @@ fn render_item<'a>(
                 spans.push(Span::styled(format!("({})", n), theme.unread()));
             }
             let base = Style::default();
-            Line::from(spans).style(highlight(theme, focused, is_sel, base))
+            let line = Line::from(spans).style(highlight(theme, focused, is_sel, base));
+            apply_selection_fg(line, theme, focused, is_sel)
         }
         SidebarItem::Profile => {
             let our_fp = app.handle.fingerprint();
@@ -199,8 +223,9 @@ fn render_item<'a>(
                 Span::styled(short_fp(our_fp).to_uppercase(), theme.dim()),
                 Span::raw("  "),
                 Span::styled(nat_glyph.to_string(), theme.text_style()),
-            ]);
-            line.style(highlight(theme, focused, is_sel, Style::default()))
+            ])
+            .style(highlight(theme, focused, is_sel, Style::default()));
+            apply_selection_fg(line, theme, focused, is_sel)
         }
         SidebarItem::Dm(room_id) => {
             let partner = app.handle.dm_partner_fingerprint(room_id);
@@ -233,7 +258,8 @@ fn render_item<'a>(
                     spans.push(Span::styled(format!("({})", n), theme.unread()));
                 }
             }
-            Line::from(spans).style(highlight(theme, focused, is_sel, Style::default()))
+            let line = Line::from(spans).style(highlight(theme, focused, is_sel, Style::default()));
+            apply_selection_fg(line, theme, focused, is_sel)
         }
         SidebarItem::Group(room_id) => {
             let info = app.handle.active_room_info(room_id);
@@ -276,7 +302,8 @@ fn render_item<'a>(
                     spans.push(Span::styled(format!("({})", n), theme.unread()));
                 }
             }
-            Line::from(spans).style(highlight(theme, focused, is_sel, Style::default()))
+            let line = Line::from(spans).style(highlight(theme, focused, is_sel, Style::default()));
+            apply_selection_fg(line, theme, focused, is_sel)
         }
         SidebarItem::GroupDiscover => {
             let discovered = app
@@ -295,8 +322,9 @@ fn render_item<'a>(
             let line = Line::from(vec![Span::styled(
                 format!("  + Discover ({})", discovered),
                 theme.dim(),
-            )]);
-            line.style(highlight(theme, focused, is_sel, Style::default()))
+            )])
+            .style(highlight(theme, focused, is_sel, Style::default()));
+            apply_selection_fg(line, theme, focused, is_sel)
         }
         SidebarItem::Person(addr) => {
             let p = app
@@ -311,16 +339,19 @@ fn render_item<'a>(
             let line = Line::from(vec![
                 Span::styled(format!("  {} ", dot), theme.text_style()),
                 Span::styled(label, theme.text_style()),
-            ]);
-            line.style(highlight(theme, focused, is_sel, Style::default()))
+            ])
+            .style(highlight(theme, focused, is_sel, Style::default()));
+            apply_selection_fg(line, theme, focused, is_sel)
         }
         SidebarItem::Activity => {
-            let line = Line::from(vec![Span::styled("  status + transfers", theme.dim())]);
-            line.style(highlight(theme, focused, is_sel, Style::default()))
+            let line = Line::from(vec![Span::styled("  status + transfers", theme.dim())])
+                .style(highlight(theme, focused, is_sel, Style::default()));
+            apply_selection_fg(line, theme, focused, is_sel)
         }
         SidebarItem::Settings => {
-            let line = Line::from(vec![Span::styled("  toggles + go-dark", theme.dim())]);
-            line.style(highlight(theme, focused, is_sel, Style::default()))
+            let line = Line::from(vec![Span::styled("  toggles + go-dark", theme.dim())])
+                .style(highlight(theme, focused, is_sel, Style::default()));
+            apply_selection_fg(line, theme, focused, is_sel)
         }
     }
 }
