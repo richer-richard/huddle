@@ -87,7 +87,7 @@ pub const ONBOARDING_PAGES: &[OnboardingPage] = &[
         body: &[
             "  a    add friend by HD ID or username — races LAN / IP / relay",
             "  ,→u  set / clear your username (signed broadcast)",
-            "  ,→!  delete account + wipe data dir (go dark)",
+            "  ⌥⇧1  delete account + wipe data dir (go dark)",
             "  ✓    green tag next to SAS-verified peers in chat",
             "  HD-  branded ID, shown alongside username everywhere",
         ],

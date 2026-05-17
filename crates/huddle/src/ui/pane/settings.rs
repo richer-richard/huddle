@@ -61,9 +61,12 @@ pub fn render(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme) {
         theme.dim(),
     )]));
     lines.push(Line::raw(""));
+    // huddle 0.7.4 follow-up: column alignment. The other rows use
+    // `"  X"` (3) + 4 spaces = 7 cols before the label; this row uses
+    // `"  ⌥⇧1"` (5) + 2 spaces = 7 cols, matching their leading-edge.
     lines.push(Line::from(vec![
         Span::styled("  ⌥⇧1", theme.err_style()),
-        Span::raw(" "),
+        Span::raw("  "),
         Span::styled(format!("{:<28}", "go dark"), theme.err_style()),
         Span::styled("delete account, wipe data, exit", theme.dim()),
     ]));

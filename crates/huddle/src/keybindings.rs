@@ -91,6 +91,16 @@ pub const BINDINGS: &[Binding] = &[
         description: "focus pane",
         palette_label: Some("focus pane"),
     },
+    // huddle 0.7.4: deliberately-awkward chord. Bare `!` was too easy
+    // to fat-finger into the destructive flow. Help text spells the
+    // chord with the macOS glyphs because that's the dominant target;
+    // Linux/Windows users press Alt+Shift+1, equivalent.
+    Binding {
+        keys: "⌥⇧1 / Alt+Shift+1",
+        context: Context::Global,
+        description: "go dark — delete account, wipe data, exit",
+        palette_label: Some("go dark (delete account)"),
+    },
     // Lobby
     Binding {
         keys: "s",
