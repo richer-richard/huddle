@@ -33,131 +33,145 @@ cargo build --release
 ## How it works (high level)
 
 1. **Launch** — your Ed25519 identity loads (or generates) from disk
-   silently. The lobby appears. mDNS starts listening for room
-   announcements on the LAN. If you configured a relay (`--relay` or
-   `config.toml`), huddle dials it and reserves a `/p2p-circuit` so
-   peers across the internet can dial you.
-2. **First launch only** — a 3-page onboarding card explains huddle's
-   leaderless model (rooms outlive the creator), the master passphrase
-   vs room passphrase distinction, and the new keybindings.
-3. **Browse** — other huddles broadcast their rooms via gossipsub on a
-   global `huddle-rooms-v1` topic. You see them in the lobby with
-   name, public/encrypted, member count, host fingerprint, and (with
-   internet reach) a reachability badge — `🌐 reachable`, `🏠 LAN
-   only`, or `🔍 detecting…`.
-4. **Start a room** — `s`. Pick a name, choose public or encrypted
-   (and a passphrase if encrypted). You become the room's first
-   *owner*; only owners can kick or grant moderation.
-5. **Join a room** — `j/k`, `Enter`. Encrypted: enter the passphrase.
-   Joined-via-code (see below): no passphrase prompt, but you become
-   *read-only* (you can receive + send but can't onboard new
-   members yourself).
-6. **Inbound dial gate** — if someone you don't know dials you (Phase A),
-   the TUI raises an Accept / Reject / Trust+Accept modal. The peer
-   isn't added to your gossipsub mesh until you decide.
-7. **Chat, verify, moderate** — see the key bindings below for SAS
-   verification (`^V → s`), kick (`^K`), grant owner (`^G`), invite
-   links (`^I`), join codes (`^J`/`c`), and verified-only-mode toggles
-   (`,` global, `o` per room).
+   silently. The TUI opens on the **Welcome** pane with the sidebar
+   on the left. mDNS starts listening for room announcements on the
+   LAN. If you configured a relay (`--relay` or `config.toml`),
+   huddle dials it and reserves a `/p2p-circuit` so peers across the
+   internet can dial you.
+2. **First launch only** — a versioned onboarding card explains
+   huddle's leaderless model (rooms outlive the creator), the master
+   passphrase vs room passphrase distinction, the sidebar layout, and
+   the new keybindings.
+3. **Direct messages** — press `m`, type a partner's HD-ID or
+   username, hit `Enter`. The DM appears in the **Direct messages**
+   section of the sidebar on both peers. DMs are end-to-end encrypted
+   on the room layer via an ECDH derivation between the two parties'
+   identity keys (huddle 0.7.1+).
+4. **Group rooms** — press `g` to create a multi-peer room. Pick a
+   name, choose public or encrypted (and a passphrase if encrypted).
+   You become the room's first *owner*; only owners can kick, grant
+   moderation, or rotate the room key. Discovered rooms you haven't
+   joined appear under the **Discover** sub-row in the sidebar.
+5. **Inbound dial gate** — if someone you don't know dials you, the
+   TUI raises an Accept / Reject / Trust+Accept modal. The peer isn't
+   added to your gossipsub mesh until you decide.
+6. **Chat, verify, moderate** — see the [Key bindings](#key-bindings)
+   tables for SAS verification (`Ctrl+V → s`), kick (`Ctrl+K`), grant
+   owner (`Ctrl+G`), invite links (`Shift+I`), join codes (`Ctrl+J` /
+   `c`), and verified-only-mode toggles (Settings pane, `o` per room).
 
-## Lobby
+## TUI layout
 
 ```
-+--------------------------------------------------------+
-|   huddle  ·  LAN (mDNS)                                |
-|   decentralized rooms                                  |
-|                                                        |
-|   you  745e-fe8a-ca21-8954-b0b4-016b                   |
-|        listening on /ip4/10.3.64.113/tcp/56825         |
-|        🌐 reachable                                    |
-+--------------------------------------------------------+
-|   rooms (3)                                            |
-|                                                        |
-|  >  lunch-talk        public      3 members   8a13     |
-|     team-1on1         encrypted   2 members   c4f1     |
-|     design-review     public      5 members   745e     |
-|                                                        |
-+--------------------------------------------------------+
-|  [s] start  [j/Enter] join  [I] invite  [v] paste     |
-|  [,] settings  [d] dial  [r] refresh  [?] help  [q]   |
-+--------------------------------------------------------+
++----------------------------------------------------------------------+
+| huddle 0.7.1  ·  745e-fe8a-…  ·  🌐 reachable          12:34 UTC     |
++------------------------+---------------------------------------------+
+| ▾ Profile              | # general                                   |
+|   alice  HD-AAAA-…  🌐 |   4 members · 🔒 encrypted                   |
+| ▾ Direct messages  (2) |                                             |
+|   ● bob       1m   (1) |   12:32  bob          hey                   |
+|   ○ dave       offline |   12:33  carol  ✓     same here              |
+| ▾ Group rooms      (1) |   12:34  you          looks good            |
+|   # general  4  E      |                                             |
+|   + Discover (2)       |                                             |
+| ▾ People               |                                             |
+|   eve  HD-EEEE-…  ✓    |   > _                                       |
+| ▸ Activity             |                                             |
+| ▸ Settings             |                                             |
++------------------------+---------------------------------------------+
+| ?help  /type  ^V verify  ^F search  ^A attach  ^L leave  ^I members  |
++----------------------------------------------------------------------+
 ```
+
+Six sidebar sections, top-to-bottom: **Profile** (you), **Direct
+messages**, **Group rooms** (with a Discover row), **People** (known +
+verified + blocked), **Activity** (status history + transfers),
+**Settings** (toggles + go-dark). `j/k` moves the cursor; `Tab` /
+`Shift+Tab` jumps between sections; `Space` / `→` / `←` toggles
+expand. `Enter` opens the selection in the right-hand pane. `Esc`
+focuses the sidebar from a chat pane.
 
 ## Key bindings
 
-### Global (any mode, no modal open)
+Single source of truth: `crates/huddle/src/keybindings.rs`. The Help
+modal (`?`) renders the same table at runtime, so it can never drift
+from the actual key map.
+
+### Global (any pane, no modal open)
 | Key                | Action                                  |
 |--------------------|-----------------------------------------|
-| `?`                | Help — generated live from `input.rs`, scroll with `j/k` |
+| `?`                | Help                                    |
 | `:` or `Ctrl+P`    | Command palette — fuzzy search every action |
 | `Ctrl+H`           | Notification history (last 100 status events) |
-| `Ctrl+C`           | Quit (confirms first)                   |
+| `Esc`              | Close modal / blur input / focus sidebar |
+| `q` / `Ctrl+C`     | Quit (confirms first)                   |
 
-### Lobby
+### Sidebar / non-chat panes
 | Key                | Action                                  |
 |--------------------|-----------------------------------------|
-| `s`                | Start a new room                        |
-| `a`                | Add friend by HD ID or username (races LAN / IP / relay) |
+| `m`                | Start a DM (Compose-DM modal)           |
+| `g`                | Start a group room                      |
+| `p`                | Jump to the People pane                 |
+| `,`                | Jump to the Settings pane               |
+| `a`                | Add friend by HD ID or username         |
 | `d`                | Dial a peer by multiaddr or `ip:port`   |
 | `i`                | Show your identity as a QR code         |
-| `I` (Shift+I)      | Generate an invite link (peer-only)     |
+| `Shift+I`          | Generate an invite link (peer-only, or room-scoped from a chat pane) |
 | `v`                | Paste an invite link (`huddle://invite#…`) |
-| `,`                | Settings (username, verified-only, clear blocks, go dark, update check, what's new) |
+| `c`                | Join with code (when an encrypted group is selected) |
+| `j` / `k` / arrows | Move sidebar cursor                     |
+| `Tab` / `Shift+Tab`| Jump to next / prev sidebar section     |
+| `Space` / `→` / `←`| Toggle section expand                   |
+| `Enter`            | Open the selected row                   |
+| `r`                | Refresh / reconnect (context-sensitive) |
+| `x`                | Forget the selected peer                |
 | `R` (Shift+r)      | Mark every room read                    |
-| `Enter`            | Join / reconnect the selected entry     |
-| `Tab`              | Toggle focus rooms ↔ known peers        |
-| `j/k` or arrows    | Navigate                                |
-| `r`                | Refresh / reconnect                     |
-| `x`                | Forget the selected known peer          |
-| `q`                | Quit                                    |
 
-### In a room
-| Key       | Action                                       |
-|-----------|----------------------------------------------|
-| `/`       | Focus input (start typing)                   |
-| `Enter`   | Send the typed message                       |
-| `Alt+Enter` / `^J` | Insert a newline in the input        |
-| `Esc`     | Blur input (or, if blurred, go to lobby)     |
-| `^Tab`/`^N` | Next tab                                   |
-| `^P`      | Previous tab (or command palette when input is blurred) |
-| `1`..`9`  | Jump to tab N                                |
-| `^L`      | Leave the current room                       |
-| `^B`      | Back to lobby (without leaving)              |
-| `^A`      | Attach a file                                |
-| `^R`      | Rotate the room key (encrypted rooms)        |
-| `^V`      | Verify members — picker; `s` inside it starts SAS |
-| `^K`      | Kick a member (owners only)                  |
-| `^G`      | Grant owner role (owners only)               |
-| `^I` (capital) | Generate an invite for this room        |
-| `^J`      | Generate a single-use join code (owners only) |
-| `c`       | Join a room with a code (from lobby join modal) |
-| `o`       | Per-room verified-only-join toggle (owners)  |
-| `B` (Shift+b) | List bans for this room (owners)         |
-| `^F`      | Search this room's history                   |
-| `^M`      | Mute / unmute this room                      |
-| `f`       | Focus file cards (Tab/j/k between them)      |
-| `g` / `G` | Scroll to top / bottom of history            |
-| `?`       | Help                                         |
-| `q`       | Quit (in-room, when input not focused)       |
-| `Ctrl-C`  | Quit (always — confirms first)               |
+### Chat pane (DM or Group)
+| Key                       | Action                                |
+|---------------------------|---------------------------------------|
+| `/`                       | Focus input                           |
+| `Enter`                   | Send                                  |
+| `Alt+Enter` / `Ctrl+J`    | Newline in input                      |
+| `Esc`                     | Blur input (or focus sidebar)         |
+| `Ctrl+V`                  | Verify partner / member (SAS)         |
+| `Ctrl+F`                  | Search this room's history            |
+| `Ctrl+A`                  | Attach a file                         |
+| `Ctrl+L`                  | Leave the room                        |
+| `j` / `k`                 | Scroll messages (input blurred)       |
+| `g` / `G`                 | Scroll to top / bottom                |
+| `PageUp` / `PageDown`     | Scroll a page                         |
+| `f`                       | Focus file cards (`j/k` steps)        |
 
-### Settings modal
+### Group pane only
+| Key                       | Action                                |
+|---------------------------|---------------------------------------|
+| `Ctrl+I`                  | Toggle the right-margin member list   |
+| `Ctrl+K`                  | Kick a member (owners only)           |
+| `Ctrl+G`                  | Grant owner role (owners only)        |
+| `Ctrl+R`                  | Rotate the room key (owners only)     |
+| `Ctrl+J`                  | Generate a single-use join code (owners) |
+| `Ctrl+M`                  | Mute / unmute this room               |
+| `Ctrl+O`                  | Per-room verified-only-join toggle    |
+| `Shift+B`                 | List bans for this room (owners)      |
+
+### Settings pane (or Settings modal)
 | Key | Action                                                   |
 |-----|----------------------------------------------------------|
-| `u` | Edit your username                                       |
-| `U` (Shift+u) | Toggle the crates.io update check (opt-in)     |
-| `v` / Space / Enter | Toggle "reject inbound from unverified"  |
-| `c` | Clear blocked peers                                      |
-| `w` | Replay onboarding (what's new)                           |
+| `V` | Toggle "reject inbound from unverified"                  |
+| `U` | Toggle the crates.io update check (opt-in)               |
+| `E` | Edit your username                                       |
+| `W` | Replay onboarding (what's new)                           |
+| `B` | Manage blocked peers                                     |
 | `!` | Delete account (go dark) — two-factor confirm            |
 
 ## Username & ID display (huddle 0.5)
 
 Every peer has a 96-bit fingerprint rendered as a branded
 `HD-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX` ID. Same security as before, just a
-friendlier format. The lobby header shows yours.
+friendlier format. The Profile pane (sidebar's top section) shows yours.
 
-Set an optional username from Settings (`,` → `u`). The username is
+Set an optional username from the Profile or Settings pane (`E`). The username is
 broadcast in a *signed* `ProfileUpdate` event — peers receiving it
 verify the Ed25519 signature against the claimed fingerprint, so
 nobody can spoof "alice" by stuffing a string into a packet. If you
@@ -169,7 +183,7 @@ matching the existing badge in the room member list.
 
 ## Add friend by HD ID or username (huddle 0.5.1+)
 
-Lobby `a` opens an add-friend modal that takes either:
+Press `a` from the sidebar to open the add-friend modal. Takes either:
 
 - an `HD-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX` ID (or the bare 24-hex form
   with/without dashes — normalized internally),
@@ -183,7 +197,8 @@ them in parallel** (huddle 0.5.2+) and the first to complete wins. The
 client also pre-sorts by transport preference (RFC1918 LAN ip4 →
 loopback → public ip4 → ip6 / dns → `/p2p-circuit`) so when latencies
 are close the LAN slot starts first. mDNS-discovered peers don't need
-this path at all — they show up in the lobby automatically.
+this path at all — they show up in the sidebar's People section
+automatically.
 
 The privacy trade-off worth knowing about: this works only for peers
 you've **already seen on a shared gossipsub mesh** — same LAN, a relay
@@ -205,18 +220,19 @@ decimal code; both peers compare OOB (call/SMS/in-person) and press
 SAS code on each side — the OOB comparison catches it.
 
 On match, the partner's fingerprint is marked verified (per-room +
-global). With the global "verified-only inbound" toggle on (Settings,
-`,`), unverified inbound dials auto-reject without prompting.
+global). With the global "verified-only inbound" toggle on (Settings
+pane, `V`), unverified inbound dials auto-reject without prompting.
 
 ## Invite links
 
-Press `^I` from a room (room-included invite) or `I` from the lobby
-(peer-only invite). The TUI shows a `huddle://invite#<base64-JSON>`
-URL plus a QR. The base64 JSON carries the host multiaddr (with
-`/p2p/<peer-id>` so libp2p enforces the peer-id check on dial),
-the human-display fingerprint, and an optional room summary.
+Press `Shift+I` to generate an invite. From a chat pane the invite
+includes the current room; from anywhere else it's peer-only. The TUI
+shows a `huddle://invite#<base64-JSON>` URL plus a QR. The base64 JSON
+carries the host multiaddr (with `/p2p/<peer-id>` so libp2p enforces
+the peer-id check on dial), the human-display fingerprint, and an
+optional room summary.
 
-Paste an invite from the lobby with `v`. The TUI confirms the
+Paste an invite from the sidebar with `v`. The TUI confirms the
 claimed fingerprint and dials. After dial, the post-dial
 fingerprint check (added in 0.3.x) re-derives the peer's fingerprint
 from their Ed25519 pubkey on Identify and disconnects if it doesn't
@@ -229,7 +245,7 @@ passphrase next.
 ## Owners, kick, ban
 
 The room's creator is the first owner; owners can grant the role to
-others (`^G`) or kick (`^K`). Kick = signed `BanMember` broadcast +
+others (`Ctrl+G`) or kick (`Ctrl+K`). Kick = signed `BanMember` broadcast +
 immediate `RotateRoomKey` with a freshly-generated passphrase
 (displayed to the owner for OOB re-share with the remaining members).
 
@@ -265,8 +281,8 @@ CLI flags override the config file. No relays are configured by
 default — you pick one explicitly. AutoNAT v2 probes test your
 reachability against the connected peer pool; DCUtR attempts a
 hole-punch upgrade to a direct connection whenever a relayed
-connection forms. The lobby badge shows the current state
-(`🌐 reachable` / `🏠 LAN only` / `🔍 detecting…`).
+connection forms. The Profile pane / sidebar badge shows the current
+state (`🌐 reachable` / `🏠 LAN only` / `🔍 detecting…`).
 
 Room announcements optionally carry a `host_addrs` field with up to 4
 of the announcer's reachable addresses (relay-circuit and
@@ -277,9 +293,9 @@ peers bootstrap without invite links.
 
 ## Join codes (read-only joiners)
 
-Owners press `^J` in a room to generate a single-use, 10-minute
-`XXXX-XXXX` code. The owner shares it OOB. The joiner picks "join
-with code" (`c`) instead of passphrase in the join modal and types
+Owners press `Ctrl+J` in a Group pane to generate a single-use,
+10-minute `XXXX-XXXX` code. The owner shares it OOB. The joiner
+selects the encrypted group in the sidebar and presses `c` to enter
 the code. The joiner's TUI generates an ephemeral X25519 keypair,
 broadcasts a signed `CodeJoinRequest`, and waits for the owner's
 `CodeJoinResponse` (which wraps the room's session key under an
@@ -289,12 +305,13 @@ expired.
 
 Code-joined members are **read-only**: they can read and send, but
 without the passphrase they can't wrap session keys for newer
-joiners. The room tab renders `(read-only)` next to the name. To
-upgrade, an owner can re-onboard them with the actual passphrase.
+joiners. The Group pane header renders `(read-only)` next to the
+encryption marker. To upgrade, an owner can re-onboard them with the
+actual passphrase.
 
 ## Go dark — irreversible account deletion (huddle 0.5)
 
-Settings → `!` opens the **go dark** modal. Two-factor gate:
+Settings pane → `!` opens the **go dark** modal. Two-factor gate:
 
 1. Your **master passphrase** (re-derived and constant-time compared
    to the in-memory SQLCipher subkey).
@@ -320,7 +337,6 @@ fresh identity from scratch.
 huddle/
   huddle-core    library: rooms, crypto, network, storage
   huddle         terminal UI (the only frontend)
-  huddle-tauri   stub (kept for future desktop shell)
 ```
 
 **Networking** — libp2p 0.56 with TCP+Noise+Yamux transport, mDNS for
@@ -333,12 +349,15 @@ leaving (as long as someone else is in them). The owner role is
 client-enforced state, not a network-level privilege.
 
 **Encryption** — vodozemac Megolm group sessions (one outbound per
-peer). When you join via passphrase, you wrap your session key with
-ChaCha20-Poly1305 under an Argon2id key derived from
+peer). For group rooms entered via passphrase, you wrap your session
+key with ChaCha20-Poly1305 under an Argon2id key derived from
 `(passphrase, salt)` and broadcast that for every existing member to
-pick up. When you join via code, ECDH between owner and joiner gives
-a wrap key that delivers only the owner's session — the joiner's own
-outbound goes unwrapped.
+pick up. For group rooms entered via code, ECDH between owner and
+joiner gives a wrap key that delivers only the owner's session — the
+joiner's own outbound goes unwrapped. For DMs (huddle 0.7.1+), the
+wrap key comes from an Ed25519→X25519 ECDH between the two parties'
+identity keys, expanded with HKDF-SHA256 bound to the canonical room
+ID — both peers independently derive the same 32-byte wrap key.
 
 **App-level signing** — every protocol message whose authenticity
 matters (`OwnerGrant`, `BanMember`, `RotateRoomKey`, SAS handshake,
@@ -356,22 +375,23 @@ OpenSSL). On launch you enter a master passphrase; it's stretched
 with Argon2id (m=64 MiB, t=3, p=4) against a per-installation salt
 and used as `PRAGMA key`, plus an HKDF subkey replaces the older
 hardcoded Megolm persistence key. Tables include `identity`,
-`rooms`, `room_members` (with `role`, `ed25519_pubkey`),
-`room_megolm_sessions`, `room_messages`, `room_attachments`,
-`known_peers` (with `fingerprint`, `trusted`), `blocked_peers`,
-`room_bans`, `verified_peers`, `app_settings`. Migrations are
-additive only and tracked via `PRAGMA user_version`. Pass
-`--no-master-passphrase` to fall back to an unencrypted database
+`rooms` (with `kind` ∈ {`direct`, `group`}), `room_members` (with
+`role`, `ed25519_pubkey`), `room_megolm_sessions`, `room_messages`,
+`room_attachments`, `known_peers` (with `fingerprint`, `trusted`),
+`blocked_peers`, `room_bans`, `verified_peers`, `peer_profiles`
+(self-declared usernames, signed at the wire layer), `app_settings`.
+Migrations are additive only and tracked via `PRAGMA user_version`.
+Pass `--no-master-passphrase` to fall back to an unencrypted database
 for testing.
 
-**File attachments** — `^A` opens a local file picker; selected files
-are SHA-256-hashed, chunked into 64 KiB pieces, and broadcast over
-the room's gossipsub topic with a `FileOffer` + N `FileChunk`
-messages. In encrypted rooms the bytes are ChaCha20-Poly1305-encrypted
-with a fresh file key that's Megolm-wrapped in the offer. Receivers
-see a focusable file card in chat — press `f` to enter card mode,
-`j/k` to step, Enter to save to your platform's Downloads folder.
-Phase 2 cap is 1 MiB per file.
+**File attachments** — `Ctrl+A` opens a local file picker; selected
+files are SHA-256-hashed, chunked into 64 KiB pieces, and broadcast
+over the room's gossipsub topic with a `FileOffer` + N `FileChunk`
+messages. In encrypted rooms (DM or group) the bytes are
+ChaCha20-Poly1305-encrypted with a fresh file key that's
+Megolm-wrapped in the offer. Receivers see a focusable file card in
+chat — press `f` to enter card mode, `j/k` to step, Enter to save to
+your platform's Downloads folder. Phase 2 cap is 1 MiB per file.
 
 ## Operator notes
 
@@ -401,6 +421,13 @@ Phase 2 cap is 1 MiB per file.
   peer you can re-bootstrap from.
 - The SAS emoji table follows Matrix MSC 2241 for future cross-client
   compatibility but is not yet interop-tested against any other client.
+- DM end-to-end encryption (huddle 0.7.1) re-derives the room wrap key
+  from both peers' long-term Ed25519 identity keys via X25519 ECDH —
+  it lacks forward secrecy at the room-key layer. A future identity-
+  key compromise unlocks historical DM session keys between those
+  two parties (Megolm message keys still ratchet, but the wrap key
+  doesn't). Per-DM ephemeral ratchets (Double Ratchet-style) are a
+  candidate follow-up.
 
 ## What's new in 0.7.1 — E2E DMs
 
@@ -424,95 +451,37 @@ Direct messages are now end-to-end encrypted on the room layer.
 
 ## What's new in 0.7 — TUI 2.0
 
-`0.7.0` is a brand-new TUI built around a **sidebar + pane** layout
+`0.7.0` rewrote the TUI around a **sidebar + pane** layout
 (Discord/Slack-style), with explicit separation of **Direct messages**
-from **Group rooms**. The old `Screen::{Lobby, InRoom}` flat-screen
-model and the tab-bar are retired.
+from **Group rooms**. The legacy `Screen::{Lobby, InRoom}` flat-screen
+model and the tab-bar were retired.
 
-### Sidebar sections
+See [TUI layout](#tui-layout) and [Key bindings](#key-bindings) for
+the current state. Notable shipped items:
 
-| Section          | What it shows                                            |
-| ---------------- | -------------------------------------------------------- |
-| Profile          | you: username, HD-ID, NAT badge, listen addresses        |
-| Direct messages  | 1-1 DMs (`RoomKind::Direct`, 2-people-forever)           |
-| Group rooms      | every multi-peer room, plus a Discover row for unjoined  |
-| People           | known peers, verified peers, blocked peers in one block  |
-| Activity         | status history + in-flight file transfers                |
-| Settings         | global toggles + blocked-peer manager + go-dark          |
+- New `RoomKind::{Direct, Group}` persisted on the rooms table;
+  `RoomAnnouncement.kind` (serde-default for back-compat) tags every
+  wire announcement so 0.7 peers can split DMs from groups.
+- Canonical DM room IDs: `sha256("huddle-dm-v1\0" || min(fp_a, fp_b)
+  || "\0" || max(fp_a, fp_b))` — both peers, regardless of who
+  presses `m` first, derive identical IDs. `start_direct` is
+  idempotent across both peers and reinstalls.
+- DM-visibility filter at honest 0.7+ consumers: Direct
+  announcements addressed to anyone else are dropped, so a DM never
+  leaks past the two participants' sidebars.
+- 2-member cap enforced locally on `RoomKind::Direct` rooms.
+- New panes: Profile, People (known + verified + blocked sublists),
+  Activity (status history + transfers), Settings (toggles, blocked
+  peers, go-dark).
+- New `Modal::ComposeDm` with inline autocomplete from
+  `known_peers` + `peer_profiles`; falls back to `AddFriend`
+  semantics on unrecognized input — no modal-on-modal.
+- Centralized `Theme` module so colors live in one place.
 
-### Key bindings (huddle 0.7)
-
-| Anywhere (sidebar focus or non-chat pane) | Action |
-| ----------------------------------------- | ------ |
-| `m`                                       | start a DM (Compose-DM modal) |
-| `g`                                       | start a group room |
-| `p`                                       | jump to People pane |
-| `,`                                       | jump to Settings pane |
-| `i`                                       | show QR / HD-ID |
-| `Shift+I`                                 | generate invite link |
-| `a`                                       | add friend by HD-ID / username |
-| `v`                                       | paste an invite link |
-| `c`                                       | join with code |
-| `Tab` / `Shift+Tab`                       | jump between sidebar sections |
-| `Space` / `←` / `→`                       | expand / collapse a section |
-| `j` / `k`                                 | move sidebar cursor |
-| `Enter`                                   | open the selected row |
-| `Ctrl+P` / `:`                            | command palette |
-| `Ctrl+H`                                  | notification quick-glance |
-| `?`                                       | help |
-| `R`                                       | mark all rooms read |
-| `q` / `Ctrl+C`                            | quit |
-
-| In a chat pane (DM or Group)              | Action |
-| ----------------------------------------- | ------ |
-| `/`                                       | focus the input |
-| `Esc`                                     | blur input / focus sidebar |
-| `Ctrl+V`                                  | SAS-verify partner |
-| `Ctrl+F`                                  | search room history |
-| `Ctrl+A`                                  | attach a file |
-| `Ctrl+L`                                  | leave the room |
-| `Ctrl+I` (group only)                     | toggle member margin |
-| `Ctrl+K` / `Ctrl+G` (group + owner)       | kick / grant-owner |
-| `Ctrl+R` (group + owner)                  | rotate room key |
-| `Ctrl+J` (group + owner)                  | generate join code |
-| `Ctrl+M` (group)                          | toggle mute |
-| `Ctrl+O` (group + owner)                  | toggle verified-only-join |
-| `Shift+B` (group + owner)                 | view bans |
-| `Alt+Enter` / `Ctrl+J`                    | newline in input |
-
-### Direct messages are 1-1 forever and end-to-end encrypted
-
-`RoomKind::Direct` is persisted on the rooms table; the canonical
-DM room ID is `sha256("huddle-dm-v1\0" || min(fp_a, fp_b) || "\0" ||
-max(fp_a, fp_b))`. Both peers, regardless of who clicks `m` first,
-derive the same room ID — `start_direct` is idempotent across both
-peers and across reinstalls. A third member cannot join a DM
-(`MemberAnnounce` past the 2-member cap is dropped locally), and
-DM-kind announcements are filtered out of third parties' discovery
-caches.
-
-**End-to-end encryption (huddle 0.7.1+):** every DM uses a Megolm
-group session whose wrap key comes from an Ed25519→X25519 ECDH
-between the two parties' long-term identity keys, expanded with
-HKDF-SHA256 bound to the canonical room_id. Both peers
-independently derive the same 32-byte key without any shared
-passphrase or out-of-band handshake — see
-`crates/huddle-core/src/crypto/dm.rs`. The wrapped session key
-travels in `MemberAnnounce` exactly like a group room's; the only
-difference is where the wrap key came from.
-
-The first `MemberAnnounce` carries each party's pubkey, which the
-other side uses to derive the ECDH key. Once both keys are known,
-session-key wrapping resumes the normal Megolm flow and all
-subsequent traffic is E2E.
-
-### Retired
-
-- `Screen::{Lobby, InRoom}` binary — replaced by `Pane` enum.
-- The tab-bar and numeric `1..9` tab jumps.
-- `Ctrl+B` (back-to-lobby in chat) — `Esc` focuses sidebar instead.
-- `LobbyFocus` (the two-list focus toggle) — sidebar focus model.
-- The flat `discovered_rooms` list — split into DM / Group sections.
+**Retired in 0.7**: `Screen::{Lobby, InRoom}`, the tab-bar, numeric
+`1..9` tab jumps, `Ctrl+B` (back-to-lobby in chat — `Esc` focuses
+sidebar instead), `LobbyFocus` (replaced by `SidebarFocus`), the flat
+`discovered_rooms` list (now split into DM / Group sections).
 
 ## What's new in 0.6 (UX overhaul)
 

@@ -17,31 +17,36 @@ third machine.
 ## 1. First launch
 
 - [ ] On Machine A, run `./target/release/huddle`
-- [ ] **First time only:** an onboarding card appears (3 pages) —
-      press Enter to advance, "Got it" on the last to dismiss
-- [ ] Lobby appears with the `huddle` banner
-- [ ] Your fingerprint shows (six groups of four hex chars)
-- [ ] "listening on /ip4/.../tcp/..." shows below the fingerprint
-- [ ] A NAT-reachability badge appears (likely `🔍 detecting…` on a
-      fresh install with no other peers to probe against, then
-      transitions to `🏠 LAN only` or `🌐 reachable` once another
-      huddle is on the network)
+- [ ] **First time only:** an onboarding card appears — press Enter
+      to advance through the pages, then dismiss the last one
+- [ ] The Welcome pane appears with the sidebar on the left
+      (`huddle 0.7.x` banner up top)
+- [ ] In the sidebar's Profile section, your branded `HD-XXXX-XXXX-…`
+      ID is visible along with a NAT-reachability glyph (`🔍`
+      detecting → `🏠` private → `🌐` reachable as AutoNAT probes
+      land)
+- [ ] Open the Profile pane (`Enter` on the Profile row, or any j/k
+      until it's selected) — listening multiaddrs show under
+      "Listen addresses"
 - [ ] On Machine B, run the same — a different fingerprint shows.
       The onboarding card appears once on B too.
 
-## 2. Public room
+## 2. Public group room
 
-- [ ] On A, press `s` — modal "start a new room" appears
+- [ ] On A, press `g` (or `s`) — modal "start a new room" appears
 - [ ] Type a room name (e.g. `lunch-talk`)
 - [ ] Encrypted stays at `[ ] no` (default)
-- [ ] Press `Enter` — the lobby switches to in-room view; tab `[1]`
-      shows the room name
-- [ ] On B (still in lobby), within 5-15 seconds the room appears in
-      the rooms list (press `r` to refresh if slow)
-- [ ] On B, navigate with `j/k` and press `Enter`
-- [ ] B's lobby switches to in-room view with the room visible
+- [ ] Press `Enter` — A's pane switches to the Group pane for the new
+      room; the sidebar's **Group rooms** section now lists it
+- [ ] On B (still on the Welcome / sidebar), within 5-15 seconds the
+      room appears under the **Discover** sub-row inside **Group
+      rooms** (press `r` to refresh if slow)
+- [ ] On B, navigate with `j/k` to the Discover sub-row (or directly
+      to the room) and press `Enter`
+- [ ] B's pane switches to the Group pane for the room
 - [ ] B's member count includes A's fingerprint
-- [ ] On A, B's fingerprint now shows in the member list
+- [ ] On A, B's fingerprint now shows in the member list (toggle
+      `Ctrl+I` if the member margin isn't visible)
 
 ## 3. Public room messaging
 
@@ -51,16 +56,17 @@ third machine.
 - [ ] On B, press `/`, type `hi back`, Enter
 - [ ] B sees `you  hi back`; A sees `{B-fingerprint}  hi back`
 
-## 4. Encrypted room
+## 4. Encrypted group room
 
-- [ ] On A, press `Esc` to blur input, then `^B` to go to lobby
-- [ ] Press `s`, name the room `secret`
+- [ ] On A, press `Esc` to focus the sidebar
+- [ ] Press `g`, name the room `secret`
 - [ ] Tab to the encrypted field, Space/Enter to toggle to `[x] yes`
 - [ ] Tab to passphrase, type `hunter2`
-- [ ] Enter to start — the room opens
-- [ ] On B (or back in B's lobby), the room appears with `encrypted`
-      label in magenta
-- [ ] Enter to join — a passphrase modal appears, title shows 🔒
+- [ ] Enter to start — A's pane switches to the new Group pane
+- [ ] On B, the room appears in the sidebar's Group rooms section
+      (under Discover until joined) with an `E` encryption marker
+- [ ] Select the room in B's sidebar, press `Enter` to join — a
+      passphrase modal appears, title shows 🔒
 - [ ] Type `hunter2`, Enter
 - [ ] B joins. If wrong passphrase, an error modal shows.
 
@@ -71,10 +77,31 @@ third machine.
 - [ ] On B, send `acknowledged`
 - [ ] A receives `acknowledged`
 
+## 5b. End-to-end encrypted DM (huddle 0.7.1)
+
+Requires A and B to have shared at least one room previously (so each
+has learned the other's Ed25519 pubkey via `MemberAnnounce`). If
+they haven't, do scenario 2 first.
+
+- [ ] On A, press `Esc` to focus the sidebar
+- [ ] Press `m` — the Compose-DM modal opens
+- [ ] Type B's username (or HD-ID); press `Enter`
+- [ ] A's pane switches to the DM pane; the sidebar's **Direct
+      messages** section now lists B
+- [ ] On B, within ~1 s the same DM appears under **Direct messages**
+      with the canonical room_id (idempotent on both sides)
+- [ ] A sends "hi" — appears in A's DM pane immediately
+- [ ] Within ~1-2 s "hi" appears in B's DM pane, decrypted via Megolm
+- [ ] Restart A; the DM pane re-bootstraps from disk; reopening the
+      DM still decrypts past messages
+- [ ] Confirm a third machine C never sees the DM in its sidebar:
+      the consumer-side visibility filter drops Direct announces
+      addressed to anyone else
+
 ## 6. Phase A — inbound dial accept gate
 
-- [ ] On A, in the lobby, press `d` and enter B's listen multiaddr
-      (visible in B's lobby header) with B's peer-id appended, e.g.
+- [ ] On A, from the sidebar, press `d` and enter B's listen multiaddr
+      (visible in B's Profile pane) with B's peer-id appended, e.g.
       `/ip4/10.0.0.5/tcp/56825/p2p/12D3Koo...`
 - [ ] On B, an "InboundDial" modal appears with A's short fingerprint
       and the options `[a]ccept` / `[r]eject` / `[t]rust+accept`
@@ -113,15 +140,15 @@ third machine.
 
 ## 9. Phase F — short-lived join code (read-only joiner)
 
-- [ ] On A in an encrypted room, press `^J` — a modal shows an
-      `XXXX-XXXX` code valid for 10 minutes
+- [ ] On A in an encrypted Group pane, press `Ctrl+J` — a modal shows
+      an `XXXX-XXXX` code valid for 10 minutes
 - [ ] OOB-share the code with D (a fourth machine)
-- [ ] On D in the lobby, navigate to the room and press Enter to
-      open the join modal; press `c` to toggle to code-mode; paste
-      the code, Enter
+- [ ] On D in the sidebar, navigate to the encrypted group under
+      **Discover** (it must be visible there), then press `c` to
+      open the join-with-code modal; paste the code, Enter
 - [ ] D's status line shows "code submitted — waiting for owner
       (up to 30 s)"
-- [ ] Within ~3 s D joins; D's room tab shows `(read-only)`
+- [ ] Within ~3 s D joins; the Group pane header shows `(read-only)`
 - [ ] A sends a message — D receives + decrypts it
 - [ ] D tries to send — works (D can send into the room)
 - [ ] If D had used a wrong/expired code: after 30 s an Error modal
@@ -143,25 +170,27 @@ third machine.
 
 ## 11. Phase E — verified-only mode
 
-- [ ] On A press `,` to open Settings; toggle "reject inbound dials
-      from unverified fingerprints" to `[x]`
+- [ ] On A press `,` to jump to the Settings pane (or open the
+      Settings modal); press `V` to toggle "reject inbound from
+      unverified" to `on`
 - [ ] From a fresh machine E (not SAS-verified, not trusted), dial A
 - [ ] A does NOT raise an InboundDial modal — the dial is silently
       auto-rejected
-- [ ] Settings on A now shows the blocked count incremented
-- [ ] Press `c` in Settings to clear; E can dial again and get the
-      normal Accept/Reject prompt
-- [ ] In a room A owns, press `o` — the room toggles its
+- [ ] Settings pane's "blocked peers" count is incremented
+- [ ] Press `B` in Settings to open the blocked-peers manager (or use
+      the Settings modal's `c`) to clear; E can dial again and get
+      the normal Accept/Reject prompt
+- [ ] In a Group room A owns, press `Ctrl+O` — the room toggles its
       `verified_only` flag. Joiners not in A's SAS-verified set get
       a `JoinRefused` reply and an error status.
 
 ## 12. Phase C — invite link
 
-- [ ] In a room A owns (or from A's lobby for a peer-only invite),
-      press `^I` — a modal shows a `huddle://invite#...` URL plus a
-      QR code
+- [ ] In a Group pane A owns (or from any non-chat pane for a
+      peer-only invite), press `Shift+I` — a modal shows a
+      `huddle://invite#...` URL plus a QR code
 - [ ] Copy the URL out of band to B (SMS, AirDrop, paper, whatever)
-- [ ] On B in the lobby, press `v` — the paste modal appears
+- [ ] On B from the sidebar, press `v` — the paste modal appears
 - [ ] Paste the URL, Enter — a confirmation modal shows the claimed
       fingerprint
 - [ ] Press `d` to dial — B's TUI says "dialing … via invite". When
@@ -194,10 +223,10 @@ third machine.
       ```
 - [ ] Connect A and B to **different** networks (one home, one
       cellular hotspot is enough).
-- [ ] Launch huddle on both. Lobby badge transitions to `🌐
-      reachable` within ~30 s.
-- [ ] A starts a room. B sees the room in its lobby (the gossipsub
-      mesh now spans the relay).
+- [ ] Launch huddle on both. The Profile pane / sidebar NAT badge
+      transitions to `🌐 reachable` within ~30 s.
+- [ ] A starts a group room. B sees the room in the sidebar's
+      Discover row (the gossipsub mesh now spans the relay).
 - [ ] B joins. Messages flow.
 - [ ] After a few minutes, DCUtR may upgrade the connection to direct
       — status line briefly shows "direct connection to …<peer>".
@@ -211,12 +240,17 @@ third machine.
       circuit address from the announcement
 - [ ] The mesh forms; B joins and messages flow as in scenario 14
 
-## 16. Multiple rooms / tabs
+## 16. Multiple rooms (sidebar navigation)
 
-- [ ] With both rooms open on A, the tab bar shows `[1] room-a [2]
-      room-b E*`
-- [ ] `^Tab` switches; the `*` clears on the room you view
-- [ ] Receive a message in the un-focused room — the `*` reappears
+- [ ] On A, join two rooms (`room-a` public, `room-b E` encrypted)
+- [ ] Both appear under **Group rooms** in the sidebar with their
+      member counts (and `E` marker on the encrypted one)
+- [ ] On A while in the `room-a` pane, have C send a message in
+      `room-b` — the sidebar row for `room-b` shows an unread
+      `(1)` badge
+- [ ] Press `Esc` to focus the sidebar, `j`/`k` to move to `room-b`,
+      `Enter` to switch — the `(1)` clears on activation
+- [ ] `R` (Shift+R) from the sidebar marks every room read at once
 
 ## 17. Leaving
 
@@ -245,15 +279,16 @@ third machine.
 
 ## 20. Username & verified ✓ in chat (huddle 0.5)
 
-- [ ] In any room with two peers, on A press `,` to open Settings,
-      then `u` to edit username. Type `alice`, Enter.
+- [ ] In any room with two peers, on A press `,` to jump to the
+      Settings pane (or open the Settings modal), then `E` to edit
+      username. Type `alice`, Enter.
 - [ ] On A, status line briefly shows "username set to alice"
 - [ ] On B, within ~1 s the chat label for A's prior messages
       renders as `alice` instead of the short fingerprint, and an
       in-band status "{abcd}… is now alice" flashes for 4 s
 - [ ] On A, send "hi from alice" — both sides see the message with
       sender label `alice`
-- [ ] On A, press `,` then `u` again, clear input, Enter — username
+- [ ] On A, press `,` then `E` again, clear input, Enter — username
       reverts to `[anonymous]`. On B, A's messages now render as
       `[anonymous]`.
 - [ ] If A and B have completed SAS verification (scenario 10), each
@@ -270,10 +305,10 @@ move `~/Library/Application Support/huddle` (macOS) / `~/.local/share/huddle`
 - [ ] Start huddle, set a master passphrase at first launch, join
       one or two rooms with another peer.
 - [ ] On peer B, confirm A's fingerprint is in the member list.
-- [ ] On A, press `,` for Settings, then `!` to open the go-dark
-      modal. Try the wrong master passphrase first → inline
-      "incorrect master passphrase" appears; passphrase field
-      clears.
+- [ ] On A, press `,` to jump to the Settings pane, then `!` to open
+      the go-dark modal. Try the wrong master passphrase first →
+      inline "incorrect master passphrase" appears; passphrase
+      field clears.
 - [ ] Type the correct master passphrase. `Tab` to the second
       field. Type `DELETE EVERYTHING` (exact case). Enter.
 - [ ] On B, within ~2 s A leaves every shared room. A's
@@ -290,17 +325,17 @@ move `~/Library/Application Support/huddle` (macOS) / `~/.local/share/huddle`
 
 ## 22. Add friend by HD ID or username (huddle 0.5.1+, racing in 0.5.2+)
 
-- [ ] On A and B (same LAN), launch huddle. Each waits in the lobby
-      until mDNS discovers the other — A's HD ID appears in B's
-      "known peers" panel.
+- [ ] On A and B (same LAN), launch huddle. Each waits until mDNS
+      discovers the other — A's HD ID appears under the **People**
+      section of B's sidebar.
 - [ ] On A press `a`, paste B's HD ID exactly as B sees it in their
-      lobby header (`HD-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX`). Enter.
+      Profile pane (`HD-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX`). Enter.
 - [ ] A's status line shows
       "dialing HD-XXXX-… (racing LAN / IP / relay)…".
 - [ ] B sees an inbound-dial prompt (or auto-connects if previously
       trusted). The connection uses the LAN ip4 path, not a relay.
 - [ ] On A press `a` again, this time type B's username (the one B
-      set via Settings → `u`). Enter. Same outcome.
+      set via Settings → `E`). Enter. Same outcome.
 - [ ] Try a random HD ID neither of you has seen
       (`HD-0000-0000-0000-0000-0000-0000`): the modal closes and
       an Error appears: "haven't seen `HD-0000…` on the network
@@ -322,7 +357,7 @@ move `~/Library/Application Support/huddle` (macOS) / `~/.local/share/huddle`
 
 - **Peers don't discover** — same-subnet? Some Wi-Fi networks have AP
   isolation. Try a hotspot.
-- **Room never appears in lobby** — give it 15-30s for the first
+- **Room never appears in sidebar** — give it 15-30s for the first
   announcement to propagate through the mesh. `r` to refresh.
 - **Wrong passphrase on encrypted join** — error modal shows; any key
   to dismiss.
