@@ -62,8 +62,8 @@ pub fn render(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme) {
     )]));
     lines.push(Line::raw(""));
     lines.push(Line::from(vec![
-        Span::styled("  !", theme.err_style()),
-        Span::raw("    "),
+        Span::styled("  ⌥⇧1", theme.err_style()),
+        Span::raw(" "),
         Span::styled(format!("{:<28}", "go dark"), theme.err_style()),
         Span::styled("delete account, wipe data, exit", theme.dim()),
     ]));

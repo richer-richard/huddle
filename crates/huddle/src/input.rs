@@ -201,6 +201,31 @@ pub enum Action {
     DismissUpdateBanner,
 }
 
+/// huddle 0.7.4: detect the "go dark" chord. Bare `!` (Shift+1) is too
+/// easy to press accidentally — a single missed keystroke could nuke
+/// the user's data — so the global trigger now requires the Option /
+/// Alt modifier on top. Terminals report this combo in three shapes
+/// depending on the Option-as-Meta setting; accept all of them:
+///   * macOS default (Option sends a unicode glyph) → `Char('⁄')` (U+2044)
+///   * Option-as-Meta / Linux / Windows Alt+Shift+1 → ALT [+SHIFT] + `!`
+///   * some terminals report the bare digit → ALT + SHIFT + `1`
+fn is_godark_chord(key: KeyEvent) -> bool {
+    if matches!(key.code, KeyCode::Char('⁄')) {
+        return true;
+    }
+    if key.modifiers.contains(KeyModifiers::ALT) {
+        if matches!(key.code, KeyCode::Char('!')) {
+            return true;
+        }
+        if key.modifiers.contains(KeyModifiers::SHIFT)
+            && matches!(key.code, KeyCode::Char('1'))
+        {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         return Action::OpenQuitConfirm;
@@ -222,6 +247,11 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
                 KeyCode::Right => return Action::FocusPane,
                 _ => {}
             }
+        }
+        // huddle 0.7.4: Option+Shift+1 (Alt+Shift+!) — open Go Dark.
+        // See `is_godark_chord` for why this replaced the bare `!`.
+        if is_godark_chord(key) {
+            return Action::OpenGoDarkModal;
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             // Ctrl+H — note: crossterm sometimes delivers this as
@@ -341,7 +371,14 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
             KeyCode::Char('m') | KeyCode::Enter => Action::SasMatch,
             _ => Action::Nothing,
         },
-        Modal::Settings(_) => match key.code {
+        Modal::Settings(_) => {
+            // huddle 0.7.4: Go Dark is an Option+Shift+1 chord; honor
+            // it from inside the modal too so the row's affordance
+            // still works without forcing the user to close first.
+            if is_godark_chord(key) {
+                return Action::OpenGoDarkModal;
+            }
+            match key.code {
             KeyCode::Esc | KeyCode::Char('q') => Action::CloseModal,
             KeyCode::Char('v') | KeyCode::Enter | KeyCode::Char(' ') => {
                 Action::SettingsToggleGlobalVerifiedOnly
@@ -354,9 +391,12 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
             KeyCode::Char('U') => Action::ToggleUpdateCheck,
             // huddle 0.6: W = replay onboarding from inside Settings.
             KeyCode::Char('w') | KeyCode::Char('W') => Action::OpenWhatsNew,
-            KeyCode::Char('!') => Action::OpenGoDarkModal,
+            // huddle 0.7.4: Go Dark moved to Option+Shift+1 (handled
+            // at the top of this arm); bare `!` no longer fires the
+            // destructive flow.
             _ => Action::Nothing,
-        },
+            }
+        }
         Modal::EditUsername(_) => match key.code {
             KeyCode::Esc => Action::CloseModal,
             KeyCode::Enter => Action::EditUsernameConfirm,
@@ -516,10 +556,9 @@ fn map_sidebar(key: KeyEvent, app: &TuiApp) -> Action {
         }
     }
     // Cross-pane shortcuts — work anywhere the sidebar has focus,
-    // including from Welcome/People/Activity/Settings panes. `!` is
-    // a global because it's the most consistently advertised
-    // go-dark shortcut, and the modal itself enforces the
-    // two-factor destructive confirm.
+    // including from Welcome/People/Activity/Settings panes. Go Dark
+    // lives on the Option+Shift+1 chord (handled globally in
+    // `map_key`); a bare `!` here would fire too easily by accident.
     match key.code {
         KeyCode::Char('q') => return Action::OpenQuitConfirm,
         KeyCode::Char('s') | KeyCode::Char('g') => return Action::OpenStartRoom,
@@ -535,7 +574,6 @@ fn map_sidebar(key: KeyEvent, app: &TuiApp) -> Action {
         KeyCode::Char('I') => return Action::GenerateInvite,
         KeyCode::Char('v') => return Action::OpenPasteInvite,
         KeyCode::Char('R') => return Action::MarkAllRead,
-        KeyCode::Char('!') => return Action::OpenGoDarkModal,
         _ => {}
     }
     match key.code {

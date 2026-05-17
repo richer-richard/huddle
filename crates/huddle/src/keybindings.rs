@@ -455,7 +455,7 @@ pub fn adaptive_hints(app: &TuiApp) -> Vec<(&'static str, &'static str)> {
                 out.push(("V", "verified-only"));
                 out.push(("U", "update check"));
                 out.push(("E", "username"));
-                out.push(("!", "go dark"));
+                out.push(("⌥⇧1", "go dark"));
             }
             _ => {}
         }

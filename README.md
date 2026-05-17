@@ -171,7 +171,7 @@ from the actual key map.
 | `E` | Edit your username                                       |
 | `W` | Replay onboarding (what's new)                           |
 | `B` | Manage blocked peers                                     |
-| `!` | Delete account (go dark) — two-factor confirm            |
+| `⌥⇧1` (Option+Shift+1 / Alt+Shift+1) | Delete account (go dark) — two-factor confirm |
 
 ## Username & ID display (huddle 0.5)
 
@@ -319,7 +319,9 @@ actual passphrase.
 
 ## Go dark — irreversible account deletion (huddle 0.5)
 
-Settings pane → `!` opens the **go dark** modal. Two-factor gate:
+Press `⌥⇧1` (Option+Shift+1 on macOS, Alt+Shift+1 on Linux/Windows)
+from anywhere — or use the labeled row on the Settings pane — to open
+the **go dark** modal. Two-factor gate:
 
 1. Your **master passphrase** (re-derived and constant-time compared
    to the in-memory SQLCipher subkey).
@@ -436,6 +438,36 @@ your platform's Downloads folder. Phase 2 cap is 1 MiB per file.
   two parties (Megolm message keys still ratchet, but the wrap key
   doesn't). Per-DM ephemeral ratchets (Double Ratchet-style) are a
   candidate follow-up.
+
+## What's new in 0.7.4 — desktop notifications + safer go-dark chord
+
+- **Desktop notifications when the terminal isn't focused.** Every
+  inbound message fires a native notification (`osascript` on macOS,
+  `notify-send` on Linux, PowerShell BalloonTip on Windows — no extra
+  dependency) when crossterm reports the terminal as unfocused.
+  Notifications include the room name, sender display name, and a
+  trimmed message preview. When the terminal IS focused, no
+  notification is sent — the message is already on screen and the
+  unread badge does the work.
+- **Catch-up summary on startup.** When huddle reopens, messages
+  received during a 5-second catch-up window are batched into ONE
+  notification: `huddle · N new messages while you were away`. After
+  the window closes, real-time notifications kick in.
+- **Focus reporting via crossterm `EnableFocusChange`.** Supported by
+  iTerm2, Terminal.app, Alacritty, Kitty, wezterm, Windows Terminal,
+  and GNOME Terminal. On a terminal that doesn't emit
+  `FocusGained` / `FocusLost`, the app stays in "focused = true" mode
+  and never fires per-message notifications — graceful degradation.
+- **Go dark rebound to `⌥⇧1` (Option+Shift+1 / Alt+Shift+1).** Plain
+  `!` was just Shift+1 — one accidental keystroke could open the
+  destructive flow. The Mac chord works out of the box on Terminal.app
+  via the unicode glyph `⁄` that Option+Shift+1 produces, AND via the
+  `ALT|SHIFT+!` event that Alt-as-Meta terminals emit. On Linux/Windows
+  the same Alt+Shift+1 chord is uncontested. The Settings pane row
+  label and modal prompt both render `⌥⇧1` now.
+- **First-time macOS notification permission prompt.** macOS will ask
+  to allow Script Editor (or Terminal) to send notifications the first
+  time huddle fires one. Click Allow once and you're set.
 
 ## What's new in 0.7.3 — UX polish round 2
 

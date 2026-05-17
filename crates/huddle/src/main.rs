@@ -10,6 +10,7 @@ use huddle_core::storage::keychain;
 mod app;
 mod input;
 mod keybindings;
+mod notifier;
 mod ui;
 
 #[derive(Parser)]

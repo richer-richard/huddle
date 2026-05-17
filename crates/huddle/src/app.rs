@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use crossterm::{
     event::{
-        self, poll, DisableMouseCapture, EnableMouseCapture, Event, MouseButton, MouseEventKind,
+        self, poll, DisableFocusChange, DisableMouseCapture, EnableFocusChange,
+        EnableMouseCapture, Event, MouseButton, MouseEventKind,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -161,6 +162,30 @@ pub const ONBOARDING_PAGES: &[OnboardingPage] = &[
             "mode for back-compat; new DMs created on 0.7.1 are E2E.",
         ],
         min_version: "0.7.1",
+    },
+    OnboardingPage {
+        title: "what's new in 0.7.4 — desktop notifications",
+        body: &[
+            "huddle now fires native desktop notifications when a",
+            "message arrives and the terminal isn't focused. Switch to",
+            "another app, lock your screen, drag the window off-display —",
+            "you'll still get pinged. When the terminal IS focused, no",
+            "notification fires (the message is right in front of you).",
+            "",
+            "Catch-up summary: when you reopen huddle, any messages that",
+            "arrived during the 5-second initial sync window are batched",
+            "into one notification — \"N new messages while you were away\".",
+            "",
+            "Go dark moved to ⌥⇧1 (Option+Shift+1 on macOS,",
+            "Alt+Shift+1 on Linux/Windows). Plain `!` was one keystroke",
+            "away from nuking your account — the extra modifier is a",
+            "deliberate friction. The Settings pane row and the modal",
+            "prompt both render `⌥⇧1` now.",
+            "",
+            "macOS only: the first notification triggers a one-time",
+            "permission prompt for Script Editor / Terminal — click Allow.",
+        ],
+        min_version: "0.7.4",
     },
 ];
 
@@ -816,11 +841,30 @@ pub struct TuiApp {
     /// `GO_DARK_FAREWELL` has elapsed so the goodbye modal stays
     /// visible for a beat.
     pub went_dark_at: Option<Instant>,
+    /// huddle 0.7.4: count of inbound messages observed during the
+    /// startup catch-up window. After `STARTUP_GRACE` elapses, the
+    /// main loop emits ONE summary desktop notification and resets
+    /// this counter to zero. After that, individual unfocused-window
+    /// notifications fire one-per-message.
+    pub startup_catchup_count: u32,
+    /// huddle 0.7.4: when `Some`, the main loop is still inside the
+    /// catch-up grace window; messages accumulate into
+    /// `startup_catchup_count` instead of triggering per-message
+    /// notifications. Cleared (set to `None`) the first tick after
+    /// the deadline passes.
+    pub startup_grace_until: Option<Instant>,
 }
 
 /// huddle 0.5: how long the goodbye modal stays on screen after
 /// `WentDark` before the process exits.
 pub const GO_DARK_FAREWELL: Duration = Duration::from_secs(2);
+
+/// huddle 0.7.4: how long after startup we batch inbound messages into
+/// a single "N new messages while you were away" notification instead
+/// of firing per-message notifications. 5s comfortably covers libp2p
+/// dial + gossipsub catch-up on a healthy LAN; longer would risk
+/// missing live messages.
+pub const STARTUP_GRACE: Duration = Duration::from_secs(5);
 
 impl TuiApp {
     pub fn new(handle: AppHandle) -> Self {
@@ -868,6 +912,8 @@ impl TuiApp {
             update_check_slot: Arc::new(Mutex::new(None)),
             nat_status: None,
             went_dark_at: None,
+            startup_catchup_count: 0,
+            startup_grace_until: Some(Instant::now() + STARTUP_GRACE),
         }
     }
 
@@ -1142,6 +1188,10 @@ impl TuiApp {
                 sent_at,
             } => {
                 let is_active = self.current_pane_room_id() == Some(room_id.as_str());
+                // Snapshot fields needed for the notification before
+                // we move body/sender into the stored message.
+                let sender_for_notify = sender_fingerprint.clone();
+                let body_for_notify = body.clone();
                 if let Some(r) = self.open_room_mut(&room_id) {
                     r.messages.push(StoredRoomMessage {
                         id: 0,
@@ -1155,6 +1205,35 @@ impl TuiApp {
                 if !is_active {
                     let count = self.unread.entry(room_id.clone()).or_insert(0);
                     *count = count.saturating_add(1);
+                }
+                // huddle 0.7.4: desktop notification routing.
+                // * during startup grace → silent batch; the main loop
+                //   drains it into one summary notification.
+                // * after grace, fire per-message *only* when the
+                //   terminal isn't focused. A focused terminal already
+                //   shows the message; an unread badge is enough.
+                if self.startup_grace_until.is_some() {
+                    self.startup_catchup_count =
+                        self.startup_catchup_count.saturating_add(1);
+                } else if !crate::notifier::is_focused() {
+                    let room_name = self
+                        .open_room(&room_id)
+                        .map(|r| r.name.clone())
+                        .or_else(|| {
+                            self.handle.active_room_info(&room_id).map(|r| r.name)
+                        })
+                        .unwrap_or_else(|| short_room(&room_id));
+                    let sender_name = self
+                        .handle
+                        .lookup_member_display_name(&sender_for_notify)
+                        .unwrap_or_else(|| short_fp(&sender_for_notify));
+                    let title = format!("huddle · {}", room_name);
+                    let body = format!(
+                        "{}: {}",
+                        sender_name,
+                        crate::notifier::preview(&body_for_notify)
+                    );
+                    crate::notifier::notify(&title, &body);
                 }
             }
             AppEvent::MessageSent {
@@ -1673,7 +1752,12 @@ struct TerminalGuard;
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+        let _ = execute!(
+            io::stdout(),
+            LeaveAlternateScreen,
+            DisableMouseCapture,
+            DisableFocusChange
+        );
     }
 }
 
@@ -1685,7 +1769,12 @@ pub fn install_panic_hook() {
     let original = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+        let _ = execute!(
+            io::stdout(),
+            LeaveAlternateScreen,
+            DisableMouseCapture,
+            DisableFocusChange
+        );
         original(info);
     }));
 }
@@ -1695,7 +1784,12 @@ pub async fn run_tui(handle: AppHandle) -> Result<()> {
     // From here on, every exit path restores the terminal.
     let _guard = TerminalGuard;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableFocusChange
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -2024,6 +2118,26 @@ async fn main_loop(
         // Drop expired status-bar messages.
         app.tick_status();
 
+        // huddle 0.7.4: end of the startup catch-up window. Drain the
+        // accumulated counter into one summary desktop notification
+        // ("N new messages while you were away") and disarm the gate
+        // so future messages route through the per-message path.
+        if let Some(deadline) = app.startup_grace_until {
+            if Instant::now() >= deadline {
+                let n = app.startup_catchup_count;
+                app.startup_catchup_count = 0;
+                app.startup_grace_until = None;
+                if n > 0 {
+                    let body = if n == 1 {
+                        "1 new message while you were away".to_string()
+                    } else {
+                        format!("{} new messages while you were away", n)
+                    };
+                    crate::notifier::notify("huddle", &body);
+                }
+            }
+        }
+
         // huddle 0.6: drain the update-check slot. The poll task
         // writes here when a newer version is detected; we copy
         // into `update_banner` once so the lobby renders the banner.
@@ -2086,6 +2200,8 @@ async fn main_loop(
                         }
                     }
                 }
+                Event::FocusGained => crate::notifier::set_focused(true),
+                Event::FocusLost => crate::notifier::set_focused(false),
                 _ => {}
             }
         }
