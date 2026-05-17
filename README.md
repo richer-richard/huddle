@@ -171,7 +171,7 @@ from the actual key map.
 | `E` | Edit your username                                       |
 | `W` | Replay onboarding (what's new)                           |
 | `B` | Manage blocked peers                                     |
-| `⌥⇧1` (Option+Shift+1 / Alt+Shift+1) | Delete account (go dark) — two-factor confirm |
+| `Alt+Shift+1` (Option+Shift+1 on macOS) | Delete account (go dark) — two-factor confirm |
 
 ## Username & ID display (huddle 0.5)
 
@@ -319,9 +319,9 @@ actual passphrase.
 
 ## Go dark — irreversible account deletion (huddle 0.5)
 
-Press `⌥⇧1` (Option+Shift+1 on macOS, Alt+Shift+1 on Linux/Windows)
-from anywhere — or use the labeled row on the Settings pane — to open
-the **go dark** modal. Two-factor gate:
+Press `Alt+Shift+1` (the Option key on macOS — same physical key) from
+anywhere — or use the labeled row on the Settings pane — to open the
+**go dark** modal. Two-factor gate:
 
 1. Your **master passphrase** (re-derived and constant-time compared
    to the in-memory SQLCipher subkey).
@@ -439,6 +439,32 @@ your platform's Downloads folder. Phase 2 cap is 1 MiB per file.
   doesn't). Per-DM ephemeral ratchets (Double Ratchet-style) are a
   candidate follow-up.
 
+## What's new in 0.7.5 — notifier hardening
+
+Self-review of 0.7.4 surfaced four follow-up items. All landed in 0.7.5:
+
+- **Conservative initial focus state.** 0.7.4 defaulted `focused = true`,
+  which suppressed notifications if huddle launched in a terminal that
+  was already in the background (no `FocusGained` event ever fired).
+  0.7.5 treats "no focus event observed yet" as **unfocused** — false
+  positives (one extra notification) only.
+- **Sliding catch-up grace.** The 5-second post-launch summary window
+  now extends by 2s on every inbound message during the window, capped
+  at a hard 30s ceiling from start. Slow gossipsub backlogs are
+  correctly batched into one summary instead of leaking into
+  per-message alerts.
+- **Notification rate-limit.** A 2-second cooldown coalesces bursts:
+  the first notification in a burst fires immediately with full
+  detail (room / sender / preview); within the next 2s, additional
+  notifications are counted and a single "N more new messages" summary
+  fires when the window closes. Prevents process / thread spam for
+  busy rooms.
+- **ASCII chord labels.** `⌥⇧1` keycap glyphs were dropped in favor
+  of `Alt+Shift+1` (and `Option+Shift+1 on macOS` callouts where it
+  helps) — fonts render the Unicode keycaps too inconsistently
+  across terminals. The Mac runtime behavior is unchanged (the
+  `⁄` glyph and the `ALT|SHIFT+!` event both still trigger Go Dark).
+
 ## What's new in 0.7.4 — desktop notifications + safer go-dark chord
 
 - **Desktop notifications when the terminal isn't focused.** Every
@@ -458,13 +484,12 @@ your platform's Downloads folder. Phase 2 cap is 1 MiB per file.
   and GNOME Terminal. On a terminal that doesn't emit
   `FocusGained` / `FocusLost`, the app stays in "focused = true" mode
   and never fires per-message notifications — graceful degradation.
-- **Go dark rebound to `⌥⇧1` (Option+Shift+1 / Alt+Shift+1).** Plain
+- **Go dark rebound to `Alt+Shift+1`** (Option+Shift+1 on macOS). Plain
   `!` was just Shift+1 — one accidental keystroke could open the
   destructive flow. The Mac chord works out of the box on Terminal.app
   via the unicode glyph `⁄` that Option+Shift+1 produces, AND via the
   `ALT|SHIFT+!` event that Alt-as-Meta terminals emit. On Linux/Windows
-  the same Alt+Shift+1 chord is uncontested. The Settings pane row
-  label and modal prompt both render `⌥⇧1` now.
+  the same Alt+Shift+1 chord is uncontested.
 - **First-time macOS notification permission prompt.** macOS will ask
   to allow Script Editor (or Terminal) to send notifications the first
   time huddle fires one. Click Allow once and you're set.

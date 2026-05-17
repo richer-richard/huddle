@@ -92,11 +92,11 @@ pub const BINDINGS: &[Binding] = &[
         palette_label: Some("focus pane"),
     },
     // huddle 0.7.4: deliberately-awkward chord. Bare `!` was too easy
-    // to fat-finger into the destructive flow. Help text spells the
-    // chord with the macOS glyphs because that's the dominant target;
-    // Linux/Windows users press Alt+Shift+1, equivalent.
+    // to fat-finger into the destructive flow. ASCII spelling chosen
+    // for universal font support — Mac users will press Option but
+    // every keyboard doubles that as "alt".
     Binding {
-        keys: "⌥⇧1 / Alt+Shift+1",
+        keys: "Alt+Shift+1",
         context: Context::Global,
         description: "go dark — delete account, wipe data, exit",
         palette_label: Some("go dark (delete account)"),
@@ -465,7 +465,7 @@ pub fn adaptive_hints(app: &TuiApp) -> Vec<(&'static str, &'static str)> {
                 out.push(("V", "verified-only"));
                 out.push(("U", "update check"));
                 out.push(("E", "username"));
-                out.push(("⌥⇧1", "go dark"));
+                out.push(("Alt+Shift+1", "go dark"));
             }
             _ => {}
         }

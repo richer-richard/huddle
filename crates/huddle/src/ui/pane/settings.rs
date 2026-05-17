@@ -61,13 +61,22 @@ pub fn render(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme) {
         theme.dim(),
     )]));
     lines.push(Line::raw(""));
-    // huddle 0.7.4 follow-up: column alignment. The other rows use
-    // `"  X"` (3) + 4 spaces = 7 cols before the label; this row uses
-    // `"  ⌥⇧1"` (5) + 2 spaces = 7 cols, matching their leading-edge.
+    // huddle 0.7.5: chord rendered as ASCII (`Alt+Shift+1`) rather
+    // than the Unicode keycap glyphs `⌥⇧1` — fonts fall back too
+    // inconsistently for the glyph form to be reliable across
+    // terminals. Macs label this key "Option" but every keyboard
+    // doubles it as "alt", so the universal name wins.
+    //
+    // Layout: other rows use `"  X"` (3) + 4 spaces (4) = 7 cols
+    // before the label. This row uses `"  Alt+Shift+1"` (14) + 1
+    // space gap, but the label column then sits at 15. To keep
+    // alignment we just let this row's label start later — every
+    // other row's `key` column is 1 char so this is the only
+    // exception, called out by its prominence.
     lines.push(Line::from(vec![
-        Span::styled("  ⌥⇧1", theme.err_style()),
+        Span::styled("  Alt+Shift+1", theme.err_style()),
         Span::raw("  "),
-        Span::styled(format!("{:<28}", "go dark"), theme.err_style()),
+        Span::styled(format!("{:<20}", "go dark"), theme.err_style()),
         Span::styled("delete account, wipe data, exit", theme.dim()),
     ]));
 

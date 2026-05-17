@@ -87,7 +87,7 @@ pub const ONBOARDING_PAGES: &[OnboardingPage] = &[
         body: &[
             "  a    add friend by HD ID or username — races LAN / IP / relay",
             "  ,→u  set / clear your username (signed broadcast)",
-            "  ⌥⇧1  delete account + wipe data dir (go dark)",
+            "  Alt+Shift+1  delete account + wipe data dir (go dark)",
             "  ✓    green tag next to SAS-verified peers in chat",
             "  HD-  branded ID, shown alongside username everywhere",
         ],
@@ -176,11 +176,11 @@ pub const ONBOARDING_PAGES: &[OnboardingPage] = &[
             "arrived during the 5-second initial sync window are batched",
             "into one notification — \"N new messages while you were away\".",
             "",
-            "Go dark moved to ⌥⇧1 (Option+Shift+1 on macOS,",
+            "Go dark moved to Alt+Shift+1 (Option+Shift+1 on macOS,",
             "Alt+Shift+1 on Linux/Windows). Plain `!` was one keystroke",
             "away from nuking your account — the extra modifier is a",
             "deliberate friction. The Settings pane row and the modal",
-            "prompt both render `⌥⇧1` now.",
+            "prompt both render `Alt+Shift+1` now.",
             "",
             "macOS only: the first notification triggers a one-time",
             "permission prompt for Script Editor / Terminal — click Allow.",
@@ -853,6 +853,10 @@ pub struct TuiApp {
     /// notifications. Cleared (set to `None`) the first tick after
     /// the deadline passes.
     pub startup_grace_until: Option<Instant>,
+    /// huddle 0.7.5: absolute deadline beyond which we stop sliding
+    /// the catch-up window forward. Prevents a sustained-traffic
+    /// room from indefinitely suppressing live notifications.
+    pub startup_grace_cap: Instant,
 }
 
 /// huddle 0.5: how long the goodbye modal stays on screen after
@@ -865,6 +869,19 @@ pub const GO_DARK_FAREWELL: Duration = Duration::from_secs(2);
 /// dial + gossipsub catch-up on a healthy LAN; longer would risk
 /// missing live messages.
 pub const STARTUP_GRACE: Duration = Duration::from_secs(5);
+
+/// huddle 0.7.5: each MessageReceived during the grace window pushes
+/// the deadline forward by this much, so a slow catch-up (large
+/// backlog or sluggish gossipsub) still batches correctly instead of
+/// firing per-message notifications. Bounded by `STARTUP_GRACE_MAX`.
+pub const STARTUP_GRACE_EXTEND: Duration = Duration::from_secs(2);
+
+/// huddle 0.7.5: absolute cap on the catch-up window from
+/// `started_at`. Once we cross this, the grace ends and any further
+/// inbound messages route through the live notification path —
+/// otherwise a sustained-traffic room could indefinitely silence
+/// per-message alerts.
+pub const STARTUP_GRACE_MAX: Duration = Duration::from_secs(30);
 
 impl TuiApp {
     pub fn new(handle: AppHandle) -> Self {
@@ -914,6 +931,7 @@ impl TuiApp {
             went_dark_at: None,
             startup_catchup_count: 0,
             startup_grace_until: Some(Instant::now() + STARTUP_GRACE),
+            startup_grace_cap: Instant::now() + STARTUP_GRACE_MAX,
         }
     }
 
@@ -1215,6 +1233,17 @@ impl TuiApp {
                 if self.startup_grace_until.is_some() {
                     self.startup_catchup_count =
                         self.startup_catchup_count.saturating_add(1);
+                    // huddle 0.7.5: extend the grace deadline so a
+                    // slow gossipsub backlog still batches into the
+                    // single summary notification instead of leaking
+                    // into per-message alerts. Capped by
+                    // `startup_grace_cap` so a hot room can't keep
+                    // the grace open indefinitely.
+                    let extended = Instant::now() + STARTUP_GRACE_EXTEND;
+                    let new_deadline = extended.min(self.startup_grace_cap);
+                    self.startup_grace_until = self
+                        .startup_grace_until
+                        .map(|d| d.max(new_deadline));
                 } else if !crate::notifier::is_focused() {
                     let room_name = self
                         .open_room(&room_id)

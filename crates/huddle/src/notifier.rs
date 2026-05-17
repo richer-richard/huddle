@@ -14,22 +14,125 @@
 //! the unfocused-only notifications.
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+/// 0.7.5: minimum time between fired desktop notifications. Within
+/// this window, additional `notify()` calls are coalesced into one
+/// summary notification ("N more new messages") fired after the
+/// window closes. Prevents process / thread spam for busy rooms.
+const RATE_LIMIT: Duration = Duration::from_millis(2000);
+
+struct RateState {
+    /// When the most recent notification was actually dispatched.
+    last_fired_at: Instant,
+    /// Calls suppressed during the active cooldown window.
+    pending_count: u32,
+    /// Set while a delayed summary thread is sleeping out the window.
+    timer_running: bool,
+}
+
+fn rate_state() -> &'static Mutex<RateState> {
+    static STATE: OnceLock<Mutex<RateState>> = OnceLock::new();
+    STATE.get_or_init(|| {
+        Mutex::new(RateState {
+            // Initialize far enough in the past that the first call
+            // always fires immediately.
+            last_fired_at: Instant::now() - RATE_LIMIT * 2,
+            pending_count: 0,
+            timer_running: false,
+        })
+    })
+}
 
 static WINDOW_FOCUSED: AtomicBool = AtomicBool::new(true);
+/// Becomes `true` after the terminal has emitted at least one
+/// FocusGained or FocusLost event. Until then, `is_focused()`
+/// pessimistically returns `false` so notifications still fire even
+/// if huddle was launched into a terminal that's already in the
+/// background. Worst case: one extra notification right after start.
+static FOCUS_OBSERVED: AtomicBool = AtomicBool::new(false);
 
 pub fn set_focused(focused: bool) {
     WINDOW_FOCUSED.store(focused, Ordering::Relaxed);
+    FOCUS_OBSERVED.store(true, Ordering::Relaxed);
 }
 
 pub fn is_focused() -> bool {
+    if !FOCUS_OBSERVED.load(Ordering::Relaxed) {
+        // Treat "we haven't heard anything yet" as unfocused so the
+        // user still gets notified for messages that arrive before
+        // any focus event lands. Common case: app launched, terminal
+        // is already in the background.
+        return false;
+    }
     WINDOW_FOCUSED.load(Ordering::Relaxed)
 }
 
 /// Fire a desktop notification on a background thread. Non-blocking;
-/// errors are swallowed.
+/// errors are swallowed. Rate-limited (see `RATE_LIMIT`): within a
+/// hot window, subsequent calls are coalesced and a single "N more
+/// new messages" summary fires once the window closes.
 pub fn notify(title: &str, body: &str) {
-    let title = title.to_string();
-    let body = body.to_string();
+    let now = Instant::now();
+    let action = {
+        let mut s = rate_state().lock().expect("rate state poisoned");
+        if now.duration_since(s.last_fired_at) >= RATE_LIMIT && !s.timer_running {
+            s.last_fired_at = now;
+            NotifyAction::FireNow
+        } else {
+            s.pending_count = s.pending_count.saturating_add(1);
+            if !s.timer_running {
+                s.timer_running = true;
+                NotifyAction::ScheduleSummary
+            } else {
+                NotifyAction::Coalesce
+            }
+        }
+    };
+    match action {
+        NotifyAction::FireNow => fire(title.to_string(), body.to_string()),
+        NotifyAction::ScheduleSummary => {
+            let last_fired = rate_state()
+                .lock()
+                .map(|s| s.last_fired_at)
+                .unwrap_or(now);
+            let sleep = RATE_LIMIT.saturating_sub(now.duration_since(last_fired));
+            std::thread::spawn(move || {
+                std::thread::sleep(sleep);
+                let (n, fire_at) = {
+                    let mut s = rate_state().lock().expect("rate state poisoned");
+                    let n = s.pending_count;
+                    s.pending_count = 0;
+                    s.timer_running = false;
+                    let fire_at = Instant::now();
+                    if n > 0 {
+                        s.last_fired_at = fire_at;
+                    }
+                    (n, fire_at)
+                };
+                let _ = fire_at;
+                if n > 0 {
+                    let body = if n == 1 {
+                        "1 more new message".to_string()
+                    } else {
+                        format!("{} more new messages", n)
+                    };
+                    fire("huddle".to_string(), body);
+                }
+            });
+        }
+        NotifyAction::Coalesce => {}
+    }
+}
+
+enum NotifyAction {
+    FireNow,
+    ScheduleSummary,
+    Coalesce,
+}
+
+fn fire(title: String, body: String) {
     std::thread::spawn(move || {
         if let Err(e) = send_notification(&title, &body) {
             tracing::debug!(error = %e, "desktop notification failed");

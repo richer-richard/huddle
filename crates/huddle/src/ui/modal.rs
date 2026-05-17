@@ -1058,14 +1058,14 @@ pub fn render_settings(f: &mut Frame, s: &SettingsState, app: &crate::app::TuiAp
         ]),
         Line::from(""),
         Line::from(vec![
-            Span::styled(" [⌥⇧1]", Style::default().fg(Color::Red).bold()),
+            Span::styled(" [Alt+Shift+1]", Style::default().fg(Color::Red).bold()),
             Span::styled(
                 " delete account (go dark) — press ",
                 Style::default().fg(Color::DarkGray),
             ),
-            Span::styled("⌥⇧1", Style::default().fg(Color::Red).bold()),
+            Span::styled("Alt+Shift+1", Style::default().fg(Color::Red).bold()),
             Span::styled(
-                " (Option+Shift+1)",
+                " (Option+Shift+1 on macOS)",
                 Style::default().fg(Color::DarkGray),
             ),
         ]),
