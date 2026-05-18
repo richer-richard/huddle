@@ -149,7 +149,6 @@ pub enum Action {
     SasMatch,
     SasCancel,
     // Phase E: verified-only-mode toggles
-    OpenSettings,
     SettingsToggleGlobalVerifiedOnly,
     ToggleRoomVerifiedOnly,
     /// huddle 0.7.8: Settings pane tab cycling.
@@ -574,31 +573,35 @@ fn map_sidebar(key: KeyEvent, app: &TuiApp) -> Action {
             KeyCode::Char('c') if matches!(app.settings_tab, SettingsTab::Privacy) => {
                 return Action::ClearBlockedPeers;
             }
-            KeyCode::Tab => return Action::SettingsTabNext,
-            KeyCode::BackTab => return Action::SettingsTabPrev,
             KeyCode::Char('1') => return Action::SettingsTabSelect(SettingsTab::Account),
             KeyCode::Char('2') => return Action::SettingsTabSelect(SettingsTab::Network),
             KeyCode::Char('3') => return Action::SettingsTabSelect(SettingsTab::Appearance),
             KeyCode::Char('4') => return Action::SettingsTabSelect(SettingsTab::Privacy),
+            // huddle 0.7.9: Tab/BackTab cycle Settings tabs ONLY when
+            // the pane is focused. With the sidebar focused, Tab keeps
+            // its universal "toggle sidebar↔pane focus" meaning so the
+            // user can still move into the pane from the sidebar via
+            // a single Tab keystroke. (0.7.8 swallowed Tab here
+            // regardless of focus, which broke that gesture.)
+            KeyCode::Tab if matches!(app.sidebar.focus, SidebarFocus::Pane) => {
+                return Action::SettingsTabNext;
+            }
+            KeyCode::BackTab if matches!(app.sidebar.focus, SidebarFocus::Pane) => {
+                return Action::SettingsTabPrev;
+            }
             _ => {}
         }
     }
-    // huddle 0.7.8: Profile pane row navigation + yank. j/k move the
-    // copyable-field cursor (only when pane focus is the pane itself —
-    // when the sidebar is focused, j/k still navigates sections).
-    // E and Q are pane-scoped regardless of focus so the affordances
-    // listed on the pane stay reachable from either.
+    // huddle 0.7.9: Profile pane row navigation + yank. Match the
+    // pattern People uses for its sublist navigation — pane-active is
+    // enough to claim j/k, no separate focus gate. (0.7.8 required pane
+    // focus, which was inconsistent with People and left users
+    // puzzled why the j/k hint didn't work from sidebar focus.)
     if matches!(app.pane, Pane::Profile) {
-        let pane_focused = matches!(app.sidebar.focus, SidebarFocus::Pane);
-        if pane_focused {
-            match key.code {
-                KeyCode::Char('j') | KeyCode::Down => return Action::ProfileFieldDown,
-                KeyCode::Char('k') | KeyCode::Up => return Action::ProfileFieldUp,
-                KeyCode::Char('y') => return Action::ProfileFieldYank,
-                _ => {}
-            }
-        }
         match key.code {
+            KeyCode::Char('j') | KeyCode::Down => return Action::ProfileFieldDown,
+            KeyCode::Char('k') | KeyCode::Up => return Action::ProfileFieldUp,
+            KeyCode::Char('y') => return Action::ProfileFieldYank,
             KeyCode::Char('E') => return Action::OpenEditUsername,
             KeyCode::Char('Q') => return Action::OpenQrIdentity,
             _ => {}

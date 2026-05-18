@@ -3636,15 +3636,6 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             }
             Ok(false)
         }
-        Action::OpenSettings => {
-            // huddle 0.7.8: Settings is now a tabbed pane, not a modal.
-            // OpenSettings now jumps to the pane and resets to the
-            // Account tab — the modal variant has been removed entirely.
-            app.pane = Pane::Settings;
-            app.settings_tab = SettingsTab::Account;
-            app.sidebar.selection = SidebarItem::Section(SidebarSection::Settings);
-            Ok(false)
-        }
         Action::SettingsTabNext => {
             app.settings_tab = app.settings_tab.next();
             Ok(false)

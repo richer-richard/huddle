@@ -441,6 +441,27 @@ your platform's Downloads folder. Phase 2 cap is 1 MiB per file.
   doesn't). Per-DM ephemeral ratchets (Double Ratchet-style) are a
   candidate follow-up.
 
+## What's new in 0.7.9 — keybinding-scope fixes from a self-audit
+
+A small follow-up patch from a self-review of the 0.7.8 release. No new
+features; three keybinding bugs that the 0.7.8 ship-checklist missed:
+
+- **Tab in Settings no longer swallows the focus toggle.** In 0.7.8,
+  pressing Tab anywhere in `Pane::Settings` cycled tabs even when the
+  sidebar was focused, which silently disabled the universal "Tab =
+  toggle sidebar↔pane focus" gesture for users in Settings. 0.7.9 only
+  intercepts Tab / Shift+Tab for tab cycling when the pane itself is
+  focused. From sidebar focus, Tab now correctly moves focus into the
+  pane (one keystroke), then subsequent Tabs cycle.
+- **Profile j/k/y match People's pattern.** 0.7.8 required pane focus
+  for the Profile field cursor; People's analogous sublist nav has
+  always worked regardless of focus. 0.7.9 makes Profile consistent —
+  pane-active is enough to claim j/k/y, no separate focus gate.
+- **Dead `Action::OpenSettings` removed.** The `,` chord routes through
+  `JumpToSettingsPane` (which now resets to the Account tab). The
+  legacy `OpenSettings` variant was unreachable in 0.7.8; removed in
+  0.7.9 along with its dispatcher.
+
 ## What's new in 0.7.8 — three connection paths, tabbed Settings, copyable identity
 
 A round of UX polish that borrows the right things from neighbouring apps
