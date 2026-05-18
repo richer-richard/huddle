@@ -37,6 +37,10 @@ pub struct KnownPeerStatus {
     pub label: Option<String>,
     pub last_connected_at: Option<i64>,
     pub connected_peer_id: Option<PeerId>,
+    /// Ed25519 fingerprint learned from libp2p Identify. `None` until
+    /// the first successful connect completes. The TUI uses this to
+    /// resolve usernames + start DMs against the dialed peer.
+    pub fingerprint: Option<String>,
 }
 
 /// huddle 0.7: compute the deterministic room_id for a 1-1 DM between two
@@ -213,6 +217,13 @@ pub struct AppHandle {
     /// `PROFILE_REBROADCAST_FLOOR_MS` floor so a noisy reconnect cycle
     /// doesn't spam the gossipsub mesh.
     last_profile_broadcast_at_ms: Arc<Mutex<HashMap<String, i64>>>,
+    /// huddle 0.7.7: addresses the local user just initiated a dial on
+    /// (`d` / `a` / paste-invite). When `PeerIdentified` lands for one
+    /// of these, we open (or reuse) a DM with the identified peer and
+    /// emit `AutoOpenDm` so the TUI can switch into the new pane. The
+    /// set is consumed on use, so a passive auto-reconnect or an
+    /// inbound dial never triggers the auto-DM.
+    pending_auto_dm_addrs: Arc<Mutex<HashSet<String>>>,
     app_event_tx: broadcast::Sender<AppEvent>,
 }
 
@@ -293,6 +304,7 @@ impl AppHandle {
             relay_circuit_addrs: Arc::new(Mutex::new(HashSet::new())),
             host_addr_dial_attempts: Arc::new(Mutex::new(HashMap::new())),
             last_profile_broadcast_at_ms: Arc::new(Mutex::new(HashMap::new())),
+            pending_auto_dm_addrs: Arc::new(Mutex::new(HashSet::new())),
             app_event_tx,
         };
 
@@ -301,6 +313,12 @@ impl AppHandle {
         handle.spawn_discovered_room_pruner();
         handle.spawn_known_peer_reconnector();
         handle.restore_rooms_from_db().await;
+        // huddle 0.7.7: prune any friend requests that aged out while
+        // we were offline. Best-effort — a DB failure here shouldn't
+        // block startup, so we log and move on.
+        if let Err(e) = repo::cleanup_expired_pending_friend_requests(&handle.db, now_unix()) {
+            warn!(%e, "failed to sweep expired pending friend requests");
+        }
 
         Ok(handle)
     }
@@ -1228,6 +1246,15 @@ impl AppHandle {
             "dialing peer with {} candidate addresses",
             multiaddrs.len()
         );
+        // huddle 0.7.7: user-initiated dial — register every candidate
+        // canonical address so whichever wins the libp2p race triggers
+        // the post-identify auto-DM. Reset & insert under one lock.
+        {
+            let mut pending = self.pending_auto_dm_addrs.lock().unwrap();
+            for m in &multiaddrs {
+                pending.insert(m.to_string());
+            }
+        }
         self.network.dial_addresses(multiaddrs).await;
         Ok(())
     }
@@ -1263,8 +1290,28 @@ impl AppHandle {
     pub async fn dial(&self, input: &str) -> Result<()> {
         let multiaddr = parse_dial_address(input)?;
         let canonical = multiaddr.to_string();
-        info!(%canonical, "dialing");
+        // huddle 0.7.7: user-initiated entry point. Register the address
+        // so the post-Identify handler auto-opens a DM with the peer.
+        // The auto-reconnector goes through `dial_internal` instead and
+        // therefore does NOT trigger an auto-DM on every startup.
+        self.pending_auto_dm_addrs
+            .lock()
+            .unwrap()
+            .insert(canonical.clone());
+        self.dial_internal(canonical, multiaddr).await
+    }
 
+    /// huddle 0.7.7: shared dial body used by the public `dial()` entry
+    /// point and by internal reconnect paths. The two callers differ
+    /// only in whether they register the address for auto-DM-after-
+    /// identify; internal paths (startup reconnector, host-addr
+    /// opportunistic dial) do not.
+    pub(crate) async fn dial_internal(
+        &self,
+        canonical: String,
+        multiaddr: Multiaddr,
+    ) -> Result<()> {
+        info!(%canonical, "dialing");
         repo::upsert_known_peer(
             &self.db,
             &KnownPeer {
@@ -1361,6 +1408,7 @@ impl AppHandle {
                     label: p.label,
                     last_connected_at: p.last_connected_at,
                     connected_peer_id: connected_peer,
+                    fingerprint: p.fingerprint,
                 }
             })
             .collect()
@@ -1430,6 +1478,97 @@ impl AppHandle {
         Ok(())
     }
 
+    // =========================================================================
+    // huddle 0.7.7: pending friend requests (3-day TTL)
+    // =========================================================================
+
+    /// Snapshot of every inbound dial we've spilled to disk but haven't
+    /// yet accepted or rejected. The People pane renders this as its
+    /// own section ("Pending requests (N)").
+    pub fn list_pending_friend_requests(&self) -> Vec<repo::PendingFriendRequest> {
+        repo::list_pending_friend_requests(&self.db).unwrap_or_default()
+    }
+
+    /// Persist an inbound request that the user didn't act on within the
+    /// modal window. Called from the TUI's idle-timeout sweep; the live
+    /// libp2p connection is also closed by the same path (the request
+    /// is effectively rejected *for now* — accept later from People
+    /// pane will re-dial the stored address).
+    pub fn spill_pending_friend_request(
+        &self,
+        peer_id: PeerId,
+        fingerprint: &str,
+        address: &str,
+    ) -> Result<()> {
+        repo::upsert_pending_friend_request(
+            &self.db,
+            &repo::PendingFriendRequest {
+                fingerprint: fingerprint.to_string(),
+                address: address.to_string(),
+                peer_id: peer_id.to_string(),
+                received_at: now_unix(),
+            },
+        )?;
+        Ok(())
+    }
+
+    /// User pressed Accept on a row in the Pending requests list. The
+    /// original libp2p connection is long gone (we closed it on
+    /// timeout); re-dial the stored address and mark the peer trusted
+    /// so the post-Identify handler short-circuits the modal. The
+    /// row is removed regardless of dial success — a failed dial is
+    /// still a positive intent we don't want to keep re-prompting on.
+    pub async fn accept_pending_friend_request(&self, fingerprint: &str) -> Result<()> {
+        let mut chosen_addr: Option<String> = None;
+        for req in self.list_pending_friend_requests() {
+            if req.fingerprint == fingerprint {
+                chosen_addr = Some(req.address);
+                break;
+            }
+        }
+        repo::delete_pending_friend_requests_for_fp(&self.db, fingerprint)?;
+        if let Some(addr) = chosen_addr {
+            // Pre-mark trusted so the upcoming Identify handler skips
+            // the inbound-dial modal. Matches the semantics of
+            // `trust_inbound` without needing a live PeerId.
+            repo::upsert_known_peer(
+                &self.db,
+                &KnownPeer {
+                    address: addr.clone(),
+                    label: None,
+                    last_connected_at: None,
+                    last_attempt_at: Some(now_unix()),
+                    created_at: now_unix(),
+                    fingerprint: Some(fingerprint.to_string()),
+                    trusted: true,
+                },
+            )?;
+            // User-initiated — register for auto-DM on connect.
+            self.dial(&addr).await?;
+        }
+        Ok(())
+    }
+
+    /// User pressed Reject on a row in the Pending requests list.
+    /// Mirrors `reject_inbound` semantics: delete the pending row(s)
+    /// AND block the fingerprint so any future dial from this peer is
+    /// auto-dropped without re-prompting.
+    pub fn reject_pending_friend_request(&self, fingerprint: &str) -> Result<()> {
+        repo::delete_pending_friend_requests_for_fp(&self.db, fingerprint)?;
+        repo::block_peer(&self.db, fingerprint, now_unix())?;
+        Ok(())
+    }
+
+    /// huddle 0.7.7: close a live libp2p connection without blocking the
+    /// peer. Used by the TUI's 15s InboundDial timeout — we need to
+    /// drop the dangling socket, but blocking the peer would
+    /// contradict "save the request for 3 days, let the user decide
+    /// later." `reject_inbound` is the right call when the user
+    /// *explicitly* clicks Reject.
+    pub async fn disconnect_peer(&self, peer_id: PeerId) {
+        self.network.disconnect_peer(peer_id).await;
+    }
+
     fn spawn_known_peer_reconnector(&self) {
         let handle = self.clone();
         tokio::spawn(async move {
@@ -1446,7 +1585,15 @@ impl AppHandle {
                     // without pulling an RNG into scope.
                     let jitter = (peer.address.len() as u64 * 37) % 200;
                     tokio::time::sleep(Duration::from_millis(150 * i as u64 + jitter)).await;
-                    if let Err(e) = handle.dial(&peer.address).await {
+                    // huddle 0.7.7: route through `dial_internal`, NOT
+                    // `dial`. Startup reconnects shouldn't pop a DM
+                    // every time a known peer comes online — only
+                    // explicit user actions trigger the auto-DM.
+                    let multiaddr = match peer.address.parse::<Multiaddr>() {
+                        Ok(m) => m,
+                        Err(_) => return,
+                    };
+                    if let Err(e) = handle.dial_internal(peer.address.clone(), multiaddr).await {
                         debug!(%e, addr = %peer.address, "auto-reconnect failed");
                     }
                 });
@@ -1668,9 +1815,14 @@ impl AppHandle {
                                 addr = %first,
                                 "opportunistic dial via room announcement host_addrs"
                             );
-                            // dial is fire-and-forget; failures land in
-                            // DialFailed and the user doesn't need to know.
-                            let _ = self.dial(first).await;
+                            // huddle 0.7.7: NOT user-initiated — go
+                            // through `dial_internal` so a passive
+                            // announcement-driven dial doesn't pop a
+                            // DM in the user's face.
+                            if let Ok(multiaddr) = first.parse::<Multiaddr>() {
+                                let canonical = multiaddr.to_string();
+                                let _ = self.dial_internal(canonical, multiaddr).await;
+                            }
                         }
                     }
                 }
@@ -1883,6 +2035,22 @@ impl AppHandle {
                     });
                     return;
                 }
+                // huddle 0.7.7: did the local user initiate any of these
+                // dials? If so, consume the matching entries from
+                // `pending_auto_dm_addrs` now so we don't auto-DM
+                // again on a subsequent reconnect. The actual DM
+                // start happens after the trust upsert below so the
+                // peer is already marked trusted by the time we fire.
+                let should_auto_dm = {
+                    let mut pending = self.pending_auto_dm_addrs.lock().unwrap();
+                    let mut any_matched = false;
+                    for addr in &matched_addrs {
+                        if pending.remove(addr) {
+                            any_matched = true;
+                        }
+                    }
+                    any_matched
+                };
                 for addr in matched_addrs {
                     let _ = repo::upsert_known_peer(
                         &self.db,
@@ -1896,6 +2064,25 @@ impl AppHandle {
                             trusted: true,
                         },
                     );
+                }
+                // huddle 0.7.7: open (or reuse) a DM with the freshly
+                // identified peer and tell the TUI to switch panes.
+                // `start_direct` is idempotent on `canonical_dm_room_id`,
+                // so this is safe to call even if a DM already exists.
+                // Blocked peers fall through `start_direct` naturally —
+                // they won't reach trust + identify at all.
+                if should_auto_dm && fingerprint != self.identity.fingerprint() {
+                    match self.start_direct(&fingerprint).await {
+                        Ok(room_id) => {
+                            let _ = self.app_event_tx.send(AppEvent::AutoOpenDm {
+                                room_id,
+                                fingerprint: fingerprint.clone(),
+                            });
+                        }
+                        Err(e) => {
+                            debug!(%e, fp = %fingerprint, "auto-DM after dial failed");
+                        }
+                    }
                 }
                 // huddle 0.5: tell the newly-identified peer our current
                 // username via a signed ProfileUpdate, but only if we

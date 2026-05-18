@@ -1917,3 +1917,148 @@ pub fn render_error(f: &mut Frame, msg: &str) {
     );
     f.render_widget(para, area);
 }
+
+/// huddle 0.7.7: InvitePicker — pick peers to auto-DM a room invite.
+/// Tiered (Verified → DM partners → Known peers), Space to toggle, `/`-
+/// free filter (literal typing narrows live), Enter to send.
+pub fn render_invite_picker(f: &mut Frame, s: &crate::app::InvitePickerState) {
+    use crate::app::{filtered_invite_candidates, InviteTier, INVITE_PICKER_SOFT_CAP};
+
+    let area = centered_rect(76, 24, f.area());
+    f.render_widget(Clear, area);
+
+    let visible = filtered_invite_candidates(s);
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(vec![
+        Span::styled(
+            "  invite to ",
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled(
+            format!("#{}", s.room_name),
+            Style::default().fg(Color::White).bold(),
+        ),
+        Span::styled(
+            format!("  ·  {} selected ", s.selected.len()),
+            Style::default().fg(if s.selected.is_empty() {
+                Color::DarkGray
+            } else {
+                Color::Cyan
+            }),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  filter: ", Style::default().fg(Color::DarkGray)),
+        if s.filter.is_empty() {
+            Span::styled(
+                "(type to narrow by username or HD-prefix)",
+                Style::default().fg(Color::DarkGray),
+            )
+        } else {
+            Span::styled(s.filter.clone(), Style::default().fg(Color::White))
+        },
+    ]));
+    lines.push(Line::from(""));
+
+    if visible.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  (no matches — Backspace to clear filter, Esc to cancel)",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        // Group with section headers as we walk in tier order. The
+        // `gather_invite_candidates` helper pre-sorts so every Verified
+        // appears before every DmPartner appears before every Known.
+        let mut current_tier: Option<InviteTier> = None;
+        for (i, c) in visible.iter().enumerate() {
+            if current_tier != Some(c.tier) {
+                let (label, color) = match c.tier {
+                    InviteTier::Verified => ("Verified", Color::Green),
+                    InviteTier::DmPartner => ("DM partners", Color::Cyan),
+                    InviteTier::Known => ("Known peers", Color::DarkGray),
+                };
+                lines.push(Line::from(Span::styled(
+                    format!("  {}", label),
+                    Style::default().fg(color).bold(),
+                )));
+                current_tier = Some(c.tier);
+            }
+            let checked = s.selected.contains(&c.fingerprint);
+            let box_glyph = if checked { "[x]" } else { "[ ]" };
+            let cursor = if i == s.cursor { "▸" } else { " " };
+            let username = c
+                .username
+                .clone()
+                .unwrap_or_else(|| "[anonymous]".to_string());
+            let hd = format!(
+                "HD-{}",
+                crate::ui::short_fp(&c.fingerprint).to_uppercase()
+            );
+            let mut spans = vec![
+                Span::styled(cursor, Style::default().fg(Color::Yellow)),
+                Span::raw(" "),
+                Span::styled(
+                    box_glyph,
+                    if checked {
+                        Style::default().fg(Color::Cyan).bold()
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    },
+                ),
+                Span::raw(" "),
+                Span::styled(username, Style::default().fg(Color::White)),
+                Span::raw("  "),
+                Span::styled(hd, Style::default().fg(Color::DarkGray)),
+            ];
+            if c.tier == InviteTier::Verified {
+                spans.push(Span::styled(
+                    "  ✓",
+                    Style::default().fg(Color::Green),
+                ));
+            }
+            lines.push(Line::from(spans));
+        }
+    }
+
+    if let Some(msg) = &s.status_line {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("  {}", msg),
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled(" Space", Style::default().fg(Color::Yellow)),
+        Span::styled(" toggle  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("↑↓", Style::default().fg(Color::Yellow)),
+        Span::styled(" move  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("type", Style::default().fg(Color::Yellow)),
+        Span::styled(" filter  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Enter", Style::default().fg(Color::Yellow)),
+        Span::styled(" send  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Esc", Style::default().fg(Color::Yellow)),
+        Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
+    ]));
+    lines.push(Line::from(Span::styled(
+        format!(
+            "  (soft cap: {} selections per send)",
+            INVITE_PICKER_SOFT_CAP
+        ),
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let para = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan))
+                .padding(Padding::uniform(1))
+                .title(Span::styled(
+                    " invite peers ",
+                    Style::default().fg(Color::Cyan).bold(),
+                )),
+        );
+    f.render_widget(para, area);
+}

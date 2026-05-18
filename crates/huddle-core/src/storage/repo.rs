@@ -738,6 +738,84 @@ pub fn is_fingerprint_trusted(db: &Db, fingerprint: &str) -> Result<bool> {
     Ok(count > 0)
 }
 
+// =========================================================================
+// huddle 0.7.7: pending friend requests
+// =========================================================================
+
+/// Pending inbound dial that the user hasn't yet acted on. Persisted so a
+/// brief absence (or app restart) doesn't lose the request. Auto-rejected
+/// when older than [`PENDING_FRIEND_REQUEST_TTL_SECS`] (3 days).
+#[derive(Debug, Clone)]
+pub struct PendingFriendRequest {
+    pub fingerprint: String,
+    pub address: String,
+    pub peer_id: String,
+    pub received_at: i64,
+}
+
+/// 3 days, in seconds. Anything older is auto-rejected by the startup
+/// sweep — long enough to cover a weekend away from the keyboard, short
+/// enough that an actively-malicious peer's pending row doesn't linger
+/// indefinitely.
+pub const PENDING_FRIEND_REQUEST_TTL_SECS: i64 = 3 * 24 * 60 * 60;
+
+pub fn upsert_pending_friend_request(db: &Db, req: &PendingFriendRequest) -> Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "INSERT INTO pending_friend_requests (fingerprint, address, peer_id, received_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(fingerprint, address) DO UPDATE SET
+           peer_id = excluded.peer_id,
+           received_at = excluded.received_at",
+        params![req.fingerprint, req.address, req.peer_id, req.received_at],
+    )?;
+    Ok(())
+}
+
+pub fn list_pending_friend_requests(db: &Db) -> Result<Vec<PendingFriendRequest>> {
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare(
+        "SELECT fingerprint, address, peer_id, received_at
+         FROM pending_friend_requests
+         ORDER BY received_at DESC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(PendingFriendRequest {
+            fingerprint: row.get(0)?,
+            address: row.get(1)?,
+            peer_id: row.get(2)?,
+            received_at: row.get(3)?,
+        })
+    })?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+/// Delete every row matching `fingerprint`. Both Accept and Reject paths
+/// clear all of the peer's pending rows at once — accepting one address
+/// implicitly accepts the peer, and we don't want a second row for the
+/// same fp to re-prompt later.
+pub fn delete_pending_friend_requests_for_fp(db: &Db, fingerprint: &str) -> Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "DELETE FROM pending_friend_requests WHERE fingerprint = ?1",
+        params![fingerprint],
+    )?;
+    Ok(())
+}
+
+/// Drop rows older than the TTL. Called once on startup; returns the
+/// number of rows pruned so callers can surface a status hint if any
+/// pending requests aged out while the user was offline.
+pub fn cleanup_expired_pending_friend_requests(db: &Db, now: i64) -> Result<usize> {
+    let cutoff = now - PENDING_FRIEND_REQUEST_TTL_SECS;
+    let conn = db.lock().unwrap();
+    let removed = conn.execute(
+        "DELETE FROM pending_friend_requests WHERE received_at < ?1",
+        params![cutoff],
+    )?;
+    Ok(removed)
+}
+
 /// Phase A: persistent blocklist. A fingerprint here means we explicitly
 /// rejected an inbound dial from this peer — every subsequent connection
 /// attempt is auto-disconnected without raising the modal.

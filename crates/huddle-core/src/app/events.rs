@@ -185,4 +185,18 @@ pub enum AppEvent {
     /// shut down, and the data dir was wiped. TUI shows a final
     /// "Goodbye" modal and exits the process.
     WentDark,
+    /// huddle 0.7.7: a user-initiated dial (`d` / `a` / paste-invite /
+    /// People-pane reconnect) connected, Identify completed, and we've
+    /// idempotently opened a DM with the freshly-identified peer. The
+    /// TUI listens for this and switches its pane to `Dm(room_id)` so
+    /// the user lands in a chat surface instead of having to hunt for
+    /// a way to message the peer they just dialed.
+    ///
+    /// Auto-reconnects on startup do NOT fire this — we consume the
+    /// address from `pending_auto_dm_addrs` and only the user-initiated
+    /// paths register there in the first place.
+    AutoOpenDm {
+        room_id: String,
+        fingerprint: String,
+    },
 }

@@ -142,6 +142,23 @@ fn render_member_margin(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme, 
         }
         lines.push(Line::from(spans));
     }
+    // huddle 0.7.7: visible affordance for the invite picker. Sits
+    // pinned at the bottom of the member margin so users discover the
+    // in-band invite flow without already knowing `Ctrl+I`. The label
+    // doubles as the keybinding hint — pressing Ctrl+I anywhere in the
+    // group fires `OpenInvitePicker`.
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("+ Add member", theme.warn_style()),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(" Ctrl+I", theme.dim()),
+        Span::styled(" picker  ", theme.dim()),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(" Shift+I", theme.dim()),
+        Span::styled(" OOB link", theme.dim()),
+    ]));
     let para = Paragraph::new(lines).block(
         Block::default()
             .borders(Borders::LEFT)

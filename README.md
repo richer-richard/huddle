@@ -441,6 +441,57 @@ your platform's Downloads folder. Phase 2 cap is 1 MiB per file.
   doesn't). Per-DM ephemeral ratchets (Double Ratchet-style) are a
   candidate follow-up.
 
+## What's new in 0.7.7 — friends, invites, and a fixed dial dead-end
+
+Three coordinated UX fixes around the "first contact" flow. Dialing a peer
+now actually opens a chat instead of dead-ending at a connection, the
+People pane shows real usernames, friend requests survive longer than
+15 seconds, and inviting peers to a group no longer requires pasting a
+link into Signal.
+
+- **Dial → DM auto-open.** When you initiate a dial (`d` IP:port, `a`
+  HD-ID, or paste-invite), the post-Identify handler now opens (or reuses)
+  a DM with the peer and switches your pane to the new `Dm(room_id)`. No
+  more "connected to 192.168.1.5" status with no way to chat. Auto-
+  reconnects and announcement-driven opportunistic dials do NOT trigger
+  this — only paths the user explicitly chose register an address in
+  `pending_auto_dm_addrs`.
+- **Usernames in Known peers.** The People pane's Known sublist now
+  renders each peer as `username · HD-XXXX-XXXX · address · last`,
+  pulling the username from the cached `peer_profiles` table. Falls back
+  to `[anonymous] · HD-pending` for peers we haven't yet seen a signed
+  `ProfileUpdate` from.
+- **Row actions actually fire.** The People pane header advertises
+  `m message · r reconnect · b block · x forget · u unblock`, but those
+  keystrokes were previously hitting the *global* handlers (e.g. `m`
+  opened an empty Compose-DM modal instead of DM'ing the selected peer).
+  Now they route to the selection-aware row actions. Tab cycles the
+  sub-tabs (Pending / Known / Verified / Blocked).
+- **Friend requests survive 3 days.** Previously an inbound dial modal
+  auto-rejected (with a `block_peer`!) after 15 seconds. Now the 15-second
+  timeout *spills the request* to a new `pending_friend_requests` table
+  and just disconnects the live socket; the user has up to 3 days to
+  Accept (re-dial + trust) or Reject (delete + block) from the People
+  pane's new "Pending requests" sublist. A startup sweep prunes rows
+  older than the TTL. The pane header shows `(N pending)` so a forgotten
+  request from yesterday is the first thing you see on landing.
+- **Invite picker — pick peers and they get the link auto-DM'd.** New
+  `Modal::InvitePicker` (Ctrl+I inside a group room; also reachable from
+  the `+ Add member` row pinned at the bottom of the member margin, and
+  from the command palette as `invite peers to room…`). Lists candidates
+  in three tiers — **Verified** (SAS-completed, safest), **DM partners**
+  (existing trust), **Known peers** (weakest) — with checkboxes, live
+  `/` filter, soft-cap of 20 selections per send. Enter sends: each
+  selected peer gets an idempotent DM (`start_direct`) containing the
+  same invite link `Shift+I` produces. `Shift+I` (OOB link copy) is
+  unchanged — the picker is purely additive for peers you already have
+  some trust relationship with.
+
+The dial-then-DM auto-open is the load-bearing fix: huddle now behaves
+the way a "basic social app" intuition expects — add someone, chat with
+them, invite them places — without users needing to memorize the
+fingerprint resolution flow under Compose-DM.
+
 ## What's new in 0.7.6 — Go Dark single-field flow
 
 A user report surfaced that the 0.5-era two-field Go Dark modal looked

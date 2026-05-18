@@ -50,6 +50,7 @@ pub fn render(f: &mut Frame, app: &TuiApp) {
         Modal::Error(msg) => modal::render_error(f, msg),
         Modal::Info(msg) => modal::render_info(f, msg),
         Modal::ComposeDm(s) => modal::render_compose_dm(f, s, app),
+        Modal::InvitePicker(s) => modal::render_invite_picker(f, s),
     }
 }
 

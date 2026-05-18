@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::app::{Modal, Pane, SidebarFocus, SidebarItem, TuiApp};
+use crate::app::{Modal, Pane, PeopleFocus, SidebarFocus, SidebarItem, TuiApp};
 
 #[derive(Debug)]
 pub enum Action {
@@ -42,6 +42,20 @@ pub enum Action {
     PeoplePersonUnblock,
     PeoplePersonForget,
     PeoplePersonStartDm,
+    /// huddle 0.7.7: pending-request row navigation + accept/reject.
+    PendingRequestUp,
+    PendingRequestDown,
+    PendingRequestAccept,
+    PendingRequestReject,
+    /// huddle 0.7.7: InvitePicker actions.
+    OpenInvitePicker,
+    InvitePickerCursorUp,
+    InvitePickerCursorDown,
+    InvitePickerToggleSelected,
+    InvitePickerFilterTypeChar(char),
+    InvitePickerFilterBackspace,
+    InvitePickerSend,
+    InvitePickerCancel,
     // Start room modal
     StartRoomNextField,
     StartRoomToggleEncrypted,
@@ -521,6 +535,22 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
             KeyCode::Char(c) => Action::ComposeDmTypeChar(c),
             _ => Action::Nothing,
         },
+        Modal::InvitePicker(_) => match key.code {
+            KeyCode::Esc => Action::InvitePickerCancel,
+            KeyCode::Enter => Action::InvitePickerSend,
+            KeyCode::Up | KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Action::InvitePickerCursorUp
+            }
+            KeyCode::Down | KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Action::InvitePickerCursorDown
+            }
+            KeyCode::Up => Action::InvitePickerCursorUp,
+            KeyCode::Down => Action::InvitePickerCursorDown,
+            KeyCode::Char(' ') => Action::InvitePickerToggleSelected,
+            KeyCode::Backspace => Action::InvitePickerFilterBackspace,
+            KeyCode::Char(c) => Action::InvitePickerFilterTypeChar(c),
+            _ => Action::Nothing,
+        },
         Modal::None => map_normal(key, app),
     }
 }
@@ -552,6 +582,45 @@ fn map_sidebar(key: KeyEvent, app: &TuiApp) -> Action {
             KeyCode::Char('W') => return Action::OpenWhatsNew,
             _ => {}
         }
+    }
+    // huddle 0.7.7: People-pane row bindings. The pane header advertises
+    // `m message · r reconnect · b block · u unblock · x forget`, but
+    // those keystrokes previously hit the *global* handlers (e.g. `m`
+    // opened an empty Compose-DM modal). When a Known-peers row is
+    // focused, route them to the selection-aware actions.
+    if matches!(app.pane, Pane::People) && app.people_focus == PeopleFocus::Known {
+        match key.code {
+            KeyCode::Char('m') => return Action::PeoplePersonStartDm,
+            KeyCode::Char('r') => return Action::PeoplePersonReconnect,
+            KeyCode::Char('b') => return Action::PeoplePersonBlock,
+            KeyCode::Char('x') => return Action::PeoplePersonForget,
+            _ => {}
+        }
+    }
+    if matches!(app.pane, Pane::People) && app.people_focus == PeopleFocus::Blocked {
+        if let KeyCode::Char('u') = key.code {
+            return Action::PeoplePersonUnblock;
+        }
+    }
+    // huddle 0.7.7: Pending-requests sublist bindings. `a` Accept (re-
+    // dial + trust), `r` Reject (delete + block). Up/Down move the
+    // cursor. `a` overlaps the global "add friend" letter — Pane::People
+    // + Pending focus disambiguates so the row action wins here only.
+    if matches!(app.pane, Pane::People) && app.people_focus == PeopleFocus::Pending {
+        match key.code {
+            KeyCode::Char('a') | KeyCode::Enter => return Action::PendingRequestAccept,
+            KeyCode::Char('r') => return Action::PendingRequestReject,
+            KeyCode::Char('j') | KeyCode::Down => return Action::PendingRequestDown,
+            KeyCode::Char('k') | KeyCode::Up => return Action::PendingRequestUp,
+            _ => {}
+        }
+    }
+    // huddle 0.7.7: Tab inside the People pane cycles the sub-tab
+    // (Pending / Known / Verified / Blocked) — the pane header
+    // advertises "Tab switches lists" but the action was never
+    // wired up. Keeps sidebar-section Tab working everywhere else.
+    if matches!(app.pane, Pane::People) && key.code == KeyCode::Tab {
+        return Action::PeopleFocusNext;
     }
     // Cross-pane shortcuts — work anywhere the sidebar has focus,
     // including from Welcome/People/Activity/Settings panes. Go Dark
@@ -623,6 +692,11 @@ fn map_in_room(key: KeyEvent, app: &TuiApp) -> Action {
             KeyCode::Char('o') if !input_active => Action::ToggleRoomVerifiedOnly,
             KeyCode::Char('j') if !input_active => Action::OpenGenerateJoinCode,
             KeyCode::Char('I') if !input_active => Action::GenerateInvite,
+            // huddle 0.7.7: in-band invite picker. Opens a multi-select
+            // candidate list; on confirm, DMs the invite link to each
+            // selected peer. `Shift+I` (above) still generates the OOB
+            // link for paste-into-Signal flows — both coexist.
+            KeyCode::Char('i') if !input_active => Action::OpenInvitePicker,
             _ => Action::Nothing,
         };
     }

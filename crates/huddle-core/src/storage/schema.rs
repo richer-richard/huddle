@@ -172,4 +172,24 @@ pub const MIGRATIONS: &[&str] = &[
     // enforcement) and are filtered out of third parties' discovery
     // caches.
     "ALTER TABLE rooms ADD COLUMN kind TEXT NOT NULL DEFAULT 'group';",
+    // huddle 0.7.7: pending inbound friend requests. When an `InboundDial`
+    // modal isn't acted on within the 15s in-memory window, we spill the
+    // request here instead of just rejecting — the user gets up to 3 days
+    // to review and accept (or reject) later from the People pane.
+    //
+    // Primary key is (fingerprint, address) so a peer who dials from
+    // multiple addresses (LAN + relay-circuit) gets one row per address.
+    // On Accept we re-dial the stored address and run the same trust
+    // upsert as `trust_inbound`. A startup sweep drops rows older than
+    // 3 days (`PENDING_FRIEND_REQUEST_TTL_SECS`), so the table size
+    // stays bounded without an extra background task.
+    "CREATE TABLE IF NOT EXISTS pending_friend_requests (
+        fingerprint TEXT NOT NULL,
+        address TEXT NOT NULL,
+        peer_id TEXT NOT NULL,
+        received_at INTEGER NOT NULL,
+        PRIMARY KEY (fingerprint, address)
+    );",
+    "CREATE INDEX IF NOT EXISTS idx_pending_friend_requests_received
+       ON pending_friend_requests(received_at);",
 ];

@@ -309,6 +309,11 @@ impl Default for SidebarState {
 /// action targeting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PeopleFocus {
+    /// huddle 0.7.7: pending inbound friend requests, spilled to disk
+    /// when their 15s modal window times out. First tab so a forgotten
+    /// request from earlier is the first thing the user sees on
+    /// landing in People.
+    Pending,
     Known,
     Verified,
     Blocked,
@@ -409,6 +414,12 @@ pub enum Modal {
     /// when `handle.update_check_enabled().is_none()`. Yes records
     /// the user opted in and triggers the first poll; No disables.
     UpdateCheckOptIn,
+    /// huddle 0.7.7: pick known peers and auto-DM them an invite to
+    /// the current group room. Tiered candidate list (Verified → DM
+    /// partners → Known peers), multi-select with `/` filter and a
+    /// soft-cap. `Shift+I` keeps the OOB link flow; this is the
+    /// in-band picker.
+    InvitePicker(InvitePickerState),
     QuitConfirm,
     Help,
     Error(String),
@@ -567,6 +578,61 @@ pub struct InboundDialState {
     /// time, so a user who never sees the modal won't accidentally
     /// keep an unknown peer attached forever.
     pub opened_at: Instant,
+}
+
+/// huddle 0.7.7: tier label for an `InviteCandidate`. Drives section
+/// headers in the picker and sort order (Verified at the top, then DM
+/// partners, then plain Known peers).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum InviteTier {
+    /// SAS-verified peer. Safest to in-band-DM an invite — we have
+    /// strong, OOB-confirmed assurance this peer is who they claim.
+    Verified,
+    /// We already have a DM open with this peer. Implies prior trust
+    /// (we initiated the DM, they accepted, or vice versa).
+    DmPartner,
+    /// A known dial peer with a learned fingerprint. Trust is weaker —
+    /// we just have proof they own the Ed25519 key behind this address.
+    Known,
+}
+
+#[derive(Debug, Clone)]
+pub struct InviteCandidate {
+    pub fingerprint: String,
+    pub username: Option<String>,
+    pub tier: InviteTier,
+}
+
+/// huddle 0.7.7: maximum number of peers selectable per send. Beyond
+/// this we surface a hint and refuse to add more. Two-fold purpose:
+/// (a) gently discourage spam-blasting, (b) keep the auto-send batch
+/// snappy — every `start_direct` + `send_room_message` is a sequential
+/// gossipsub publish.
+pub const INVITE_PICKER_SOFT_CAP: usize = 20;
+
+#[derive(Debug, Clone, Default)]
+pub struct InvitePickerState {
+    /// Room we're inviting *into*. Captured at open time so the
+    /// generated invite stays consistent if the user switches panes
+    /// while the modal is open (modals survive pane changes).
+    pub room_id: String,
+    pub room_name: String,
+    /// All deduped candidates, pre-sorted by tier. Filter narrows the
+    /// rendered slice but never mutates this list.
+    pub candidates: Vec<InviteCandidate>,
+    /// Fingerprints currently checked. Insertion-order isn't visible,
+    /// but capped at `INVITE_PICKER_SOFT_CAP`.
+    pub selected: HashSet<String>,
+    /// Live filter input. Matches case-insensitively against username
+    /// AND short HD-ID prefix.
+    pub filter: String,
+    /// Cursor in the *filtered* slice. Reset to 0 every time the
+    /// filter changes.
+    pub cursor: usize,
+    /// Non-fatal user-feedback line shown above the hint bar. Cleared
+    /// on the next keystroke. Used for "20-selection cap reached" and
+    /// post-send status.
+    pub status_line: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -801,6 +867,12 @@ pub struct TuiApp {
     pub selected_known_idx: usize,
     /// huddle 0.7: cursor inside the People pane's Blocked sublist.
     pub selected_blocked_idx: usize,
+    /// huddle 0.7.7: cursor inside the People pane's Pending sublist.
+    pub selected_pending_idx: usize,
+    /// huddle 0.7.7: cached snapshot of `pending_friend_requests` rows
+    /// rendered in the People pane. Refreshed on People focus, after
+    /// accept/reject, and after the 15s spill.
+    pub pending_requests: Vec<huddle_core::storage::repo::PendingFriendRequest>,
     pub modal: Modal,
     /// huddle 0.6: a FIFO queue of async-event modals (errors, rotation
     /// requests, inbound dials) that arrived while another modal held
@@ -891,6 +963,9 @@ impl TuiApp {
     pub fn new(handle: AppHandle) -> Self {
         let mode = handle.mode();
         let known_peers = handle.known_peers();
+        // huddle 0.7.7: capture the pending-request snapshot before
+        // `handle` is moved into Self so we don't pay a clone.
+        let pending_requests = handle.list_pending_friend_requests();
         // huddle 0.6: onboarding-pages-to-show is now version-driven.
         // First-launch users see every page; upgrading users see only
         // the "what's new in X.Y" page for releases newer than their
@@ -920,6 +995,8 @@ impl TuiApp {
             people_focus: PeopleFocus::default(),
             selected_known_idx: 0,
             selected_blocked_idx: 0,
+            selected_pending_idx: 0,
+            pending_requests,
             modal: Modal::None,
             pending_modals,
             discovered_rooms: Vec::new(),
@@ -1007,6 +1084,19 @@ impl TuiApp {
         self.known_peers = self.handle.known_peers();
         if self.selected_known_idx >= self.known_peers.len() && !self.known_peers.is_empty() {
             self.selected_known_idx = self.known_peers.len() - 1;
+        }
+    }
+
+    /// huddle 0.7.7: re-snapshot the pending-requests list from disk.
+    /// Called on People focus, after accept/reject, and after the 15s
+    /// spill. Re-clamps the cursor so it doesn't dangle past the last
+    /// row when the list shrinks.
+    pub fn refresh_pending_requests(&mut self) {
+        self.pending_requests = self.handle.list_pending_friend_requests();
+        if self.selected_pending_idx >= self.pending_requests.len()
+            && !self.pending_requests.is_empty()
+        {
+            self.selected_pending_idx = self.pending_requests.len() - 1;
         }
     }
 
@@ -1497,6 +1587,24 @@ impl TuiApp {
                     "Goodbye. huddle has gone dark. Restart to begin fresh.".into(),
                 );
                 self.went_dark_at = Some(std::time::Instant::now());
+            }
+            AppEvent::AutoOpenDm {
+                room_id,
+                fingerprint,
+            } => {
+                // huddle 0.7.7: a user-initiated dial connected and
+                // Identify landed. Switch into the DM pane so the user
+                // can immediately chat without manually navigating.
+                // Username (if cached) goes in the status hint so a
+                // first-time peer with no profile still gets a clear
+                // breadcrumb.
+                let label = self
+                    .handle
+                    .lookup_username(&fingerprint)
+                    .unwrap_or_else(|| format!("HD-{}", short_fp(&fingerprint).to_uppercase()));
+                self.refresh_known_peers();
+                self.switch_to_room(&room_id);
+                self.set_status(format!("connected — chatting with {}", label));
             }
         }
     }
@@ -2192,9 +2300,13 @@ async fn main_loop(
             }
         }
 
-        // Phase A: auto-reject an inbound-dial modal that's been
-        // ignored for 15s. We don't want to leave an unknown peer
-        // connected just because the user walked away.
+        // Phase A: an inbound-dial modal that's been ignored for 15s
+        // gets spilled to the persistent `pending_friend_requests`
+        // table (huddle 0.7.7). The live libp2p connection is closed
+        // so we don't leave an unknown peer attached — but the
+        // *request* lives on for up to 3 days, viewable + acceptable
+        // from the People pane. A startup sweep removes rows older
+        // than the TTL so the table stays bounded.
         let auto_reject_state: Option<InboundDialState> =
             if let Modal::InboundDial(s) = &app.modal {
                 if s.opened_at.elapsed() >= Duration::from_secs(15) {
@@ -2206,9 +2318,25 @@ async fn main_loop(
                 None
             };
         if let Some(s) = auto_reject_state {
-            let _ = app.handle.reject_inbound(s.peer_id, &s.fingerprint).await;
-            app.set_status(format!("auto-rejected {} (timeout)", short_fp(&s.fingerprint)));
+            // Persist first so a failed reject_inbound doesn't drop
+            // the request on the floor.
+            if let Err(e) =
+                app.handle
+                    .spill_pending_friend_request(s.peer_id, &s.fingerprint, &s.address)
+            {
+                tracing::warn!(%e, "failed to spill pending friend request");
+            }
+            // Disconnect-only — do NOT block_peer. The user hasn't
+            // decided yet; reject_inbound's block was appropriate for
+            // a transient 15s timeout but blocks a peer permanently,
+            // which contradicts "remember the request for 3 days".
+            app.handle.disconnect_peer(s.peer_id).await;
+            app.set_status(format!(
+                "saved request from {} — review in People → Pending",
+                short_fp(&s.fingerprint)
+            ));
             app.modal = Modal::None;
+            app.refresh_pending_requests();
         }
 
         if poll(Duration::from_millis(33))? {
@@ -3871,6 +3999,15 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
         Action::JumpToPeoplePane => {
             app.pane = Pane::People;
             app.sidebar.selection = SidebarItem::Section(SidebarSection::People);
+            // huddle 0.7.7: pull fresh pending-request rows so the
+            // section count is right + the cursor stays in range. If
+            // there are pending requests, land on that tab — that's
+            // where the user almost certainly wants to look first.
+            app.refresh_pending_requests();
+            if !app.pending_requests.is_empty() {
+                app.people_focus = PeopleFocus::Pending;
+                app.selected_pending_idx = 0;
+            }
             Ok(false)
         }
         Action::JumpToSettingsPane => {
@@ -3931,12 +4068,237 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             app.show_member_margin = !app.show_member_margin;
             Ok(false)
         }
+        Action::OpenInvitePicker => {
+            // Picker only makes sense inside a group room — the
+            // generated invite has to scope to *some* room, and DMs
+            // can't take a third member by design. From any other
+            // pane (Welcome, Profile, People, Activity, Settings) we
+            // surface a status hint and bail.
+            let (room_id, room_name, is_group) = match app.active_room() {
+                Some(r) => {
+                    let info = app.handle.active_room_info(&r.room_id);
+                    let is_group = info
+                        .as_ref()
+                        .map(|i| i.kind != huddle_core::storage::repo::RoomKind::Direct)
+                        .unwrap_or(false);
+                    (
+                        r.room_id.clone(),
+                        info.map(|i| i.name).unwrap_or_default(),
+                        is_group,
+                    )
+                }
+                None => {
+                    app.set_status("open a group first — `Shift+I` for OOB or `s` to create");
+                    return Ok(false);
+                }
+            };
+            if !is_group {
+                app.set_status("DMs are 1-1 by design — open a group to invite peers");
+                return Ok(false);
+            }
+            let candidates = gather_invite_candidates(app, &room_id);
+            if candidates.is_empty() {
+                app.set_status(
+                    "no peers to invite yet — verify someone with Ctrl+V or share `Shift+I` OOB",
+                );
+                return Ok(false);
+            }
+            app.modal = Modal::InvitePicker(InvitePickerState {
+                room_id,
+                room_name,
+                candidates,
+                selected: HashSet::new(),
+                filter: String::new(),
+                cursor: 0,
+                status_line: None,
+            });
+            Ok(false)
+        }
+        Action::InvitePickerCancel => {
+            app.modal = Modal::None;
+            Ok(false)
+        }
+        Action::InvitePickerFilterTypeChar(c) => {
+            if let Modal::InvitePicker(s) = &mut app.modal {
+                s.filter.push(c);
+                s.cursor = 0;
+                s.status_line = None;
+            }
+            Ok(false)
+        }
+        Action::InvitePickerFilterBackspace => {
+            if let Modal::InvitePicker(s) = &mut app.modal {
+                s.filter.pop();
+                s.cursor = 0;
+                s.status_line = None;
+            }
+            Ok(false)
+        }
+        Action::InvitePickerCursorUp => {
+            if let Modal::InvitePicker(s) = &mut app.modal {
+                if s.cursor > 0 {
+                    s.cursor -= 1;
+                }
+                s.status_line = None;
+            }
+            Ok(false)
+        }
+        Action::InvitePickerCursorDown => {
+            if let Modal::InvitePicker(s) = &mut app.modal {
+                let visible_len = filtered_invite_candidates(s).len();
+                if s.cursor + 1 < visible_len {
+                    s.cursor += 1;
+                }
+                s.status_line = None;
+            }
+            Ok(false)
+        }
+        Action::InvitePickerToggleSelected => {
+            if let Modal::InvitePicker(s) = &mut app.modal {
+                let visible = filtered_invite_candidates(s);
+                if let Some(c) = visible.get(s.cursor).cloned() {
+                    if s.selected.contains(&c.fingerprint) {
+                        s.selected.remove(&c.fingerprint);
+                        s.status_line = None;
+                    } else if s.selected.len() >= INVITE_PICKER_SOFT_CAP {
+                        s.status_line = Some(format!(
+                            "selection cap: {} max per send",
+                            INVITE_PICKER_SOFT_CAP
+                        ));
+                    } else {
+                        s.selected.insert(c.fingerprint);
+                        s.status_line = None;
+                    }
+                }
+            }
+            Ok(false)
+        }
+        Action::InvitePickerSend => {
+            let (room_id, selected_fps) = match &app.modal {
+                Modal::InvitePicker(s) => {
+                    if s.selected.is_empty() {
+                        if let Modal::InvitePicker(s2) = &mut app.modal {
+                            s2.status_line = Some(
+                                "Space to select peers · Enter sends · Esc cancels".into(),
+                            );
+                        }
+                        return Ok(false);
+                    }
+                    (s.room_id.clone(), s.selected.iter().cloned().collect::<Vec<_>>())
+                }
+                _ => return Ok(false),
+            };
+            // Build the invite link exactly once — same code path as
+            // `Shift+I` but scoped to the captured room. Failure here
+            // is structural (no listen address yet) and shows an error.
+            let invite_text = match build_room_invite_link(app, &room_id) {
+                Ok(t) => t,
+                Err(e) => {
+                    if let Modal::InvitePicker(s) = &mut app.modal {
+                        s.status_line = Some(format!("invite build failed: {e}"));
+                    }
+                    return Ok(false);
+                }
+            };
+            let mut sent = 0usize;
+            let mut failures: Vec<String> = Vec::new();
+            for fp in &selected_fps {
+                let dm_room_id = match app.handle.start_direct(fp).await {
+                    Ok(rid) => rid,
+                    Err(e) => {
+                        failures.push(format!("{}: {}", short_fp(fp), e));
+                        continue;
+                    }
+                };
+                match app.handle.send_room_message(&dm_room_id, &invite_text).await {
+                    Ok(()) => sent += 1,
+                    Err(e) => failures.push(format!("{}: {}", short_fp(fp), e)),
+                }
+            }
+            app.modal = Modal::None;
+            if failures.is_empty() {
+                app.set_status(format!("sent invite to {} peer(s)", sent));
+            } else {
+                app.set_status(format!(
+                    "sent to {}; failed for {}",
+                    sent,
+                    failures.len()
+                ));
+                tracing::warn!(?failures, "invite-picker send had partial failures");
+            }
+            Ok(false)
+        }
         Action::PeopleFocusNext => {
+            // huddle 0.7.7: Pending joins the rotation. Skipped when
+            // empty so the cycle doesn't land on an empty tab the
+            // user can't act on. Known is always present (even with
+            // zero peers, it shows the "no known peers" hint), so
+            // it's the safe fallback at the end.
+            app.refresh_pending_requests();
+            let has_pending = !app.pending_requests.is_empty();
             app.people_focus = match app.people_focus {
+                PeopleFocus::Pending => PeopleFocus::Known,
                 PeopleFocus::Known => PeopleFocus::Verified,
                 PeopleFocus::Verified => PeopleFocus::Blocked,
-                PeopleFocus::Blocked => PeopleFocus::Known,
+                PeopleFocus::Blocked => {
+                    if has_pending {
+                        PeopleFocus::Pending
+                    } else {
+                        PeopleFocus::Known
+                    }
+                }
             };
+            Ok(false)
+        }
+        Action::PendingRequestUp => {
+            if app.selected_pending_idx > 0 {
+                app.selected_pending_idx -= 1;
+            }
+            Ok(false)
+        }
+        Action::PendingRequestDown => {
+            if app.selected_pending_idx + 1 < app.pending_requests.len() {
+                app.selected_pending_idx += 1;
+            }
+            Ok(false)
+        }
+        Action::PendingRequestAccept => {
+            let fp = app
+                .pending_requests
+                .get(app.selected_pending_idx)
+                .map(|r| r.fingerprint.clone());
+            if let Some(fp) = fp {
+                match app.handle.accept_pending_friend_request(&fp).await {
+                    Ok(()) => {
+                        app.set_status(format!("re-dialing {} …", short_fp(&fp)));
+                    }
+                    Err(e) => {
+                        app.modal = Modal::Error(format!("accept failed: {e}"));
+                    }
+                }
+                app.refresh_pending_requests();
+                if app.pending_requests.is_empty() {
+                    app.people_focus = PeopleFocus::Known;
+                }
+            }
+            Ok(false)
+        }
+        Action::PendingRequestReject => {
+            let fp = app
+                .pending_requests
+                .get(app.selected_pending_idx)
+                .map(|r| r.fingerprint.clone());
+            if let Some(fp) = fp {
+                if let Err(e) = app.handle.reject_pending_friend_request(&fp) {
+                    app.modal = Modal::Error(format!("reject failed: {e}"));
+                } else {
+                    app.set_status(format!("rejected + blocked {}", short_fp(&fp)));
+                }
+                app.refresh_pending_requests();
+                if app.pending_requests.is_empty() {
+                    app.people_focus = PeopleFocus::Known;
+                }
+            }
             Ok(false)
         }
         Action::PeoplePersonReconnect => {
@@ -3949,9 +4311,14 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
         }
         Action::PeoplePersonBlock => {
             if let Some(p) = app.known_peers.get(app.selected_known_idx).cloned() {
-                if let Some(fp) = p.label.as_deref() {
+                // huddle 0.7.7: read from `fingerprint`, not `label`
+                // (label is only set on add-by-id / username-resolved
+                // peers; plain `d` dial peers leave it as None).
+                if let Some(fp) = p.fingerprint.as_deref() {
                     let _ = app.handle.block_peer(fp);
                     app.set_status(format!("blocked {}", short_fp(fp)));
+                } else {
+                    app.set_status("can't block — fingerprint not learned yet (try after Identify)");
                 }
             }
             Ok(false)
@@ -3973,11 +4340,16 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
         }
         Action::PeoplePersonStartDm => {
             if let Some(p) = app.known_peers.get(app.selected_known_idx).cloned() {
-                if let Some(fp) = p.label.clone() {
+                // huddle 0.7.7: use `fingerprint` (populated post-Identify
+                // for every dialed peer). Previously this used `label`,
+                // which is `None` for plain `d` dials — silently no-op'd.
+                if let Some(fp) = p.fingerprint.clone() {
                     match app.handle.start_direct(&fp).await {
                         Ok(rid) => app.switch_to_room(&rid),
                         Err(e) => app.modal = Modal::Error(format!("DM failed: {e}")),
                     }
+                } else {
+                    app.set_status("can't DM yet — peer hasn't identified (try after they connect)");
                 }
             }
             Ok(false)
@@ -4022,6 +4394,162 @@ fn focused_card_info(
 }
 
 // =========================================================================
+// huddle 0.7.7: InvitePicker helpers
+// =========================================================================
+
+/// Build the tiered candidate list for the invite picker. Ordering:
+///   1. Verified peers — SAS-completed; safest to in-band-DM.
+///   2. DM partners — we already have a DM open with them.
+///   3. Known peers — dialed at some point; weakest trust signal.
+///
+/// Dedup is fp-keyed: a peer who's both verified AND a DM partner
+/// shows once at the highest tier. We filter out:
+///   - our own fingerprint
+///   - peers already in the room (no point inviting them)
+///   - blocked peers (would silently fail anyway, and confusing UX)
+///   - peers we don't have a username/profile cached for AND no
+///     fingerprint (can't render or address them)
+pub fn gather_invite_candidates(
+    app: &TuiApp,
+    room_id: &str,
+) -> Vec<InviteCandidate> {
+    let our_fp = app.handle.fingerprint().to_string();
+    let in_room: HashSet<String> = app.handle.room_members(room_id).into_iter().collect();
+    let blocked: HashSet<String> = app.handle.list_blocked_peers().into_iter().collect();
+
+    let mut out: Vec<InviteCandidate> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut push = |list: &mut Vec<InviteCandidate>,
+                    seen: &mut HashSet<String>,
+                    fp: String,
+                    tier: InviteTier,
+                    username: Option<String>| {
+        if seen.insert(fp.clone()) {
+            list.push(InviteCandidate {
+                fingerprint: fp,
+                username,
+                tier,
+            });
+        }
+    };
+
+    // Tier 1: Verified (highest trust). lookup_username falls back to None
+    // for peers that haven't broadcast a ProfileUpdate yet.
+    for fp in app.handle.list_verified_peers() {
+        if fp == our_fp || in_room.contains(&fp) || blocked.contains(&fp) {
+            continue;
+        }
+        let name = app.handle.lookup_username(&fp);
+        push(&mut out, &mut seen, fp, InviteTier::Verified, name);
+    }
+
+    // Tier 2: DM partners. Iterate active rooms; pick out those whose
+    // `kind` is Direct, then ask for the other member's fingerprint.
+    for rid in app.handle.active_room_ids() {
+        let info = match app.handle.active_room_info(&rid) {
+            Some(i) => i,
+            None => continue,
+        };
+        if info.kind != huddle_core::storage::repo::RoomKind::Direct {
+            continue;
+        }
+        if let Some(partner) = app.handle.dm_partner_fingerprint(&rid) {
+            if partner == our_fp
+                || in_room.contains(&partner)
+                || blocked.contains(&partner)
+            {
+                continue;
+            }
+            let name = app.handle.lookup_username(&partner);
+            push(&mut out, &mut seen, partner, InviteTier::DmPartner, name);
+        }
+    }
+
+    // Tier 3: Known peers with a learned fingerprint. Skip peers
+    // we couldn't dedup-skip earlier (already verified or in DM).
+    for p in &app.known_peers {
+        if let Some(fp) = &p.fingerprint {
+            if fp == &our_fp || in_room.contains(fp) || blocked.contains(fp) {
+                continue;
+            }
+            let name = app.handle.lookup_username(fp);
+            push(&mut out, &mut seen, fp.clone(), InviteTier::Known, name);
+        }
+    }
+
+    out
+}
+
+/// Apply the picker's filter to its candidate slice. Match is
+/// case-insensitive against the cached username AND the short HD-ID
+/// prefix. Empty filter returns every candidate in tier order.
+/// Returns owned clones so the caller can use it across mutable
+/// borrows of the modal state.
+pub fn filtered_invite_candidates(state: &InvitePickerState) -> Vec<InviteCandidate> {
+    if state.filter.is_empty() {
+        return state.candidates.clone();
+    }
+    let needle = state.filter.to_lowercase();
+    state
+        .candidates
+        .iter()
+        .filter(|c| {
+            if let Some(u) = &c.username {
+                if u.to_lowercase().contains(&needle) {
+                    return true;
+                }
+            }
+            let short = crate::ui::short_fp(&c.fingerprint).to_lowercase();
+            short.starts_with(&needle) || needle.starts_with("hd-") && {
+                let after = needle.trim_start_matches("hd-").to_lowercase();
+                short.starts_with(&after)
+            }
+        })
+        .cloned()
+        .collect()
+}
+
+/// Build a room-scoped invite link the same way `Action::GenerateInvite`
+/// does — but reusable so the InvitePicker can call it without
+/// duplicating the listen-address / encode dance. Errors when we don't
+/// have a listen address yet (transient startup state).
+pub fn build_room_invite_link(app: &TuiApp, room_id: &str) -> anyhow::Result<String> {
+    use anyhow::anyhow;
+    let our_peer = app.handle.peer_id().to_string();
+    let our_fp = app.handle.fingerprint().to_string();
+    let listen = app
+        .listen_addresses
+        .first()
+        .ok_or_else(|| anyhow!("no listen address yet — try again in a sec"))?
+        .clone();
+    let host_multiaddr = format!("{}/p2p/{}", listen, our_peer);
+
+    let info = app
+        .handle
+        .active_room_info(room_id)
+        .ok_or_else(|| anyhow!("room not active locally"))?;
+    let salt_b64 = info.passphrase_salt.as_ref().map(|s| {
+        base64::engine::general_purpose::STANDARD.encode(s)
+    });
+    let room = huddle_core::invite::InviteRoom {
+        id: info.id,
+        name: info.name,
+        encrypted: info.encrypted,
+        salt_b64,
+        creator_fingerprint: info.creator_fingerprint,
+        owner_fingerprints: app.handle.room_owners(room_id),
+    };
+    let invite = huddle_core::invite::InviteLink {
+        v: 1,
+        host_multiaddr,
+        fingerprint: our_fp,
+        room: Some(room),
+    };
+    huddle_core::invite::encode(&invite)
+        .map_err(|e| anyhow!("encode failed: {e}"))
+}
+
+// =========================================================================
 // huddle 0.6: command palette
 // =========================================================================
 
@@ -4050,6 +4578,10 @@ const EXTRA_PALETTE_ENTRIES: &[PaletteEntry] = &[
     PaletteEntry {
         label: "clear notification history",
         keys: "Ctrl+H · c",
+    },
+    PaletteEntry {
+        label: "invite peers to room…",
+        keys: "Ctrl+I",
     },
 ];
 
@@ -4194,6 +4726,9 @@ pub async fn run_palette_action(label: &str, app: &mut TuiApp) -> Result<bool> {
         }
         "clear notification history" => {
             return Box::pin(handle_action(Action::ClearStatusHistory, app)).await;
+        }
+        "invite peers to room…" => {
+            return Box::pin(handle_action(Action::OpenInvitePicker, app)).await;
         }
         other => {
             app.set_status(format!("no dispatch for '{}'", other));
