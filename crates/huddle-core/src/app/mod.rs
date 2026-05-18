@@ -241,6 +241,22 @@ impl AppHandle {
         Self::start_with_options(NetworkMode::Mdns, 0, None, Vec::new()).await
     }
 
+    /// huddle 0.7.8: peek the persisted `mdns_enabled` setting without
+    /// starting the full AppHandle. Called by `main.rs` before
+    /// `start_with_options` so the initial `NetworkMode` reflects the
+    /// user's saved preference (the CLI `--mode` flag, when present,
+    /// still wins — `main.rs` only calls this if `--mode` is absent).
+    /// Returns `true` if the key is missing (default ON, preserving
+    /// pre-0.7.8 behavior).
+    pub fn peek_mdns_enabled(master_key: Option<&[u8; 32]>) -> Result<bool> {
+        config::ensure_data_dir()?;
+        let db = storage::open_db(&config::db_path(), master_key)?;
+        let v = repo::get_setting(&db, "mdns_enabled")?
+            .map(|s| s == "1")
+            .unwrap_or(true);
+        Ok(v)
+    }
+
     pub async fn start_with_options(
         mode: NetworkMode,
         port: u16,
@@ -3422,6 +3438,54 @@ impl AppHandle {
 
     pub fn set_verified_only_inbound(&self, on: bool) -> Result<()> {
         repo::set_setting(&self.db, "verified_only_inbound", if on { "1" } else { "0" })
+    }
+
+    /// huddle 0.7.8: persisted LAN-discovery toggle. When true, the
+    /// next launch starts in `NetworkMode::Mdns` so the device joins
+    /// LAN mDNS announcements. When false, the next launch starts in
+    /// `NetworkMode::Direct` — invisible to LAN broadcast; only direct
+    /// dial / invite link / configured relays can establish a peer.
+    /// Default ON so existing users see no behavior change. Restart
+    /// required to apply (libp2p's `Toggle<Mdns>` flip would require a
+    /// behaviour rebuild; not worth the complexity for a rarely-touched
+    /// setting).
+    pub fn mdns_enabled(&self) -> bool {
+        repo::get_setting(&self.db, "mdns_enabled")
+            .unwrap_or(None)
+            .map(|v| v == "1")
+            .unwrap_or(true)
+    }
+
+    pub fn set_mdns_enabled(&self, on: bool) -> Result<()> {
+        repo::set_setting(&self.db, "mdns_enabled", if on { "1" } else { "0" })
+    }
+
+    /// huddle 0.7.8: persisted desktop-notification opt-out. The
+    /// notifier itself is a local-only `osascript`/`notify-send`
+    /// process call — toggling this OFF skips the call entirely so
+    /// nothing reaches the OS notification daemon. Default ON to
+    /// preserve current behavior.
+    pub fn notifications_enabled(&self) -> bool {
+        repo::get_setting(&self.db, "notifications_enabled")
+            .unwrap_or(None)
+            .map(|v| v == "1")
+            .unwrap_or(true)
+    }
+
+    pub fn set_notifications_enabled(&self, on: bool) -> Result<()> {
+        repo::set_setting(
+            &self.db,
+            "notifications_enabled",
+            if on { "1" } else { "0" },
+        )
+    }
+
+    /// huddle 0.7.8: stable 12-hex Safety Code derived from our Ed25519
+    /// pubkey. Display-only; used as a quick visual fingerprint match in
+    /// Profile / Account. SAS-via-emoji remains the actual verification
+    /// primitive.
+    pub fn safety_code(&self) -> String {
+        crate::identity::safety_code(&self.identity.public_bytes())
     }
 
     /// Phase E: per-room verified-only-join. When true, the host (and

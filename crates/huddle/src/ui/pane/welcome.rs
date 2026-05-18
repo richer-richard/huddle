@@ -44,11 +44,11 @@ pub fn render(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme) {
         )]),
         Line::raw(""),
         Line::from(vec![Span::styled(
-            "huddle is a terminal-native chat app: peer-to-peer, encrypted, no central server.",
+            "huddle is a terminal-native chat app — no servers, no accounts, end-to-end encrypted.",
             theme.dim(),
         )]),
         Line::from(vec![Span::styled(
-            "Pick a section in the sidebar, or use one of these quick actions:",
+            "Three parallel ways to connect: LAN (mDNS) · direct IP dial · invite link.",
             theme.dim(),
         )]),
         Line::raw(""),
@@ -65,18 +65,18 @@ pub fn render(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme) {
 
     let more_lines = vec![
         Line::from(vec![
+            Span::styled("  d  ", theme.warn_style()),
+            Span::styled("dial a peer by HD-ID + address (cross-network)", theme.text_style()),
+        ]),
+        Line::from(vec![
             Span::styled("  ,  ", theme.warn_style()),
             Span::styled("settings", theme.text_style()),
             Span::raw("       "),
             Span::styled("  i  ", theme.warn_style()),
-            Span::styled("show your QR / HD-ID", theme.text_style()),
-        ]),
-        Line::from(vec![
-            Span::styled("  ?  ", theme.warn_style()),
-            Span::styled("keybindings", theme.text_style()),
-            Span::raw("    "),
+            Span::styled("QR / HD-ID", theme.text_style()),
+            Span::raw("       "),
             Span::styled("  Ctrl+P  ", theme.warn_style()),
-            Span::styled("command palette", theme.text_style()),
+            Span::styled("palette", theme.text_style()),
         ]),
     ];
     f.render_widget(Paragraph::new(more_lines), vparts[2]);

@@ -35,6 +35,9 @@ pub fn ordered_items(app: &TuiApp) -> Vec<SidebarItem> {
 
     out.push(SidebarItem::Section(SidebarSection::Direct));
     if sb.expanded.contains(&SidebarSection::Direct) {
+        // huddle 0.7.8: pinned add-friend row at top, mirroring
+        // DirectChat's affordance density.
+        out.push(SidebarItem::DirectAddFriend);
         let mut dms: Vec<_> = app
             .handle
             .discovered_rooms()
@@ -49,6 +52,8 @@ pub fn ordered_items(app: &TuiApp) -> Vec<SidebarItem> {
 
     out.push(SidebarItem::Section(SidebarSection::Group));
     if sb.expanded.contains(&SidebarSection::Group) {
+        // huddle 0.7.8: pinned new-group row at top.
+        out.push(SidebarItem::GroupNew);
         let mut groups: Vec<_> = app
             .handle
             .discovered_rooms()
@@ -66,6 +71,12 @@ pub fn ordered_items(app: &TuiApp) -> Vec<SidebarItem> {
 
     out.push(SidebarItem::Section(SidebarSection::People));
     if sb.expanded.contains(&SidebarSection::People) {
+        // huddle 0.7.8: pending-friend-request badge row appears at top
+        // of an expanded People section when any are outstanding. Tap
+        // jumps to People → Pending sublist.
+        if !app.pending_requests.is_empty() {
+            out.push(SidebarItem::PeoplePendingBadge);
+        }
         for p in &app.known_peers {
             out.push(SidebarItem::Person(p.address.clone()));
         }
@@ -187,7 +198,6 @@ fn render_item<'a>(
                 COLLAPSE_GLYPH
             };
             let label = section_label(*s);
-            let count = section_count(app, *s);
             let mut spans: Vec<Span> = vec![
                 Span::styled(format!("{} ", glyph), theme.dim()),
                 Span::styled(
@@ -197,7 +207,24 @@ fn render_item<'a>(
                         .add_modifier(Modifier::BOLD),
                 ),
             ];
-            if let Some(n) = count {
+            // huddle 0.7.8: People section gets a two-part count when
+            // there are pending requests: `(N known · M pending)`. Other
+            // sections retain the single-number form.
+            if let SidebarSection::People = s {
+                let known = app.known_peers.len();
+                let pending = app.pending_requests.len();
+                if known > 0 || pending > 0 {
+                    spans.push(Span::raw("  "));
+                    spans.push(Span::styled(format!("({})", known), theme.dim()));
+                    if pending > 0 {
+                        spans.push(Span::raw(" "));
+                        spans.push(Span::styled(
+                            format!("📩 {}", pending),
+                            theme.unread(),
+                        ));
+                    }
+                }
+            } else if let Some(n) = section_count(app, *s) {
                 spans.push(Span::raw("  "));
                 spans.push(Span::styled(format!("({})", n), theme.unread()));
             }
@@ -326,6 +353,40 @@ fn render_item<'a>(
             .style(highlight(theme, focused, is_sel, Style::default()));
             apply_selection_fg(line, theme, focused, is_sel)
         }
+        SidebarItem::DirectAddFriend => {
+            let line = Line::from(vec![
+                Span::styled("  + ", theme.warn_style()),
+                Span::styled("Add Friend", theme.text_style()),
+                Span::raw("  "),
+                Span::styled("m", theme.dim()),
+            ])
+            .style(highlight(theme, focused, is_sel, Style::default()));
+            apply_selection_fg(line, theme, focused, is_sel)
+        }
+        SidebarItem::GroupNew => {
+            let line = Line::from(vec![
+                Span::styled("  + ", theme.warn_style()),
+                Span::styled("New Group", theme.text_style()),
+                Span::raw("  "),
+                Span::styled("g", theme.dim()),
+            ])
+            .style(highlight(theme, focused, is_sel, Style::default()));
+            apply_selection_fg(line, theme, focused, is_sel)
+        }
+        SidebarItem::PeoplePendingBadge => {
+            let n = app.pending_requests.len();
+            let label = if n == 1 {
+                "1 friend request".to_string()
+            } else {
+                format!("{} friend requests", n)
+            };
+            let line = Line::from(vec![
+                Span::styled("  📩 ", theme.warn_style()),
+                Span::styled(label, theme.warn_style()),
+            ])
+            .style(highlight(theme, focused, is_sel, Style::default()));
+            apply_selection_fg(line, theme, focused, is_sel)
+        }
         SidebarItem::Person(addr) => {
             let p = app
                 .known_peers
@@ -397,10 +458,19 @@ fn section_count(app: &TuiApp, s: SidebarSection) -> Option<u32> {
         }
         SidebarSection::People => {
             let count = app.known_peers.len();
-            if count == 0 {
+            let pending = app.pending_requests.len();
+            // huddle 0.7.8: surface pending count even when no known
+            // peers exist yet — that's the situation a first-time user
+            // hits, and the pending count is the relevant signal.
+            if count == 0 && pending == 0 {
                 None
-            } else {
+            } else if pending == 0 {
                 Some(count as u32)
+            } else {
+                // section_count returns a single u32; the pending count
+                // is rendered separately in render_item as a second
+                // segment for clarity (see Section render path).
+                Some((count + pending) as u32)
             }
         }
         _ => None,
@@ -472,5 +542,10 @@ pub fn pane_for_item(item: &SidebarItem) -> Option<Pane> {
         SidebarItem::Person(_) => Some(Pane::People),
         SidebarItem::Activity => Some(Pane::Activity),
         SidebarItem::Settings => Some(Pane::Settings),
+        // huddle 0.7.8: action rows — cursor preview shouldn't switch
+        // pane (you have to press Enter to commit).
+        SidebarItem::DirectAddFriend => None,
+        SidebarItem::GroupNew => None,
+        SidebarItem::PeoplePendingBadge => Some(Pane::People),
     }
 }

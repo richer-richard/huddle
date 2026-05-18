@@ -4,8 +4,8 @@ use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
 use crate::app::{
     AcceptRotationState, AttachPickerState, ConfirmInviteState, DialPeerState, InboundDialState,
     JoinRoomState, JoinWithCodeState, MemberActionKind, MemberActionState, PasteInviteState,
-    RotateRoomState, SasStage, SasState, SearchState, SettingsState, ShowInviteState,
-    ShowJoinCodeState, StartField, StartRoomState, VerifyState,
+    RotateRoomState, SasStage, SasState, SearchState, ShowInviteState, ShowJoinCodeState,
+    StartField, StartRoomState, VerifyState,
 };
 use crate::ui::centered_rect;
 
@@ -965,126 +965,6 @@ pub fn render_sas(f: &mut Frame, s: &SasState) {
                 .title(Span::styled(
                     " SAS verify ",
                     Style::default().fg(Color::Magenta).bold(),
-                )),
-        );
-    f.render_widget(para, area);
-}
-
-/// Phase E + huddle 0.6: settings modal. The TuiApp is passed in so
-/// we can render contextual info (update-check status, pending modal
-/// count) without bloating SettingsState.
-pub fn render_settings(f: &mut Frame, s: &SettingsState, app: &crate::app::TuiApp) {
-    let area = centered_rect(72, 26, f.area());
-    f.render_widget(Clear, area);
-    let check = if s.verified_only_inbound { "[x]" } else { "[ ]" };
-    let blocked = s.blocked_peer_count;
-    let clear_hint = if blocked == 0 {
-        Line::from(Span::styled(
-            "  no blocked peers.",
-            Style::default().fg(Color::DarkGray),
-        ))
-    } else {
-        Line::from(vec![
-            Span::styled("  press ", Style::default().fg(Color::DarkGray)),
-            Span::styled("c", Style::default().fg(Color::Yellow).bold()),
-            Span::styled(" to clear all.", Style::default().fg(Color::DarkGray)),
-        ])
-    };
-    let username_label = match &s.username {
-        Some(n) if !n.is_empty() => n.clone(),
-        _ => "[anonymous]".into(),
-    };
-    let lines = vec![
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(" username: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                username_label,
-                Style::default().fg(Color::Cyan).bold(),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("  press ", Style::default().fg(Color::DarkGray)),
-            Span::styled("u", Style::default().fg(Color::Yellow).bold()),
-            Span::styled(
-                " to edit (empty input clears).",
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(" ", Style::default()),
-            Span::styled(check, Style::default().fg(Color::Yellow).bold()),
-            Span::styled(
-                " reject inbound dials from unverified fingerprints",
-                Style::default().fg(Color::White),
-            ),
-        ]),
-        Line::from(Span::styled(
-            "  press v / Space / Enter to toggle.",
-            Style::default().fg(Color::DarkGray),
-        )),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(" blocked peers: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                format!("{}", blocked),
-                Style::default().fg(Color::White).bold(),
-            ),
-        ]),
-        clear_hint,
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(" update check (crates.io): ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                match app.handle.update_check_enabled() {
-                    Some(true) => "ON",
-                    Some(false) => "OFF",
-                    None => "(not asked yet)",
-                },
-                Style::default().fg(Color::Cyan).bold(),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("  press ", Style::default().fg(Color::DarkGray)),
-            Span::styled("U", Style::default().fg(Color::Yellow).bold()),
-            Span::styled(" to toggle", Style::default().fg(Color::DarkGray)),
-        ]),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(" press ", Style::default().fg(Color::DarkGray)),
-            Span::styled("W", Style::default().fg(Color::Yellow).bold()),
-            Span::styled(" to replay onboarding / what's new", Style::default().fg(Color::DarkGray)),
-        ]),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(" [Alt+Shift+1]", Style::default().fg(Color::Red).bold()),
-            Span::styled(
-                " delete account (go dark) — press ",
-                Style::default().fg(Color::DarkGray),
-            ),
-            Span::styled("Alt+Shift+1", Style::default().fg(Color::Red).bold()),
-            Span::styled(
-                " (Option+Shift+1 on macOS)",
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(" Esc / q", Style::default().fg(Color::Yellow)),
-            Span::styled(" close", Style::default().fg(Color::DarkGray)),
-        ]),
-    ];
-    let para = Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan))
-                .padding(Padding::uniform(1))
-                .title(Span::styled(
-                    " settings ",
-                    Style::default().fg(Color::Cyan).bold(),
                 )),
         );
     f.render_widget(para, area);

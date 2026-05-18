@@ -8,6 +8,7 @@ use huddle_core::network::NetworkMode;
 use huddle_core::storage::keychain;
 
 mod app;
+mod clipboard;
 mod input;
 mod keybindings;
 mod notifier;
@@ -97,11 +98,15 @@ async fn main() -> Result<()> {
     // inside the TUI doesn't leave the shell in raw mode / alt screen.
     app::install_panic_hook();
 
-    let mode = cli.mode.unwrap_or(NetworkMode::Mdns);
+    let cli_mode_explicit = cli.mode.is_some();
+    // Provisional mode; the persisted `mdns_enabled` setting is read
+    // after the DB is unlocked further down and may override this if
+    // the CLI didn't pass `--mode`.
+    let mut mode = cli.mode.unwrap_or(NetworkMode::Mdns);
 
     // Skip the welcome card if a mode was given explicitly — power users
     // who script `--mode direct` don't want a prompt in the way.
-    if cli.mode.is_none() && !app::show_welcome()? {
+    if !cli_mode_explicit && !app::show_welcome()? {
         return Ok(());
     }
 
@@ -164,6 +169,20 @@ async fn main() -> Result<()> {
         }
         parsed
     };
+
+    // huddle 0.7.8: if the CLI didn't pass `--mode`, honor the persisted
+    // `mdns_enabled` setting (default ON). The peek opens the DB
+    // read-only ahead of `start_with_options`; migrations are idempotent
+    // so running them twice is harmless.
+    if !cli_mode_explicit {
+        match huddle_core::app::AppHandle::peek_mdns_enabled(master_key.as_ref()) {
+            Ok(true) => mode = NetworkMode::Mdns,
+            Ok(false) => mode = NetworkMode::Direct,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to read mdns_enabled setting; defaulting to mDNS on");
+            }
+        }
+    }
 
     let handle = huddle_core::app::AppHandle::start_with_options(
         mode,

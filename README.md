@@ -441,6 +441,64 @@ your platform's Downloads folder. Phase 2 cap is 1 MiB per file.
   doesn't). Per-DM ephemeral ratchets (Double Ratchet-style) are a
   candidate follow-up.
 
+## What's new in 0.7.8 — three connection paths, tabbed Settings, copyable identity
+
+A round of UX polish that borrows the right things from neighbouring apps
+without backsliding on huddle's privacy stance. Three discovery/connection
+paths now read as **co-equal parallel options** instead of "mDNS first,
+everything else as fallback", Settings became a tabbed pane that finally
+includes the toggles that used to live in `config.toml`, the Profile pane
+copies fields to the OS clipboard, and the People sidebar surfaces
+pending friend-request counts where you can actually see them.
+
+- **Three connection paths, equally surfaced.** Welcome copy spells out
+  the trio: LAN (mDNS) · direct IP dial · invite link. The Settings →
+  Network tab shows the same three rows with their live status. A new
+  `M` toggle in Settings → Network lets you disable LAN broadcast
+  entirely for privacy — peers can still reach you over direct dial or
+  invite link with no LAN advertisement (restart-required to apply;
+  flipping a `Toggle<Mdns>` mid-run would have required a behaviour
+  rebuild for negligible benefit).
+
+- **Tabbed Settings pane.** `Modal::Settings` is gone. Pressing `,`
+  lands you on `Pane::Settings` with four tabs cycled via Tab /
+  Shift+Tab or numeric jumps `1`–`4`:
+  - **Account** — username (`E`), HD-ID, derived **Safety Code**
+    (`SAFE-XXXX-XXXX-XXXX`), QR (`Q`), replay onboarding (`W`).
+  - **Network** — LAN mDNS toggle (`M`), reachability badge, listen
+    addresses, relay list from `config.toml`.
+  - **Appearance** — placeholder (single read-only `theme: dark` row;
+    light + high-contrast in a future release).
+  - **Privacy** — verified-only inbound (`V`), desktop notifications
+    (`N`), update check (`U`), blocked peers (`c` clears all), and
+    the Go Dark `Alt+Shift+1` chord.
+
+- **Copyable identity fields.** The Profile pane is now a cursor-
+  navigable list: `j`/`k` move, `y` copies the highlighted field to the
+  OS clipboard. Username, HD-ID, Safety Code, full fingerprint, and
+  every listen address each get their own yankable row. Clipboard
+  helper shells out to `pbcopy` (macOS) / `wl-copy` then `xclip` /
+  `clip.exe` (Windows) — no new crate dependency, failures degrade
+  to a status message instead of crashing.
+
+- **Sidebar density.** Direct messages and Group rooms each pin a
+  `+ Add Friend` / `+ New Group` row at the top so the action is a
+  cursor-and-Enter away, not a chord lookup. Pending friend requests
+  surface twice in the People section: as `📩 N` next to the section
+  header, and as a dedicated row at the top of an expanded section
+  when there's at least one outstanding request.
+
+- **Notifications opt-out.** `Settings → Privacy → N` toggles the
+  OS-native toast notifications introduced in 0.7.4. Default ON;
+  turning it OFF skips both the per-message path and the startup
+  catch-up summary. Notifications remain 100% local — the toggle is
+  for users who don't want any signal leaving the terminal at all.
+
+- **No protocol changes.** Only new local rows in the existing
+  `app_settings` KV table (`mdns_enabled`, `notifications_enabled`).
+  Both default to ON so existing users see zero functional change
+  until they opt out.
+
 ## What's new in 0.7.7 — friends, invites, and a fixed dial dead-end
 
 Three coordinated UX fixes around the "first contact" flow. Dialing a peer

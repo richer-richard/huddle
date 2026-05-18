@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::app::{Modal, Pane, PeopleFocus, SidebarFocus, SidebarItem, TuiApp};
+use crate::app::{Modal, Pane, PeopleFocus, SettingsTab, SidebarFocus, SidebarItem, TuiApp};
 
 #[derive(Debug)]
 pub enum Action {
@@ -152,6 +152,18 @@ pub enum Action {
     OpenSettings,
     SettingsToggleGlobalVerifiedOnly,
     ToggleRoomVerifiedOnly,
+    /// huddle 0.7.8: Settings pane tab cycling.
+    SettingsTabNext,
+    SettingsTabPrev,
+    SettingsTabSelect(SettingsTab),
+    /// huddle 0.7.8: Settings → Network row toggle (restart-required).
+    SettingsToggleMdns,
+    /// huddle 0.7.8: Settings → Privacy row toggle.
+    SettingsToggleNotifications,
+    /// huddle 0.7.8: Profile pane row navigation + yank-to-clipboard.
+    ProfileFieldUp,
+    ProfileFieldDown,
+    ProfileFieldYank,
     // huddle 0.5: optional self-declared username
     OpenEditUsername,
     EditUsernameTypeChar(char),
@@ -384,32 +396,6 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
             KeyCode::Char('m') | KeyCode::Enter => Action::SasMatch,
             _ => Action::Nothing,
         },
-        Modal::Settings(_) => {
-            // huddle 0.7.4: Go Dark is an Option+Shift+1 chord; honor
-            // it from inside the modal too so the row's affordance
-            // still works without forcing the user to close first.
-            if is_godark_chord(key) {
-                return Action::OpenGoDarkModal;
-            }
-            match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => Action::CloseModal,
-            KeyCode::Char('v') | KeyCode::Enter | KeyCode::Char(' ') => {
-                Action::SettingsToggleGlobalVerifiedOnly
-            }
-            KeyCode::Char('c') => Action::ClearBlockedPeers,
-            KeyCode::Char('u') => Action::OpenEditUsername,
-            // huddle 0.6: capital U = toggle update check; lowercase u
-            // stays "edit username". The case split keeps both reachable
-            // and matches the convention from R (mark all read) in lobby.
-            KeyCode::Char('U') => Action::ToggleUpdateCheck,
-            // huddle 0.6: W = replay onboarding from inside Settings.
-            KeyCode::Char('w') | KeyCode::Char('W') => Action::OpenWhatsNew,
-            // huddle 0.7.4: Go Dark moved to Option+Shift+1 (handled
-            // at the top of this arm); bare `!` no longer fires the
-            // destructive flow.
-            _ => Action::Nothing,
-            }
-        }
         Modal::EditUsername(_) => match key.code {
             KeyCode::Esc => Action::CloseModal,
             KeyCode::Enter => Action::EditUsernameConfirm,
@@ -569,17 +555,52 @@ fn map_normal(key: KeyEvent, app: &TuiApp) -> Action {
 }
 
 fn map_sidebar(key: KeyEvent, app: &TuiApp) -> Action {
-    // huddle 0.7.3: Settings-pane row bindings. The pane visibly
-    // displays "V verified-only / U update check / E username /
-    // W replay onboarding / ! go dark" — previously those rows were
-    // inert because only the Settings *modal* dispatched them. Now
-    // they fire from the pane itself.
+    // huddle 0.7.8: Settings is now a tabbed pane. Tab/Shift+Tab cycle
+    // the tabs; 1-4 jump directly. Upper-case row chords toggle the
+    // setting on that row regardless of which tab is currently visible
+    // (consistent muscle memory across tabs).
     if matches!(app.pane, Pane::Settings) {
         match key.code {
             KeyCode::Char('V') => return Action::SettingsToggleGlobalVerifiedOnly,
             KeyCode::Char('U') => return Action::ToggleUpdateCheck,
             KeyCode::Char('E') => return Action::OpenEditUsername,
             KeyCode::Char('W') => return Action::OpenWhatsNew,
+            KeyCode::Char('M') => return Action::SettingsToggleMdns,
+            KeyCode::Char('N') => return Action::SettingsToggleNotifications,
+            // huddle 0.7.8: lowercase `c` in Settings → Privacy clears
+            // every blocked peer at once. Only fires from the Privacy
+            // tab so a stray `c` on Account/Network/Appearance can't
+            // wipe the blocklist by accident.
+            KeyCode::Char('c') if matches!(app.settings_tab, SettingsTab::Privacy) => {
+                return Action::ClearBlockedPeers;
+            }
+            KeyCode::Tab => return Action::SettingsTabNext,
+            KeyCode::BackTab => return Action::SettingsTabPrev,
+            KeyCode::Char('1') => return Action::SettingsTabSelect(SettingsTab::Account),
+            KeyCode::Char('2') => return Action::SettingsTabSelect(SettingsTab::Network),
+            KeyCode::Char('3') => return Action::SettingsTabSelect(SettingsTab::Appearance),
+            KeyCode::Char('4') => return Action::SettingsTabSelect(SettingsTab::Privacy),
+            _ => {}
+        }
+    }
+    // huddle 0.7.8: Profile pane row navigation + yank. j/k move the
+    // copyable-field cursor (only when pane focus is the pane itself —
+    // when the sidebar is focused, j/k still navigates sections).
+    // E and Q are pane-scoped regardless of focus so the affordances
+    // listed on the pane stay reachable from either.
+    if matches!(app.pane, Pane::Profile) {
+        let pane_focused = matches!(app.sidebar.focus, SidebarFocus::Pane);
+        if pane_focused {
+            match key.code {
+                KeyCode::Char('j') | KeyCode::Down => return Action::ProfileFieldDown,
+                KeyCode::Char('k') | KeyCode::Up => return Action::ProfileFieldUp,
+                KeyCode::Char('y') => return Action::ProfileFieldYank,
+                _ => {}
+            }
+        }
+        match key.code {
+            KeyCode::Char('E') => return Action::OpenEditUsername,
+            KeyCode::Char('Q') => return Action::OpenQrIdentity,
             _ => {}
         }
     }

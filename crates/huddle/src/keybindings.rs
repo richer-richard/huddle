@@ -445,10 +445,11 @@ pub fn adaptive_hints(app: &TuiApp) -> Vec<(&'static str, &'static str)> {
                 out.push(("Ctrl+P", "palette"));
             }
             Pane::Profile => {
+                out.push(("j/k", "select"));
+                out.push(("y", "copy"));
                 out.push(("E", "edit name"));
                 out.push(("Q", "QR"));
                 out.push(("Shift+I", "invite"));
-                out.push((",", "settings"));
             }
             Pane::People => {
                 out.push(("Tab", "next list"));
@@ -462,10 +463,26 @@ pub fn adaptive_hints(app: &TuiApp) -> Vec<(&'static str, &'static str)> {
                 out.push(("?", "help"));
             }
             Pane::Settings => {
-                out.push(("V", "verified-only"));
-                out.push(("U", "update check"));
-                out.push(("E", "username"));
-                out.push(("Alt+Shift+1", "go dark"));
+                // huddle 0.7.8: tab-aware hints — show row chords for
+                // the active tab, plus the universal Tab cycle.
+                out.push(("Tab", "next tab"));
+                match app.settings_tab {
+                    crate::app::SettingsTab::Account => {
+                        out.push(("E", "username"));
+                        out.push(("Q", "QR"));
+                        out.push(("W", "what's new"));
+                    }
+                    crate::app::SettingsTab::Network => {
+                        out.push(("M", "toggle mDNS"));
+                    }
+                    crate::app::SettingsTab::Appearance => {}
+                    crate::app::SettingsTab::Privacy => {
+                        out.push(("V", "verified-only"));
+                        out.push(("N", "notifications"));
+                        out.push(("U", "update check"));
+                        out.push(("Alt+Shift+1", "go dark"));
+                    }
+                }
             }
             _ => {}
         }

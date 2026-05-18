@@ -1,6 +1,7 @@
-//! Settings pane — global toggles, blocked-peer manager, theme, go-dark.
-//! All toggles are reachable from the pane; some also have their own
-//! modals (`,` quick-open) for the same actions.
+//! Settings pane — tabbed view (Account / Network / Appearance /
+//! Privacy). huddle 0.7.8 replaced the modal-and-pane dual presentation
+//! with a single pane that owns every setting. Tab cycling: Tab /
+//! Shift+Tab, or 1-4 for direct jump.
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Modifier;
@@ -9,13 +10,18 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Padding, Paragraph};
 use ratatui::Frame;
 
-use crate::app::TuiApp;
+use crate::app::{SettingsTab, TuiApp};
+use crate::ui::display_id;
 use crate::ui::theme::Theme;
 
 pub fn render(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme) {
     let parts = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(2), Constraint::Min(0)])
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Length(2),
+            Constraint::Min(0),
+        ])
         .split(area);
 
     let title = Paragraph::new(Line::from(vec![Span::styled(
@@ -24,7 +30,194 @@ pub fn render(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme) {
     )]));
     f.render_widget(title, parts[0]);
 
+    render_tab_strip(f, parts[1], app, theme);
+
+    let body = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme.border_style())
+        .padding(Padding::horizontal(1));
+    let body_inner = body.inner(parts[2]);
+    f.render_widget(body, parts[2]);
+
+    let lines = match app.settings_tab {
+        SettingsTab::Account => render_account(app, theme),
+        SettingsTab::Network => render_network(app, theme),
+        SettingsTab::Appearance => render_appearance(theme),
+        SettingsTab::Privacy => render_privacy(app, theme),
+    };
+    f.render_widget(Paragraph::new(lines), body_inner);
+}
+
+fn render_tab_strip(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme) {
+    let tabs = [
+        SettingsTab::Account,
+        SettingsTab::Network,
+        SettingsTab::Appearance,
+        SettingsTab::Privacy,
+    ];
+    let mut spans: Vec<Span> = Vec::new();
+    for (i, t) in tabs.iter().enumerate() {
+        let is_active = *t == app.settings_tab;
+        let style = if is_active {
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+        } else {
+            theme.dim()
+        };
+        spans.push(Span::styled(format!(" {} ", t.label()), style));
+        spans.push(Span::styled(format!("{}", i + 1), theme.dim()));
+        if i + 1 < tabs.len() {
+            spans.push(Span::raw("  ·  "));
+        }
+    }
+    spans.push(Span::raw("    "));
+    spans.push(Span::styled("Tab", theme.warn_style()));
+    spans.push(Span::styled(" cycle", theme.dim()));
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn render_account<'a>(app: &TuiApp, theme: &Theme) -> Vec<Line<'a>> {
+    let username = app
+        .handle
+        .display_name()
+        .unwrap_or_else(|| "[anonymous]".into());
+    let hd = display_id(app.handle.fingerprint());
+    let safety = app.handle.safety_code();
+    vec![
+        identity_row(theme, "username", &username),
+        identity_row(theme, "HD-ID", &hd),
+        identity_row(theme, "Safety Code", &safety),
+        Line::raw(""),
+        row(theme, "E", "edit username", "open editor".into()),
+        row(theme, "Q", "show QR / HD-ID", "open viewer".into()),
+        row(theme, "W", "replay onboarding", "press W".into()),
+        Line::raw(""),
+        Line::from(vec![Span::styled(
+            "  (visit Profile pane to copy fields with `y`)",
+            theme.dim(),
+        )]),
+    ]
+}
+
+fn render_network<'a>(app: &TuiApp, theme: &Theme) -> Vec<Line<'a>> {
+    let mdns_on = app.handle.mdns_enabled();
+    let nat = match app.nat_status.as_deref() {
+        Some("reachable") => "🌐 reachable",
+        Some("private") => "🏠 private",
+        _ => "🔍 detecting",
+    };
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(vec![Span::styled(
+        "  Three connection paths run in parallel:",
+        theme.dim(),
+    )]));
+    lines.push(Line::from(vec![
+        Span::styled("    LAN (mDNS)   ", theme.dim()),
+        Span::styled(
+            if mdns_on { "on" } else { "off" },
+            if mdns_on {
+                theme.ok()
+            } else {
+                theme.warn_style()
+            },
+        ),
+        Span::raw("    "),
+        Span::styled("(default: on)", theme.dim()),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("    Direct dial ", theme.dim()),
+        Span::styled("always available", theme.ok()),
+        Span::raw("    "),
+        Span::styled("(d to dial)", theme.dim()),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("    Invite link ", theme.dim()),
+        Span::styled("always available", theme.ok()),
+        Span::raw("    "),
+        Span::styled("(Shift+I to generate)", theme.dim()),
+    ]));
+    lines.push(Line::raw(""));
+    lines.push(row(
+        theme,
+        "M",
+        "LAN discovery (mDNS)",
+        if mdns_on {
+            "on  ·  restart to apply changes"
+        } else {
+            "off · restart to apply changes"
+        }
+        .into(),
+    ));
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled("  reachability  ", theme.dim()),
+        Span::styled(nat.to_string(), theme.text_style()),
+    ]));
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![Span::styled(
+        "  listen addresses (cross-network dialable):",
+        theme.dim(),
+    )]));
+    if app.listen_addresses.is_empty() {
+        lines.push(Line::from(vec![Span::styled(
+            "    (binding…)",
+            theme.dim(),
+        )]));
+    } else {
+        for a in app.listen_addresses.iter().take(6) {
+            lines.push(Line::from(vec![Span::styled(
+                format!("    {}", a),
+                theme.text_style(),
+            )]));
+        }
+    }
+    lines.push(Line::raw(""));
+    let cfg_path = huddle_core::config::config_path();
+    lines.push(Line::from(vec![Span::styled(
+        format!("  relays from config.toml: {}", cfg_path.display()),
+        theme.dim(),
+    )]));
+    let relays = huddle_core::config::load_relays().unwrap_or_default();
+    if relays.is_empty() {
+        lines.push(Line::from(vec![Span::styled(
+            "    (none — default; LAN + direct dial only)",
+            theme.dim(),
+        )]));
+    } else {
+        for r in &relays {
+            lines.push(Line::from(vec![Span::styled(
+                format!("    {}", r),
+                theme.text_style(),
+            )]));
+        }
+    }
+    lines
+}
+
+fn render_appearance<'a>(theme: &Theme) -> Vec<Line<'a>> {
+    vec![
+        Line::from(vec![
+            Span::styled("  theme       ", theme.dim()),
+            Span::styled("dark", theme.text_style()),
+            Span::raw("    "),
+            Span::styled("(default; light + high-contrast in a future release)", theme.dim()),
+        ]),
+        Line::raw(""),
+        Line::from(vec![Span::styled(
+            "  Appearance is intentionally minimal in 0.7.8 — the theme",
+            theme.dim(),
+        )]),
+        Line::from(vec![Span::styled(
+            "  module is scaffolded for v2 but only `dark` is wired up.",
+            theme.dim(),
+        )]),
+    ]
+}
+
+fn render_privacy<'a>(app: &TuiApp, theme: &Theme) -> Vec<Line<'a>> {
     let v_only = app.handle.verified_only_inbound();
+    let notifications = app.handle.notifications_enabled();
     let update_check = app.handle.update_check_enabled();
     let last_check_t = app.handle.last_update_check_at();
     let last_check = if last_check_t > 0 {
@@ -32,61 +225,55 @@ pub fn render(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme) {
     } else {
         "never".into()
     };
-    let username = app.handle.display_name().unwrap_or_else(|| "[anonymous]".into());
     let blocked_count = app.handle.list_blocked_peers().len();
 
     let mut lines: Vec<Line> = Vec::new();
-    lines.push(row(theme, "V", "verified-only inbound", on_off(v_only)));
+    lines.push(row(
+        theme,
+        "V",
+        "verified-only inbound",
+        format!("{}    (default: off)", on_off(v_only)),
+    ));
+    lines.push(row(
+        theme,
+        "N",
+        "desktop notifications",
+        format!(
+            "{}    (default: on; OS-local toasts only — never networked)",
+            on_off(notifications)
+        ),
+    ));
     lines.push(row(
         theme,
         "U",
         "update check (crates.io)",
         match update_check {
-            Some(true) => format!("on  ·  last checked {}", last_check),
+            Some(true) => format!("on    last checked {}", last_check),
             Some(false) => "off".into(),
             None => "not asked yet".into(),
         },
     ));
-    lines.push(row(theme, "E", "username", username));
-    lines.push(row(theme, "W", "replay onboarding", "press W".into()));
-    lines.push(row(
-        theme,
-        "B",
-        "blocked peers",
-        format!("{}", blocked_count),
-    ));
+    lines.push(row(theme, "B", "blocked peers", format!("{}", blocked_count)));
+    if blocked_count > 0 {
+        lines.push(Line::from(vec![
+            Span::styled("      ", theme.dim()),
+            Span::styled("c", theme.warn_style()),
+            Span::styled(" clears them all", theme.dim()),
+        ]));
+    }
     lines.push(Line::raw(""));
     lines.push(Line::from(vec![Span::styled(
         "  ─── danger zone ───",
         theme.dim(),
     )]));
     lines.push(Line::raw(""));
-    // huddle 0.7.5: chord rendered as ASCII (`Alt+Shift+1`) rather
-    // than the Unicode keycap glyphs `⌥⇧1` — fonts fall back too
-    // inconsistently for the glyph form to be reliable across
-    // terminals. Macs label this key "Option" but every keyboard
-    // doubles it as "alt", so the universal name wins.
-    //
-    // Layout: other rows use `"  X"` (3) + 4 spaces (4) = 7 cols
-    // before the label. This row uses `"  Alt+Shift+1"` (14) + 1
-    // space gap, but the label column then sits at 15. To keep
-    // alignment we just let this row's label start later — every
-    // other row's `key` column is 1 char so this is the only
-    // exception, called out by its prominence.
     lines.push(Line::from(vec![
         Span::styled("  Alt+Shift+1", theme.err_style()),
         Span::raw("  "),
         Span::styled(format!("{:<20}", "go dark"), theme.err_style()),
         Span::styled("delete account, wipe data, exit", theme.dim()),
     ]));
-
-    let p = Paragraph::new(lines).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(theme.border_style())
-            .padding(Padding::horizontal(1)),
-    );
-    f.render_widget(p, parts[1]);
+    lines
 }
 
 fn row<'a>(theme: &Theme, key: &'a str, label: &'a str, value: String) -> Line<'a> {
@@ -95,6 +282,13 @@ fn row<'a>(theme: &Theme, key: &'a str, label: &'a str, value: String) -> Line<'
         Span::raw("    "),
         Span::styled(format!("{:<28}", label), theme.text_style()),
         Span::styled(value, theme.dim()),
+    ])
+}
+
+fn identity_row<'a>(theme: &Theme, label: &str, value: &str) -> Line<'a> {
+    Line::from(vec![
+        Span::styled(format!("  {:<12}", label), theme.dim()),
+        Span::styled(value.to_string(), theme.accent_bold()),
     ])
 }
 

@@ -261,12 +261,72 @@ pub enum SidebarSection {
 pub enum SidebarItem {
     Section(SidebarSection),
     Profile,
+    /// huddle 0.7.8: pinned "+ Add Friend" row at the top of an
+    /// expanded Direct messages section. Selecting fires
+    /// `Action::OpenComposeDm`.
+    DirectAddFriend,
     Dm(String),
+    /// huddle 0.7.8: pinned "+ New Group" row at the top of an
+    /// expanded Group rooms section. Selecting fires
+    /// `Action::OpenStartRoom`.
+    GroupNew,
     Group(String),
     GroupDiscover,
+    /// huddle 0.7.8: pinned "📩 N friend requests" badge row when the
+    /// People section is expanded and `pending_requests` is non-empty.
+    /// Selecting jumps to `Pane::People` with `PeopleFocus::Pending`.
+    PeoplePendingBadge,
     Person(String),
     Activity,
     Settings,
+}
+
+/// huddle 0.7.8: which tab the Settings pane shows. Account = identity
+/// (mirrors Profile's read-only view + edit affordances). Network = mDNS
+/// toggle, listen addrs, relays, connectivity. Appearance = theme
+/// placeholder. Privacy = verified-only inbound, notifications, update
+/// check, blocked peers, go-dark.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsTab {
+    Account,
+    Network,
+    Appearance,
+    Privacy,
+}
+
+impl Default for SettingsTab {
+    fn default() -> Self {
+        SettingsTab::Account
+    }
+}
+
+impl SettingsTab {
+    pub fn label(self) -> &'static str {
+        match self {
+            SettingsTab::Account => "Account",
+            SettingsTab::Network => "Network",
+            SettingsTab::Appearance => "Appearance",
+            SettingsTab::Privacy => "Privacy",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            SettingsTab::Account => SettingsTab::Network,
+            SettingsTab::Network => SettingsTab::Appearance,
+            SettingsTab::Appearance => SettingsTab::Privacy,
+            SettingsTab::Privacy => SettingsTab::Account,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        match self {
+            SettingsTab::Account => SettingsTab::Privacy,
+            SettingsTab::Network => SettingsTab::Account,
+            SettingsTab::Appearance => SettingsTab::Network,
+            SettingsTab::Privacy => SettingsTab::Appearance,
+        }
+    }
 }
 
 /// huddle 0.7: keyboard focus is either on the sidebar (j/k navigates
@@ -354,9 +414,6 @@ pub enum Modal {
     /// before the partner's ephemeral pubkey arrives, then code-display
     /// + match-confirm.
     Sas(SasState),
-    /// Phase E: app-wide settings (currently just the global
-    /// verified-only inbound toggle). Opened with `,` from lobby.
-    Settings(SettingsState),
     /// huddle 0.5: single-field text editor for the local user's
     /// self-declared username. Empty input clears (None) and the user
     /// renders as `[anonymous]` to themselves and peers. On confirm,
@@ -433,19 +490,6 @@ pub struct CommandPaletteState {
     /// binding plus a few synthetic entries (e.g. "toggle update check"
     /// that doesn't have a keybinding). Filtered by `query` at render.
     pub selected: usize,
-}
-
-#[derive(Debug, Clone)]
-pub struct SettingsState {
-    pub verified_only_inbound: bool,
-    /// Snapshot of the persistent blocklist size, taken when the modal
-    /// opens. Re-snapped after `ClearBlockedPeers` so the row updates
-    /// without a modal re-open.
-    pub blocked_peer_count: usize,
-    /// huddle 0.5: snapshot of the local user's self-declared username
-    /// (None ⇒ `[anonymous]`). Refreshed when the Settings modal is
-    /// re-opened so an edit propagates without a tab away.
-    pub username: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -933,6 +977,12 @@ pub struct TuiApp {
     /// the catch-up window forward. Prevents a sustained-traffic
     /// room from indefinitely suppressing live notifications.
     pub startup_grace_cap: Instant,
+    /// huddle 0.7.8: which tab is active in the Settings pane.
+    pub settings_tab: SettingsTab,
+    /// huddle 0.7.8: which row is highlighted in the Profile pane for
+    /// copy-to-clipboard. 0 = username, 1 = HD-ID, 2 = Safety Code,
+    /// 3 = fingerprint, 4..N = listen addresses (clamped at render).
+    pub profile_cursor: usize,
 }
 
 /// huddle 0.5: how long the goodbye modal stays on screen after
@@ -1013,6 +1063,8 @@ impl TuiApp {
             startup_catchup_count: 0,
             startup_grace_until: Some(Instant::now() + STARTUP_GRACE),
             startup_grace_cap: Instant::now() + STARTUP_GRACE_MAX,
+            settings_tab: SettingsTab::default(),
+            profile_cursor: 0,
         }
     }
 
@@ -1338,7 +1390,9 @@ impl TuiApp {
                     self.startup_grace_until = self
                         .startup_grace_until
                         .map(|d| d.max(new_deadline));
-                } else if !crate::notifier::is_focused() {
+                } else if !crate::notifier::is_focused()
+                    && self.handle.notifications_enabled()
+                {
                     let room_name = self
                         .open_room(&room_id)
                         .map(|r| r.name.clone())
@@ -1694,9 +1748,9 @@ fn sidebar_jump_section(app: &mut TuiApp, delta: i32) {
     let current = match &app.sidebar.selection {
         SidebarItem::Section(s) => *s,
         SidebarItem::Profile => Profile,
-        SidebarItem::Dm(_) => Direct,
-        SidebarItem::Group(_) | SidebarItem::GroupDiscover => Group,
-        SidebarItem::Person(_) => People,
+        SidebarItem::Dm(_) | SidebarItem::DirectAddFriend => Direct,
+        SidebarItem::Group(_) | SidebarItem::GroupDiscover | SidebarItem::GroupNew => Group,
+        SidebarItem::Person(_) | SidebarItem::PeoplePendingBadge => People,
         SidebarItem::Activity => Activity,
         SidebarItem::Settings => Settings,
     };
@@ -1715,9 +1769,11 @@ fn sidebar_toggle_expand(app: &mut TuiApp) {
     let section = match &app.sidebar.selection {
         SidebarItem::Section(s) => *s,
         SidebarItem::Profile => SidebarSection::Profile,
-        SidebarItem::Dm(_) => SidebarSection::Direct,
-        SidebarItem::Group(_) | SidebarItem::GroupDiscover => SidebarSection::Group,
-        SidebarItem::Person(_) => SidebarSection::People,
+        SidebarItem::Dm(_) | SidebarItem::DirectAddFriend => SidebarSection::Direct,
+        SidebarItem::Group(_) | SidebarItem::GroupDiscover | SidebarItem::GroupNew => {
+            SidebarSection::Group
+        }
+        SidebarItem::Person(_) | SidebarItem::PeoplePendingBadge => SidebarSection::People,
         SidebarItem::Activity => SidebarSection::Activity,
         SidebarItem::Settings => SidebarSection::Settings,
     };
@@ -1746,6 +1802,36 @@ fn sync_pane_from_selection(app: &mut TuiApp) {
             _ => app.pane = pane,
         }
     }
+}
+
+/// huddle 0.7.8: the labeled identity rows shown in Profile pane, in
+/// fixed visual order. Tuple is (label-for-status-message, value-to-
+/// copy). Listen addresses are spread across rows so each address is
+/// individually yankable. Order MUST match `pane/profile.rs` rendering
+/// so `profile_cursor` indices into the right thing.
+pub fn profile_fields(app: &TuiApp) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let username = app
+        .handle
+        .display_name()
+        .unwrap_or_else(|| "[anonymous]".into());
+    out.push(("username".into(), username));
+    let hd = crate::ui::display_id(app.handle.fingerprint());
+    out.push(("HD-ID".into(), hd));
+    out.push(("Safety Code".into(), app.handle.safety_code()));
+    out.push(("fingerprint".into(), app.handle.fingerprint().to_string()));
+    for (i, addr) in app.listen_addresses.iter().take(6).enumerate() {
+        out.push((format!("listen address {}", i + 1), addr.clone()));
+    }
+    out
+}
+
+pub fn profile_field_count(app: &TuiApp) -> usize {
+    profile_fields(app).len()
+}
+
+pub fn profile_field_at(app: &TuiApp, idx: usize) -> Option<(String, String)> {
+    profile_fields(app).into_iter().nth(idx)
 }
 
 /// huddle 0.7: list of room ids in sidebar order (DMs first, then
@@ -2268,7 +2354,7 @@ async fn main_loop(
                 let n = app.startup_catchup_count;
                 app.startup_catchup_count = 0;
                 app.startup_grace_until = None;
-                if n > 0 {
+                if n > 0 && app.handle.notifications_enabled() {
                     let body = if n == 1 {
                         "1 new message while you were away".to_string()
                     } else {
@@ -2544,6 +2630,17 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
                 SidebarItem::Person(_) => app.pane = Pane::People,
                 SidebarItem::Activity => app.pane = Pane::Activity,
                 SidebarItem::Settings => app.pane = Pane::Settings,
+                SidebarItem::DirectAddFriend => {
+                    // huddle 0.7.8: pinned "+ Add Friend" row → fire the
+                    // same flow as the global `m` shortcut.
+                    return Box::pin(handle_action(Action::OpenComposeDm, app)).await;
+                }
+                SidebarItem::GroupNew => {
+                    return Box::pin(handle_action(Action::OpenStartRoom, app)).await;
+                }
+                SidebarItem::PeoplePendingBadge => {
+                    return Box::pin(handle_action(Action::JumpToPeoplePane, app)).await;
+                }
                 SidebarItem::GroupDiscover => {
                     // Find first unjoined group room and open its join modal.
                     if let Some(room) = app
@@ -3540,11 +3637,75 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             Ok(false)
         }
         Action::OpenSettings => {
-            app.modal = Modal::Settings(SettingsState {
-                verified_only_inbound: app.handle.verified_only_inbound(),
-                blocked_peer_count: app.handle.list_blocked_peers().len(),
-                username: app.handle.display_name(),
+            // huddle 0.7.8: Settings is now a tabbed pane, not a modal.
+            // OpenSettings now jumps to the pane and resets to the
+            // Account tab — the modal variant has been removed entirely.
+            app.pane = Pane::Settings;
+            app.settings_tab = SettingsTab::Account;
+            app.sidebar.selection = SidebarItem::Section(SidebarSection::Settings);
+            Ok(false)
+        }
+        Action::SettingsTabNext => {
+            app.settings_tab = app.settings_tab.next();
+            Ok(false)
+        }
+        Action::SettingsTabPrev => {
+            app.settings_tab = app.settings_tab.prev();
+            Ok(false)
+        }
+        Action::SettingsTabSelect(tab) => {
+            app.settings_tab = tab;
+            Ok(false)
+        }
+        Action::SettingsToggleMdns => {
+            let now_on = app.handle.mdns_enabled();
+            if let Err(e) = app.handle.set_mdns_enabled(!now_on) {
+                app.modal = Modal::Error(format!("save failed: {e}"));
+                return Ok(false);
+            }
+            let new_state = !now_on;
+            app.set_status(if new_state {
+                "LAN discovery enabled — restart huddle to apply"
+            } else {
+                "LAN discovery disabled — restart huddle to apply"
             });
+            Ok(false)
+        }
+        Action::SettingsToggleNotifications => {
+            let now_on = app.handle.notifications_enabled();
+            if let Err(e) = app.handle.set_notifications_enabled(!now_on) {
+                app.modal = Modal::Error(format!("save failed: {e}"));
+                return Ok(false);
+            }
+            app.set_status(if !now_on {
+                "desktop notifications on (OS-local only)"
+            } else {
+                "desktop notifications off"
+            });
+            Ok(false)
+        }
+        Action::ProfileFieldUp => {
+            if app.profile_cursor > 0 {
+                app.profile_cursor -= 1;
+            }
+            Ok(false)
+        }
+        Action::ProfileFieldDown => {
+            let max = profile_field_count(app).saturating_sub(1);
+            if app.profile_cursor < max {
+                app.profile_cursor += 1;
+            }
+            Ok(false)
+        }
+        Action::ProfileFieldYank => {
+            let (label, value) = match profile_field_at(app, app.profile_cursor) {
+                Some(v) => v,
+                None => return Ok(false),
+            };
+            match crate::clipboard::copy(&value) {
+                Ok(()) => app.set_status(format!("copied {} to clipboard", label)),
+                Err(e) => app.set_status(format!("copy failed: {}", e)),
+            }
             Ok(false)
         }
         Action::OpenEditUsername => {
@@ -3698,15 +3859,14 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             }
         }
         Action::SettingsToggleGlobalVerifiedOnly => {
-            if let Modal::Settings(s) = &mut app.modal {
-                s.verified_only_inbound = !s.verified_only_inbound;
-                if let Err(e) = app
-                    .handle
-                    .set_verified_only_inbound(s.verified_only_inbound)
-                {
-                    app.modal = Modal::Error(format!("save failed: {e}"));
-                    return Ok(false);
-                }
+            // huddle 0.7.8: pane-driven toggle. The previous version
+            // mutated a per-modal snapshot; the pane reads the live
+            // value via `handle.verified_only_inbound()` every render
+            // so we just flip and persist.
+            let new_state = !app.handle.verified_only_inbound();
+            if let Err(e) = app.handle.set_verified_only_inbound(new_state) {
+                app.modal = Modal::Error(format!("save failed: {e}"));
+                return Ok(false);
             }
             Ok(false)
         }
@@ -3722,11 +3882,8 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
                     errors += 1;
                 }
             }
-            // Re-sync the open Settings modal's count so it reflects
-            // the cleared state without needing a modal reopen.
-            if let Modal::Settings(s) = &mut app.modal {
-                s.blocked_peer_count = app.handle.list_blocked_peers().len();
-            }
+            // huddle 0.7.8: the Settings pane reads the live blocklist
+            // count on every render, so no snapshot needs updating here.
             let msg = if errors == 0 {
                 format!("cleared {} blocked peer(s)", n)
             } else {
@@ -4012,6 +4169,9 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
         }
         Action::JumpToSettingsPane => {
             app.pane = Pane::Settings;
+            // huddle 0.7.8: reset to Account tab on jump so `,` from
+            // anywhere lands on a predictable surface.
+            app.settings_tab = SettingsTab::Account;
             app.sidebar.selection = SidebarItem::Section(SidebarSection::Settings);
             Ok(false)
         }
@@ -4638,11 +4798,9 @@ pub async fn run_palette_action(label: &str, app: &mut TuiApp) -> Result<bool> {
             app.modal = Modal::QrIdentity;
         }
         "open settings" => {
-            app.modal = Modal::Settings(SettingsState {
-                verified_only_inbound: app.handle.verified_only_inbound(),
-                blocked_peer_count: app.handle.list_blocked_peers().len(),
-                username: app.handle.display_name(),
-            });
+            app.pane = Pane::Settings;
+            app.settings_tab = SettingsTab::Account;
+            app.sidebar.selection = SidebarItem::Section(SidebarSection::Settings);
         }
         "join with code" => {
             app.set_status("select an encrypted room in the lobby first, then press c");

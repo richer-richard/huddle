@@ -32,7 +32,6 @@ pub fn render(f: &mut Frame, app: &TuiApp) {
         Modal::InboundDial(s) => modal::render_inbound_dial(f, s),
         Modal::MemberAction(s) => modal::render_member_action(f, s),
         Modal::Sas(s) => modal::render_sas(f, s),
-        Modal::Settings(s) => modal::render_settings(f, s, app),
         Modal::EditUsername(s) => modal::render_edit_username(f, s),
         Modal::GoDark(s) => modal::render_go_dark(f, s),
         Modal::AddFriend(s) => modal::render_add_friend(f, s),

@@ -90,6 +90,24 @@ pub fn compute_fingerprint(public_key: &[u8; 32]) -> String {
         .join("-")
 }
 
+/// huddle 0.7.8: 12-hex Safety Code derived from the same SHA-256 of the
+/// Ed25519 pubkey that backs `compute_fingerprint`. Format
+/// `SAFE-XXXX-XXXX-XXXX` (uppercase, dash-separated). Display-only — a
+/// shorter, less ambiguous handle to compare against a friend at the
+/// start of a session. SAS-via-emoji is still the real verification
+/// primitive; this is the visual analogue of DirectChat's
+/// `accountSafetyCode`.
+pub fn safety_code(public_key: &[u8; 32]) -> String {
+    let hash = Sha256::digest(public_key);
+    let hex_str = hex::encode(&hash[..6]).to_ascii_uppercase();
+    let groups: Vec<&str> = hex_str
+        .as_bytes()
+        .chunks(4)
+        .map(|chunk| std::str::from_utf8(chunk).unwrap())
+        .collect();
+    format!("SAFE-{}", groups.join("-"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,5 +153,20 @@ mod tests {
         let id = Identity::generate().unwrap();
         let pid = id.peer_id();
         assert!(!pid.to_string().is_empty());
+    }
+
+    #[test]
+    fn safety_code_is_stable_and_well_formed() {
+        let key = [7u8; 32];
+        let a = safety_code(&key);
+        let b = safety_code(&key);
+        assert_eq!(a, b);
+        assert!(a.starts_with("SAFE-"));
+        let groups: Vec<&str> = a.trim_start_matches("SAFE-").split('-').collect();
+        assert_eq!(groups.len(), 3);
+        for g in &groups {
+            assert_eq!(g.len(), 4);
+            assert!(g.chars().all(|c| c.is_ascii_hexdigit() && c.is_ascii_uppercase() || c.is_ascii_digit()));
+        }
     }
 }
