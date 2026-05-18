@@ -145,7 +145,6 @@ pub enum Action {
     EditUsernameConfirm,
     // huddle 0.5: go-dark account deletion flow
     OpenGoDarkModal,
-    GoDarkNextField,
     GoDarkTypeChar(char),
     GoDarkBackspace,
     GoDarkConfirm,
@@ -406,7 +405,6 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
         },
         Modal::GoDark(_) => match key.code {
             KeyCode::Esc => Action::CloseModal,
-            KeyCode::Tab => Action::GoDarkNextField,
             KeyCode::Enter => Action::GoDarkConfirm,
             KeyCode::Backspace => Action::GoDarkBackspace,
             KeyCode::Char(c) => Action::GoDarkTypeChar(c),

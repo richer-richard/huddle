@@ -171,7 +171,7 @@ from the actual key map.
 | `E` | Edit your username                                       |
 | `W` | Replay onboarding (what's new)                           |
 | `B` | Manage blocked peers                                     |
-| `Alt+Shift+1` (Option+Shift+1 on macOS) | Delete account (go dark) — two-factor confirm |
+| `Alt+Shift+1` (Option+Shift+1 on macOS) | Delete account (go dark) — passphrase-gated |
 
 ## Username & ID display (huddle 0.5)
 
@@ -321,11 +321,13 @@ actual passphrase.
 
 Press `Alt+Shift+1` (the Option key on macOS — same physical key) from
 anywhere — or use the labeled row on the Settings pane — to open the
-**go dark** modal. Two-factor gate:
+**go dark** modal. Single-field gate (huddle 0.7.6+):
 
-1. Your **master passphrase** (re-derived and constant-time compared
-   to the in-memory SQLCipher subkey).
-2. Type the literal phrase `DELETE EVERYTHING` in the second field.
+- If you have a **master passphrase**, that's the gate — re-derived
+  via Argon2id and constant-time compared to the in-memory SQLCipher
+  subkey. Wrong passphrase clears the field and shows an inline error.
+- In `--no-master-passphrase` sessions (no key to compare against),
+  type the literal phrase `DELETE EVERYTHING` (case sensitive) instead.
 
 On confirm, huddle:
 
@@ -438,6 +440,34 @@ your platform's Downloads folder. Phase 2 cap is 1 MiB per file.
   two parties (Megolm message keys still ratchet, but the wrap key
   doesn't). Per-DM ephemeral ratchets (Double Ratchet-style) are a
   candidate follow-up.
+
+## What's new in 0.7.6 — Go Dark single-field flow
+
+A user report surfaced that the 0.5-era two-field Go Dark modal looked
+like it "didn't work" even after typing `DELETE EVERYTHING`. Root cause
+was UX, not logic: the modal required filling **both** a master
+passphrase field AND a typed `DELETE EVERYTHING` field, with `Tab` to
+switch between them. Default focus was the passphrase, so typing
+`DELETE EVERYTHING` straight away put the phrase into the wrong field
+and the validation error rendered at the bottom of an already-tall red
+modal — easy to miss.
+
+- **Single field, mode-aware.** Sessions with a master passphrase now
+  use the passphrase directly as the gate (the natural strong secret
+  the user already knows — Argon2id-derived, constant-time compared).
+  `--no-master-passphrase` sessions keep the typed `DELETE EVERYTHING`
+  phrase as their only available gate, since they have no key to
+  compare against.
+- **Loud error feedback.** Wrong attempts now render `✗ <reason>` with
+  a bold red banner directly above the Enter/Esc hint bar, instead of
+  being buried at the bottom of the modal. The input field also clears
+  on failure so the next attempt starts fresh.
+- **No more `Tab`.** Removed `GoDarkNextField` action and the
+  `KeyCode::Tab` mapping inside the Go Dark modal arm — single field
+  means nothing to switch to.
+- **New accessor** `AppHandle::has_master_passphrase() -> bool` so the
+  TUI can pick the right gate at modal-open time without leaking the
+  in-memory subkey.
 
 ## What's new in 0.7.5 — notifier hardening
 

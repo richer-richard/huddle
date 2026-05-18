@@ -442,23 +442,27 @@ pub struct EditUsernameState {
     pub input: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum GoDarkField {
-    #[default]
-    Passphrase,
-    Confirm,
-}
-
+/// huddle 0.7.6: single-field Go Dark modal. Mode is fixed at open time:
+/// if the user has a master passphrase, `requires_passphrase = true` and
+/// the single field is the passphrase itself; otherwise the field is the
+/// typed `DELETE EVERYTHING` confirmation (since there's no passphrase
+/// to compare against in `--no-master-passphrase` sessions).
+///
+/// Replaced the two-field (passphrase + typed phrase) flow from 0.5: the
+/// Tab-between-fields UX made it easy to fill only one and bounce off a
+/// silent inline error, leaving "looks like nothing happened" reports.
 #[derive(Debug, Clone, Default)]
 pub struct GoDarkState {
-    pub passphrase: String,
-    pub confirm: String,
-    pub focus: GoDarkField,
-    /// Set after a wrong-passphrase attempt so the modal can flash an
-    /// inline error without dismissing.
+    pub input: String,
+    pub requires_passphrase: bool,
+    /// Set after a wrong-passphrase / wrong-phrase attempt so the modal
+    /// can flash an inline error without dismissing.
     pub last_error: Option<String>,
 }
 
+/// Confirmation phrase for `--no-master-passphrase` sessions (the only
+/// gate they have, since there's no persisted key to compare against).
+/// Sessions with a master passphrase use the passphrase itself.
 pub const GO_DARK_CONFIRM_PHRASE: &str = "DELETE EVERYTHING";
 
 #[derive(Debug, Clone, Default)]
@@ -3459,7 +3463,10 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             Ok(false)
         }
         Action::OpenGoDarkModal => {
-            app.modal = Modal::GoDark(GoDarkState::default());
+            app.modal = Modal::GoDark(GoDarkState {
+                requires_passphrase: app.handle.has_master_passphrase(),
+                ..GoDarkState::default()
+            });
             Ok(false)
         }
         Action::OpenAddFriend => {
@@ -3503,57 +3510,50 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             }
             Ok(false)
         }
-        Action::GoDarkNextField => {
-            if let Modal::GoDark(s) = &mut app.modal {
-                s.focus = match s.focus {
-                    GoDarkField::Passphrase => GoDarkField::Confirm,
-                    GoDarkField::Confirm => GoDarkField::Passphrase,
-                };
-            }
-            Ok(false)
-        }
         Action::GoDarkTypeChar(c) => {
             if let Modal::GoDark(s) = &mut app.modal {
-                let field = s.focus;
-                let target = match field {
-                    GoDarkField::Passphrase => &mut s.passphrase,
-                    GoDarkField::Confirm => &mut s.confirm,
-                };
-                if target.chars().count() < 128 {
-                    target.push(c);
+                if s.input.chars().count() < 128 {
+                    s.input.push(c);
                 }
             }
             Ok(false)
         }
         Action::GoDarkBackspace => {
             if let Modal::GoDark(s) = &mut app.modal {
-                let field = s.focus;
-                match field {
-                    GoDarkField::Passphrase => {
-                        s.passphrase.pop();
-                    }
-                    GoDarkField::Confirm => {
-                        s.confirm.pop();
-                    }
-                };
+                s.input.pop();
             }
             Ok(false)
         }
         Action::GoDarkConfirm => {
-            let (passphrase, confirm) = match &app.modal {
-                Modal::GoDark(s) => (s.passphrase.clone(), s.confirm.clone()),
+            // Snapshot mode + input before touching the modal again.
+            let (input, requires_passphrase) = match &app.modal {
+                Modal::GoDark(s) => (s.input.clone(), s.requires_passphrase),
                 _ => return Ok(false),
             };
-            if confirm != GO_DARK_CONFIRM_PHRASE {
+            // huddle 0.7.6: single gate per session mode.
+            //   master passphrase mode → passphrase IS the gate; `go_dark`
+            //     does the constant-time check internally.
+            //   --no-master-passphrase mode → typed `DELETE EVERYTHING`
+            //     is the only gate (no key to compare against).
+            if !requires_passphrase && input != GO_DARK_CONFIRM_PHRASE {
                 if let Modal::GoDark(s) = &mut app.modal {
                     s.last_error = Some(format!(
                         "type `{}` exactly to confirm",
                         GO_DARK_CONFIRM_PHRASE
                     ));
+                    s.input.clear();
                 }
                 return Ok(false);
             }
-            match app.handle.go_dark(&passphrase).await {
+            // For passphrase mode, pass `input` as the passphrase.
+            // For no-master mode, the passphrase argument is ignored
+            // by `go_dark` (it short-circuits the check on a zeroed key).
+            let passphrase_to_send = if requires_passphrase {
+                input
+            } else {
+                String::new()
+            };
+            match app.handle.go_dark(&passphrase_to_send).await {
                 Ok(()) => {
                     // WentDark event fires from go_dark; the handler
                     // schedules the actual exit so the goodbye modal
@@ -3563,8 +3563,7 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
                 Err(e) => {
                     if let Modal::GoDark(s) = &mut app.modal {
                         s.last_error = Some(format!("{e}"));
-                        s.passphrase.clear();
-                        s.focus = GoDarkField::Passphrase;
+                        s.input.clear();
                     }
                     Ok(false)
                 }

@@ -1091,13 +1091,24 @@ pub fn render_settings(f: &mut Frame, s: &SettingsState, app: &crate::app::TuiAp
 }
 
 pub fn render_go_dark(f: &mut Frame, s: &crate::app::GoDarkState) {
-    use crate::app::{GoDarkField, GO_DARK_CONFIRM_PHRASE};
-    let area = centered_rect(70, 22, f.area());
+    use crate::app::GO_DARK_CONFIRM_PHRASE;
+    let area = centered_rect(70, 20, f.area());
     f.render_widget(Clear, area);
-    let mask = |v: &str| -> String { "•".repeat(v.chars().count()) };
-    let pp_focused = matches!(s.focus, GoDarkField::Passphrase);
-    let cf_focused = matches!(s.focus, GoDarkField::Confirm);
-    let cf_ok = s.confirm == GO_DARK_CONFIRM_PHRASE;
+    // Passphrase is masked; the typed phrase is shown verbatim so the
+    // user can see the case match live.
+    let displayed_input: String = if s.requires_passphrase {
+        "•".repeat(s.input.chars().count())
+    } else {
+        s.input.clone()
+    };
+    let (prompt_label, hint_below): (&str, String) = if s.requires_passphrase {
+        ("master passphrase: ", "Enter your master passphrase to wipe everything.".into())
+    } else {
+        (
+            "type to confirm: ",
+            format!("Type `{}` (case sensitive) to wipe everything.", GO_DARK_CONFIRM_PHRASE),
+        )
+    };
     let mut lines: Vec<Line> = vec![
         Line::from(""),
         Line::from(Span::styled(
@@ -1130,65 +1141,34 @@ pub fn render_go_dark(f: &mut Frame, s: &crate::app::GoDarkState) {
             Style::default().fg(Color::Red).bold(),
         )),
         Line::from(""),
-        Line::from(vec![
-            Span::styled(
-                if pp_focused { "› " } else { "  " },
-                Style::default().fg(Color::Yellow),
-            ),
-            Span::styled("master passphrase: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                mask(&s.passphrase),
-                if pp_focused {
-                    Style::default().fg(Color::Cyan).bold()
-                } else {
-                    Style::default().fg(Color::White)
-                },
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                if cf_focused { "› " } else { "  " },
-                Style::default().fg(Color::Yellow),
-            ),
-            Span::styled(
-                format!("type '{}': ", GO_DARK_CONFIRM_PHRASE),
-                Style::default().fg(Color::DarkGray),
-            ),
-            Span::styled(
-                s.confirm.clone(),
-                if cf_focused {
-                    Style::default().fg(Color::Cyan).bold()
-                } else if cf_ok {
-                    Style::default().fg(Color::Red).bold()
-                } else {
-                    Style::default().fg(Color::White)
-                },
-            ),
-        ]),
+        Line::from(Span::styled(
+            format!("  {}", hint_below),
+            Style::default().fg(Color::DarkGray),
+        )),
         Line::from(""),
+        Line::from(vec![
+            Span::styled("› ", Style::default().fg(Color::Yellow)),
+            Span::styled(prompt_label, Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                displayed_input,
+                Style::default().fg(Color::Cyan).bold(),
+            ),
+        ]),
     ];
+    // huddle 0.7.6: error renders prominently above the hint bar so the
+    // user can't miss a bad attempt — the previous flow buried it at
+    // the bottom of an already-tall modal.
     if let Some(err) = &s.last_error {
+        lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            format!("  {}", err),
-            Style::default().fg(Color::Red),
+            format!("  ✗ {}", err),
+            Style::default().fg(Color::Red).bold(),
         )));
     }
-    let enabled_hint = if cf_ok {
-        Span::styled(
-            " Enter ",
-            Style::default().fg(Color::Red).bold(),
-        )
-    } else {
-        Span::styled(" Enter ", Style::default().fg(Color::DarkGray))
-    };
+    lines.push(Line::from(""));
     lines.push(Line::from(vec![
-        Span::styled(" Tab", Style::default().fg(Color::Yellow)),
-        Span::styled(" switch  ", Style::default().fg(Color::DarkGray)),
-        enabled_hint,
-        Span::styled(
-            if cf_ok { "delete  " } else { "(confirm phrase to enable)  " },
-            Style::default().fg(Color::DarkGray),
-        ),
+        Span::styled(" Enter", Style::default().fg(Color::Red).bold()),
+        Span::styled(" delete  ", Style::default().fg(Color::DarkGray)),
         Span::styled("Esc", Style::default().fg(Color::Yellow)),
         Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
     ]));

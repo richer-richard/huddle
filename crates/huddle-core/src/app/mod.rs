@@ -3215,6 +3215,15 @@ impl AppHandle {
         repo::list_room_owners(&self.db, room_id).unwrap_or_default()
     }
 
+    /// huddle 0.7.6: true iff this session was started with a master
+    /// passphrase. The TUI uses this to pick the Go Dark gate — passphrase
+    /// if available (the natural strong secret the user already knows),
+    /// else the typed `DELETE EVERYTHING` phrase since no-master-passphrase
+    /// sessions have nothing else to compare against.
+    pub fn has_master_passphrase(&self) -> bool {
+        self.session_persist_key != [0u8; 32]
+    }
+
     /// Phase E: global toggle — when true, inbound dials from
     /// unverified fingerprints are auto-rejected without prompting.
     pub fn verified_only_inbound(&self) -> bool {
