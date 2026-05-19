@@ -441,6 +441,25 @@ your platform's Downloads folder. Phase 2 cap is 1 MiB per file.
   doesn't). Per-DM ephemeral ratchets (Double Ratchet-style) are a
   candidate follow-up.
 
+## What's new in 0.7.10 — restore the Profile sidebar-nav gate
+
+A follow-up to 0.7.9. Dropping the pane-focus gate on Profile's
+`j/k/y` trapped sidebar navigation: when the cursor scrolled into the
+Profile sub-item, `sync_pane_from_selection` live-previewed the pane
+(intentional 0.7 design), and the ungated `j/k/y` handler then stole
+every subsequent arrow/letter — so the cursor couldn't reach Direct,
+Group, People, Activity, or Settings without `Shift+Tab`'ing past it.
+
+0.7.10 reinstates the `SidebarFocus::Pane` gate on `j/k/y`. Capital-
+case `E` / `Q` chords stay ungated — they don't conflict with
+sidebar nav and the one-keystroke discovery flow is worth keeping.
+
+The People analogy 0.7.9 cited turned out to be sharper than it
+looked: People only captures `j/k` inside the Pending sub-tab, and
+reaching Pending requires `Tab`'ing into the pane first. Profile
+auto-switches on selection, so the equivalent gate is "user has
+explicitly `Shift+→`'d into the pane".
+
 ## What's new in 0.7.9 — keybinding-scope fixes from a self-audit
 
 A small follow-up patch from a self-review of the 0.7.8 release. No new

@@ -592,16 +592,28 @@ fn map_sidebar(key: KeyEvent, app: &TuiApp) -> Action {
             _ => {}
         }
     }
-    // huddle 0.7.9: Profile pane row navigation + yank. Match the
-    // pattern People uses for its sublist navigation — pane-active is
-    // enough to claim j/k, no separate focus gate. (0.7.8 required pane
-    // focus, which was inconsistent with People and left users
-    // puzzled why the j/k hint didn't work from sidebar focus.)
-    if matches!(app.pane, Pane::Profile) {
+    // Profile pane row navigation + yank — gated on pane focus so j/k
+    // can't trap the sidebar when `sync_pane_from_selection` live-
+    // previews Profile while the user is still scrolling the sidebar.
+    // 0.7.9 dropped the gate citing People's pattern, but People only
+    // captures j/k inside the Pending sub-tab (reachable after Tab'ing
+    // into the pane). Profile auto-switches the pane on sidebar
+    // selection, so ungated j/k made further sidebar nav impossible.
+    if matches!(app.pane, Pane::Profile)
+        && matches!(app.sidebar.focus, SidebarFocus::Pane)
+    {
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => return Action::ProfileFieldDown,
             KeyCode::Char('k') | KeyCode::Up => return Action::ProfileFieldUp,
             KeyCode::Char('y') => return Action::ProfileFieldYank,
+            _ => {}
+        }
+    }
+    // E / Q stay reachable from either focus — capitalized chords don't
+    // conflict with sidebar navigation, and being able to fire them
+    // without first Tab'ing into the pane keeps the discovery flow short.
+    if matches!(app.pane, Pane::Profile) {
+        match key.code {
             KeyCode::Char('E') => return Action::OpenEditUsername,
             KeyCode::Char('Q') => return Action::OpenQrIdentity,
             _ => {}
