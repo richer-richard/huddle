@@ -3,12 +3,19 @@
 //! Argon2id derives a 32-byte key from a user passphrase + per-room salt.
 //! ChaCha20-Poly1305 then wraps the Megolm session key for transmission.
 //! Anyone in possession of the passphrase + salt can unwrap and join the room.
+//!
+//! huddle 0.7.11: derived keys are returned in a `Zeroizing<[u8;32]>`
+//! wrapper that overwrites the byte slice when the value is dropped.
+//! That doesn't fix every secret-in-memory exposure (the bytes can
+//! still be copied), but it prevents the local owner from leaking
+//! into swap or a stale heap page after the key is no longer in use.
 
 use argon2::{Algorithm, Argon2, Params, Version};
 use base64::Engine;
 use chacha20poly1305::aead::{Aead, AeadCore, KeyInit, OsRng};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use rand::RngCore;
+use zeroize::Zeroizing;
 
 use crate::error::{HuddleError, Result};
 
@@ -28,12 +35,26 @@ pub fn random_salt() -> [u8; SALT_LEN] {
 /// (64 MiB memory, 3 iterations, 4 lanes) and must stay in sync with the
 /// master-key KDF in `storage::keychain::derive_master_key`.
 pub fn derive_key(passphrase: &str, salt: &[u8]) -> Result<[u8; KEY_LEN]> {
+    let zeroizing = derive_key_zeroizing(passphrase, salt)?;
+    // Copy out into a plain array for back-compat with all the call
+    // sites that already accept `&[u8; KEY_LEN]`. The local `zeroizing`
+    // is wiped when it goes out of scope at the end of this function.
+    Ok(*zeroizing)
+}
+
+/// huddle 0.7.11: same as `derive_key` but returns the key in a
+/// zeroize-on-drop wrapper. Callers that want defense-in-depth against
+/// heap-residency leaks should prefer this over `derive_key`.
+pub fn derive_key_zeroizing(
+    passphrase: &str,
+    salt: &[u8],
+) -> Result<Zeroizing<[u8; KEY_LEN]>> {
     let params = Params::new(65_536, 3, 4, Some(KEY_LEN))
         .map_err(|e| HuddleError::Session(format!("argon2 params: {e}")))?;
     let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
-    let mut out = [0u8; KEY_LEN];
+    let mut out = Zeroizing::new([0u8; KEY_LEN]);
     argon
-        .hash_password_into(passphrase.as_bytes(), salt, &mut out)
+        .hash_password_into(passphrase.as_bytes(), salt, out.as_mut_slice())
         .map_err(|e| HuddleError::Session(format!("argon2 derive: {e}")))?;
     Ok(out)
 }

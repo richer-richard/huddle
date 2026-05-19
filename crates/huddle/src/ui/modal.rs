@@ -168,6 +168,37 @@ pub fn render_quit_confirm(f: &mut Frame) {
     f.render_widget(para, area);
 }
 
+/// huddle 0.7.11: confirmation before wiping the entire blocklist.
+pub fn render_clear_blocked_confirm(f: &mut Frame, blocked_count: usize) {
+    let area = centered_rect(56, 7, f.area());
+    f.render_widget(Clear, area);
+    let para = Paragraph::new(vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            format!(" unblock all {blocked_count} blocked peers?"),
+            Style::default().fg(Color::White),
+        )),
+        Line::from(Span::styled(
+            " (they'll be able to dial you again on next contact)",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" [y/Enter]", Style::default().fg(Color::Yellow)),
+            Span::styled(" clear all  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("[Esc/n]", Style::default().fg(Color::Yellow)),
+            Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
+        ]),
+    ])
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Red))
+            .padding(Padding::uniform(1)),
+    );
+    f.render_widget(para, area);
+}
+
 pub fn render_help(f: &mut Frame, scroll: u16) {
     use crate::keybindings::{Context, BINDINGS};
     let area = centered_rect(76, 28, f.area());
@@ -1531,7 +1562,27 @@ pub fn render_onboarding(f: &mut Frame, page_indices: &[usize], cursor: usize) {
     let total = page_indices.len();
 
     let height = (page.body.len() as u16) + 10;
-    let area = centered_rect(76, height.min(24), f.area());
+    // huddle 0.7.11: clamp to the terminal's available space rather
+    // than the hard 76×24 the original code requested. On a narrow
+    // window (mid-flow resize, ssh from a tablet), `centered_rect`
+    // used to return a zero-rect when width < 76 or height < 24 and
+    // the onboarding modal silently disappeared. Now we shrink to fit
+    // and render a "(resize for full view)" hint when truncated.
+    let avail = f.area();
+    let target_w = 76u16.min(avail.width.saturating_sub(2));
+    let target_h = height.min(24).min(avail.height.saturating_sub(2));
+    if target_w < 20 || target_h < 6 {
+        // Truly tiny terminal — render a single-line hint instead of
+        // a sub-pixel rect. Better degradation than silent dismissal.
+        let hint = Paragraph::new(Line::from(Span::styled(
+            " huddle: resize terminal to ≥ 30×8 to read onboarding ",
+            Style::default().fg(Color::Yellow),
+        )));
+        f.render_widget(Clear, avail);
+        f.render_widget(hint, avail);
+        return;
+    }
+    let area = centered_rect(target_w, target_h, avail);
     f.render_widget(Clear, area);
 
     let mut lines: Vec<Line> = Vec::new();

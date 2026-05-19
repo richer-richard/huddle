@@ -5,36 +5,77 @@
 //! pastes through a web form somewhere.
 //!
 //! What's in the JSON:
+//! - `v`: format version. `1` was the original unsigned shape (still
+//!   accepted on decode for back-compat); `2` (huddle 0.7.11+) adds an
+//!   Ed25519 signature over the rest of the payload so tampering with
+//!   any field — salt, owner list, room name — is detected by the
+//!   receiver. `host_multiaddr`'s `/p2p/<peer-id>` suffix remains the
+//!   primary MITM defense at the libp2p layer, but the signature now
+//!   also catches edits that don't touch the multiaddr.
 //! - `host_multiaddr`: the dial target, WITH `/p2p/<peer-id>` suffix —
 //!   libp2p enforces remote-pubkey-matches-this on dial, so this is
-//!   the actual MITM defense (not the fingerprint string below).
+//!   the cryptographic anchor for "who you actually connect to."
 //! - `fingerprint`: the host's 24-char Ed25519 fingerprint, shown in
 //!   the confirmation modal so the receiver can verify ("yep, that's
 //!   the fp Alice texted me out-of-band").
 //! - `room`: optional — when present, the receiver auto-joins after
 //!   the dial completes and the room announcement arrives.
+//! - `creator_pubkey_b64` (v2+): the host's raw Ed25519 pubkey. The
+//!   receiver re-derives the fingerprint from it and rejects the
+//!   invite if `compute_fingerprint(pubkey) != fingerprint`.
+//! - `signed_at_ms` (v2+): epoch-ms at signing time. Used to keep
+//!   replays of stale invites loosely bounded (24h window by default).
+//! - `signature_b64` (v2+): Ed25519 signature over a deterministic
+//!   serialization of the other fields.
 //!
 //! Important: the passphrase is NEVER in the link. Encrypted rooms
 //! still require the joiner to type the passphrase separately;
 //! including it would defeat the point of OOB sharing.
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
+use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
+use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{HuddleError, Result};
+use crate::identity::{compute_fingerprint, Identity};
 
 pub const INVITE_PREFIX: &str = "huddle://invite#";
 
+/// Max accepted age for a v2 signed invite. 24h. Long enough that the
+/// recipient can act in their own time, short enough that captured
+/// invites can't be re-used indefinitely (and they're invalidated
+/// completely after the inviter's listen address changes anyway).
+pub const INVITE_MAX_AGE_MS: i64 = 24 * 60 * 60 * 1000;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InviteLink {
-    /// Always 1 in this version. Receiver rejects unknown versions —
-    /// a bumped invite format gets a new number.
+    /// 1 = legacy unsigned (huddle 0.7.10 and earlier).
+    /// 2 = signed (huddle 0.7.11+).
     pub v: u32,
     pub host_multiaddr: String,
     pub fingerprint: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub room: Option<InviteRoom>,
+    /// huddle 0.7.11: creator's raw Ed25519 pubkey, base64. Required
+    /// for v >= 2. The verifier re-derives the fingerprint from this
+    /// and rejects the invite if it doesn't match `fingerprint`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator_pubkey_b64: Option<String>,
+    /// huddle 0.7.11: epoch-ms at signing time.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub signed_at_ms: i64,
+    /// huddle 0.7.11: Ed25519 signature over `signable_bytes`. Required
+    /// for v >= 2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature_b64: Option<String>,
+}
+
+fn is_zero(n: &i64) -> bool {
+    *n == 0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -52,53 +93,189 @@ pub struct InviteRoom {
     pub owner_fingerprints: Vec<String>,
 }
 
+impl InviteLink {
+    /// Deterministic bytes the v2 signature commits to. Field order
+    /// MUST never change once shipped — receivers that ratchet to a
+    /// newer version still need to verify v2 invites.
+    fn signable_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(256);
+        out.extend_from_slice(b"huddle-invite-v2|");
+        out.extend_from_slice(self.host_multiaddr.as_bytes());
+        out.push(b'|');
+        out.extend_from_slice(self.fingerprint.as_bytes());
+        out.push(b'|');
+        out.extend_from_slice(&self.signed_at_ms.to_be_bytes());
+        out.push(b'|');
+        if let Some(r) = &self.room {
+            out.extend_from_slice(b"room|");
+            out.extend_from_slice(r.id.as_bytes());
+            out.push(b'|');
+            out.extend_from_slice(r.name.as_bytes());
+            out.push(b'|');
+            out.push(if r.encrypted { b'E' } else { b'P' });
+            out.push(b'|');
+            if let Some(s) = &r.salt_b64 {
+                out.extend_from_slice(s.as_bytes());
+            }
+            out.push(b'|');
+            out.extend_from_slice(r.creator_fingerprint.as_bytes());
+            out.push(b'|');
+            // owner list: alphabetically sorted + comma joined for
+            // determinism. Anyone constructing the invite must sort
+            // before signing; the receiver re-sorts before verifying.
+            let mut owners = r.owner_fingerprints.clone();
+            owners.sort();
+            out.extend_from_slice(owners.join(",").as_bytes());
+        } else {
+            out.extend_from_slice(b"no-room");
+        }
+        out
+    }
+}
+
+/// huddle 0.7.11: sign an invite. Sets `v=2`, `creator_pubkey_b64`,
+/// `signed_at_ms`, and `signature_b64`. The input invite's `v` and
+/// signature fields are overwritten.
+pub fn sign_invite(identity: &Identity, mut invite: InviteLink) -> Result<InviteLink> {
+    invite.v = 2;
+    invite.creator_pubkey_b64 = Some(B64.encode(identity.public_bytes()));
+    invite.signed_at_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    invite.signature_b64 = None;
+    // Canonical sort so the verifier can re-canonicalize identically.
+    if let Some(r) = invite.room.as_mut() {
+        r.owner_fingerprints.sort();
+    }
+    let payload = invite.signable_bytes();
+    let sig = identity.sign(&payload);
+    invite.signature_b64 = Some(B64.encode(sig));
+    Ok(invite)
+}
+
 /// Build the `huddle://invite#...` URL form from a parsed `InviteLink`.
 pub fn encode(invite: &InviteLink) -> Result<String> {
     let json = serde_json::to_vec(invite)
         .map_err(|e| HuddleError::Other(format!("invite encode: {e}")))?;
-    Ok(format!("{}{}", INVITE_PREFIX, B64.encode(&json)))
+    Ok(format!("{}{}", INVITE_PREFIX, B64URL.encode(&json)))
 }
 
 /// Parse a `huddle://invite#...` URL back into an `InviteLink`.
+///
+/// huddle 0.7.11: when `v >= 2`, this *also* verifies the signature
+/// against the embedded pubkey, re-derives the fingerprint, and rejects
+/// invites whose `signed_at_ms` is older than `INVITE_MAX_AGE_MS`.
+/// `v == 1` (legacy) parses unchanged so older invites still work,
+/// but callers should display a "this invite is unsigned" warning.
 pub fn decode(url: &str) -> Result<InviteLink> {
     let body = url
         .strip_prefix(INVITE_PREFIX)
         .ok_or_else(|| HuddleError::Other("not a huddle invite link".into()))?;
-    let json = B64
+    let json = B64URL
         .decode(body.trim())
         .map_err(|e| HuddleError::Other(format!("bad base64: {e}")))?;
     let invite: InviteLink = serde_json::from_slice(&json)
         .map_err(|e| HuddleError::Other(format!("bad invite json: {e}")))?;
-    if invite.v != 1 {
+    match invite.v {
+        1 => Ok(invite),
+        2 => {
+            verify_invite_signature(&invite)?;
+            verify_invite_freshness(&invite)?;
+            Ok(invite)
+        }
+        n => Err(HuddleError::Other(format!(
+            "unsupported invite version: {n}"
+        ))),
+    }
+}
+
+/// True if this invite came in unsigned (legacy `v=1`). UI should show
+/// a "this invite is unsigned — verify the fingerprint out-of-band"
+/// warning when this returns true.
+pub fn is_legacy_unsigned(invite: &InviteLink) -> bool {
+    invite.v < 2
+}
+
+fn verify_invite_signature(invite: &InviteLink) -> Result<()> {
+    let pubkey_b64 = invite
+        .creator_pubkey_b64
+        .as_ref()
+        .ok_or_else(|| HuddleError::Other("v2 invite missing creator_pubkey_b64".into()))?;
+    let sig_b64 = invite
+        .signature_b64
+        .as_ref()
+        .ok_or_else(|| HuddleError::Other("v2 invite missing signature_b64".into()))?;
+    let pubkey_bytes = B64
+        .decode(pubkey_b64)
+        .map_err(|e| HuddleError::Other(format!("bad creator_pubkey_b64: {e}")))?;
+    if pubkey_bytes.len() != 32 {
         return Err(HuddleError::Other(format!(
-            "unsupported invite version: {}",
-            invite.v
+            "creator_pubkey is {} bytes, expected 32",
+            pubkey_bytes.len()
         )));
     }
-    Ok(invite)
+    let mut pk_arr = [0u8; 32];
+    pk_arr.copy_from_slice(&pubkey_bytes);
+    let derived_fp = compute_fingerprint(&pk_arr);
+    if derived_fp != invite.fingerprint {
+        return Err(HuddleError::Other(format!(
+            "invite fingerprint {} doesn't match pubkey-derived {}",
+            invite.fingerprint, derived_fp
+        )));
+    }
+    let sig_bytes = B64
+        .decode(sig_b64)
+        .map_err(|e| HuddleError::Other(format!("bad signature_b64: {e}")))?;
+    if sig_bytes.len() != 64 {
+        return Err(HuddleError::Other(format!(
+            "signature is {} bytes, expected 64",
+            sig_bytes.len()
+        )));
+    }
+    let mut sig_arr = [0u8; 64];
+    sig_arr.copy_from_slice(&sig_bytes);
+    let signature = Signature::from_bytes(&sig_arr);
+    let vk = VerifyingKey::from_bytes(&pk_arr)
+        .map_err(|e| HuddleError::Other(format!("bad verifying key: {e}")))?;
+    // Re-canonicalize before verification (in case owner_fingerprints
+    // arrived un-sorted from a less-careful sender).
+    let mut canon = invite.clone();
+    if let Some(r) = canon.room.as_mut() {
+        r.owner_fingerprints.sort();
+    }
+    vk.verify_strict(&canon.signable_bytes(), &signature)
+        .map_err(|e| HuddleError::Other(format!("invite signature verify failed: {e}")))?;
+    Ok(())
+}
+
+fn verify_invite_freshness(invite: &InviteLink) -> Result<()> {
+    if invite.signed_at_ms == 0 {
+        return Err(HuddleError::Other(
+            "v2 invite missing signed_at_ms".into(),
+        ));
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let age = now - invite.signed_at_ms;
+    if age > INVITE_MAX_AGE_MS {
+        return Err(HuddleError::Other(format!(
+            "invite is {}h old — re-generate (max {}h)",
+            age / 3_600_000,
+            INVITE_MAX_AGE_MS / 3_600_000
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn round_trip_peer_only() {
-        let inv = InviteLink {
-            v: 1,
-            host_multiaddr: "/ip4/1.2.3.4/tcp/9000/p2p/12D3KooW...".into(),
-            fingerprint: "abcd-1234-efef-5678-9090-1111".into(),
-            room: None,
-        };
-        let url = encode(&inv).unwrap();
-        assert!(url.starts_with(INVITE_PREFIX));
-        let back = decode(&url).unwrap();
-        assert_eq!(back, inv);
-    }
-
-    #[test]
-    fn round_trip_with_room() {
-        let inv = InviteLink {
+    fn fixture() -> InviteLink {
+        InviteLink {
             v: 1,
             host_multiaddr: "/ip4/1.2.3.4/tcp/9000/p2p/12D3KooW...".into(),
             fingerprint: "abcd-1234-efef-5678-9090-1111".into(),
@@ -110,21 +287,88 @@ mod tests {
                 creator_fingerprint: "abcd-1234-efef-5678-9090-1111".into(),
                 owner_fingerprints: vec!["abcd-1234-efef-5678-9090-1111".into()],
             }),
-        };
+            creator_pubkey_b64: None,
+            signed_at_ms: 0,
+            signature_b64: None,
+        }
+    }
+
+    #[test]
+    fn legacy_v1_round_trip() {
+        let inv = fixture();
         let url = encode(&inv).unwrap();
         let back = decode(&url).unwrap();
+        assert_eq!(back.v, 1);
+        assert!(is_legacy_unsigned(&back));
         assert_eq!(back, inv);
     }
 
     #[test]
+    fn signed_v2_round_trip() {
+        let id = Identity::generate().unwrap();
+        let mut inv = fixture();
+        inv.fingerprint = id.fingerprint().to_string();
+        let signed = sign_invite(&id, inv).unwrap();
+        assert_eq!(signed.v, 2);
+        assert!(signed.signature_b64.is_some());
+        let url = encode(&signed).unwrap();
+        let back = decode(&url).unwrap();
+        assert_eq!(back, signed);
+        assert!(!is_legacy_unsigned(&back));
+    }
+
+    #[test]
+    fn tampered_salt_fails() {
+        let id = Identity::generate().unwrap();
+        let mut inv = fixture();
+        inv.fingerprint = id.fingerprint().to_string();
+        let mut signed = sign_invite(&id, inv).unwrap();
+        // Flip the salt; signature should no longer verify.
+        if let Some(r) = signed.room.as_mut() {
+            r.salt_b64 = Some("ZZZZZZZZ==".into());
+        }
+        let url = encode(&signed).unwrap();
+        let err = decode(&url).unwrap_err();
+        assert!(format!("{err}").contains("invite signature verify failed"));
+    }
+
+    #[test]
+    fn tampered_owner_list_fails() {
+        let id = Identity::generate().unwrap();
+        let mut inv = fixture();
+        inv.fingerprint = id.fingerprint().to_string();
+        let mut signed = sign_invite(&id, inv).unwrap();
+        if let Some(r) = signed.room.as_mut() {
+            r.owner_fingerprints.push("attacker-fp".into());
+        }
+        let url = encode(&signed).unwrap();
+        let err = decode(&url).unwrap_err();
+        assert!(format!("{err}").contains("invite signature verify failed"));
+    }
+
+    #[test]
+    fn substituted_pubkey_fails_fp_check() {
+        let alice = Identity::generate().unwrap();
+        let bob = Identity::generate().unwrap();
+        let mut inv = fixture();
+        inv.fingerprint = alice.fingerprint().to_string();
+        let mut signed = sign_invite(&alice, inv).unwrap();
+        // Swap in Bob's pubkey (so the derived fingerprint will not
+        // match alice's — caught before signature verify is attempted).
+        signed.creator_pubkey_b64 = Some(B64.encode(bob.public_bytes()));
+        let url = encode(&signed).unwrap();
+        let err = decode(&url).unwrap_err();
+        assert!(format!("{err}").contains("doesn't match pubkey-derived"));
+    }
+
+    #[test]
     fn decode_unknown_version_rejects() {
-        // Hand-craft a JSON with v=99 and verify decode bails.
         let bad = serde_json::json!({
             "v": 99,
             "host_multiaddr": "/ip4/1.1.1.1/tcp/1",
             "fingerprint": "x"
         });
-        let url = format!("{}{}", INVITE_PREFIX, B64.encode(bad.to_string()));
+        let url = format!("{}{}", INVITE_PREFIX, B64URL.encode(bad.to_string()));
         assert!(decode(&url).is_err());
     }
 

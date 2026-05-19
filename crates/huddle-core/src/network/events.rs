@@ -60,4 +60,16 @@ pub enum NetworkEvent {
         remote_peer: PeerId,
         success: bool,
     },
+    /// huddle 0.7.11: a connection to `peer_id` closed (last connection
+    /// to that peer). Fires once per (peer disappears) regardless of how
+    /// many underlying connections there were. The app layer uses this
+    /// to clean `connected_dial_addrs` and update the lobby's online
+    /// dots — pre-0.7.11 only mDNS PeerExpired was wired, so relay /
+    /// internet peers stayed "online" in the lobby long after they
+    /// dropped.
+    PeerDisconnected { peer_id: PeerId },
+    /// huddle 0.7.11: a relay reservation we were holding has expired
+    /// or failed to renew, so we're no longer reachable via that
+    /// circuit. The app surfaces this in the NAT badge.
+    RelayReservationLost { relay_peer: PeerId },
 }

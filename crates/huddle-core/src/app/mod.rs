@@ -146,6 +146,12 @@ struct SasFlow {
     sas_code: Option<crate::crypto::sas::SasCode>,
     our_confirmed: bool,
     their_confirmed: bool,
+    /// huddle 0.7.11: latch that flips true the first time `finish_sas`
+    /// runs for this flow. Prevents a race between `sas_match` and the
+    /// inbound `SasConfirm{matched:true}` handler both observing
+    /// `both_done = true` and each calling `finish_sas` — pre-0.7.11
+    /// that double-fired `SasVerified` and re-ran the DB writes.
+    finalized: bool,
 }
 
 #[derive(Clone)]
@@ -353,6 +359,15 @@ impl AppHandle {
 
     pub fn peer_id(&self) -> PeerId {
         self.identity.peer_id()
+    }
+
+    /// huddle 0.7.11: bind an invite link to our Ed25519 identity by
+    /// signing it. The receiver re-derives the fingerprint from the
+    /// embedded pubkey and rejects the invite if any signed field
+    /// (host_multiaddr, fingerprint, room id/name/encrypted/salt/
+    /// creator_fp/owner_list, signed_at_ms) was tampered with.
+    pub fn sign_invite(&self, invite: crate::invite::InviteLink) -> Result<crate::invite::InviteLink> {
+        crate::invite::sign_invite(&self.identity, invite)
     }
 
     pub fn discovered_rooms(&self) -> Vec<DiscoveredRoom> {
@@ -830,21 +845,24 @@ impl AppHandle {
         // before. New 0.7.1+ DMs all have `encrypted = true`.
         let (passphrase_key, crypto) = if info.encrypted {
             let pk = self.try_derive_dm_key(room_id, partner_fingerprint);
-            let c = Some(RoomCrypto::load(
+            // huddle 0.7.11: bubble up the error instead of .expect. The
+            // inbound-DM auto-bootstrap path spawns this on its own task;
+            // a transient DB write failure used to panic the task and
+            // silently kill all subsequent DM bootstraps.
+            let c = match RoomCrypto::load(
                 self.db.clone(),
                 room_id.to_string(),
                 our_fp.clone(),
                 self.session_persist_key,
-            )?
-            .unwrap_or_else(|| {
-                RoomCrypto::new_for_room(
+            )? {
+                Some(c) => Some(c),
+                None => Some(RoomCrypto::new_for_room(
                     self.db.clone(),
                     room_id.to_string(),
                     our_fp.clone(),
                     self.session_persist_key,
-                )
-                .expect("create RoomCrypto for DM re-bootstrap")
-            }));
+                )?),
+            };
             (pk, c)
         } else {
             (None, None)
@@ -1077,11 +1095,17 @@ impl AppHandle {
     /// (peers then only notice via the discovered-room TTL). The local
     /// leave always succeeds regardless.
     pub async fn leave_room(&self, room_id: &str) -> Result<bool> {
-        // Broadcast a leave notice before unsubscribing.
+        // Broadcast a signed leave notice before unsubscribing. huddle
+        // 0.7.11: MemberLeave is now signed so peers can't spoof another
+        // member's leave to evict them from honest rosters.
         let leave_msg = RoomMessage::MemberLeave {
             sender_fingerprint: self.identity.fingerprint().to_string(),
         };
-        let dispatched = match encode_wire(&leave_msg) {
+        let dispatched = match crate::crypto::sign_message(&self.identity, &leave_msg)
+            .and_then(|env| {
+                crate::network::protocol::encode_wire_signed(&env)
+                    .map_err(|e| HuddleError::Session(format!("encode signed leave: {e}")))
+            }) {
             Ok(bytes) => {
                 self.network
                     .publish_room_message(room_id.to_string(), bytes)
@@ -1089,7 +1113,7 @@ impl AppHandle {
                 true
             }
             Err(e) => {
-                warn!(%e, %room_id, "failed to encode MemberLeave notice");
+                warn!(%e, %room_id, "failed to sign+encode MemberLeave notice");
                 false
             }
         };
@@ -1711,7 +1735,12 @@ impl AppHandle {
             display_name,
             sender_ed25519_pubkey: Some(B64.encode(self.identity.public_bytes())),
         };
-        let bytes = encode_wire(&msg)?;
+        // huddle 0.7.11: MemberAnnounce is now signed end-to-end. The
+        // envelope's Ed25519 pubkey is the canonical TOFU pin for this
+        // fingerprint; the inner `sender_ed25519_pubkey` field stays
+        // present for back-compat parsing but is no longer authoritative.
+        let env = crate::crypto::sign_message(&self.identity, &msg)?;
+        let bytes = crate::network::protocol::encode_wire_signed(&env)?;
         self.network
             .publish_room_message(room_id.to_string(), bytes)
             .await;
@@ -1793,6 +1822,25 @@ impl AppHandle {
                     .unwrap()
                     .retain(|_addr, pid| *pid != peer_id);
                 let _ = self.app_event_tx.send(AppEvent::PeerExpired { peer_id });
+            }
+            NetworkEvent::PeerDisconnected { peer_id } => {
+                // huddle 0.7.11: relay / internet peers don't trigger
+                // mDNS PeerExpired, so without this their entries in
+                // connected_dial_addrs stayed forever and the lobby
+                // showed them as "● online" indefinitely after they
+                // dropped. Same cleanup shape as PeerExpired.
+                self.connected_dial_addrs
+                    .lock()
+                    .unwrap()
+                    .retain(|_addr, pid| *pid != peer_id);
+                let _ = self.app_event_tx.send(AppEvent::PeerExpired { peer_id });
+            }
+            NetworkEvent::RelayReservationLost { relay_peer } => {
+                warn!(%relay_peer, "relay reservation lost; reachability may degrade");
+                // No app-event yet — the next AutoNAT probe will
+                // reflect reachability accurately. Future work: surface
+                // as a dedicated AppEvent so the TUI can flag it in
+                // the NAT badge.
             }
             NetworkEvent::ListeningOn { address } => {
                 let _ = self.app_event_tx.send(AppEvent::ListeningOn {
@@ -1889,6 +1937,21 @@ impl AppHandle {
                     // can show "DM from <partner>" and auto-bootstrap a
                     // local active room so we can receive messages
                     // immediately without waiting for a user action.
+                    //
+                    // huddle 0.7.11: drop the auto-bootstrap if the
+                    // partner is on the persistent blocklist. Without
+                    // this gate, a blocked peer could re-introduce
+                    // themselves into our sidebar simply by re-announcing
+                    // the DM topic; we'd subscribe and persist a row for
+                    // them before any user action.
+                    if repo::is_peer_blocked(&self.db, &ann.creator_fingerprint).unwrap_or(false)
+                    {
+                        debug!(
+                            partner = %ann.creator_fingerprint,
+                            "ignoring Direct announcement from blocked peer"
+                        );
+                        return;
+                    }
                     self.discovered_rooms
                         .lock()
                         .unwrap()
@@ -2085,9 +2148,16 @@ impl AppHandle {
                 // identified peer and tell the TUI to switch panes.
                 // `start_direct` is idempotent on `canonical_dm_room_id`,
                 // so this is safe to call even if a DM already exists.
-                // Blocked peers fall through `start_direct` naturally —
-                // they won't reach trust + identify at all.
-                if should_auto_dm && fingerprint != self.identity.fingerprint() {
+                //
+                // huddle 0.7.11: explicitly gate on the persistent
+                // blocklist here. The original comment claimed blocked
+                // peers "fall through naturally" but that was only true
+                // for *inbound* dials — the block check at line ~2237
+                // is inbound-only. Outbound user-dials hit Identify and
+                // landed here without ever consulting the blocklist,
+                // bypassing the user's explicit block.
+                let blocked = repo::is_peer_blocked(&self.db, &fingerprint).unwrap_or(false);
+                if should_auto_dm && !blocked && fingerprint != self.identity.fingerprint() {
                     match self.start_direct(&fingerprint).await {
                         Ok(room_id) => {
                             let _ = self.app_event_tx.send(AppEvent::AutoOpenDm {
@@ -2298,6 +2368,26 @@ impl AppHandle {
                 if sender_fingerprint == our_fp {
                     return;
                 }
+                // huddle 0.7.11: MemberAnnounce must arrive inside a
+                // signed envelope, and the signer's fingerprint must
+                // match the claimed announcer. Closes the TOFU-pubkey
+                // hijack: pre-0.7.11 a malicious peer could race a
+                // victim's first announce on a room and pin a fabricated
+                // ed25519 pubkey under the victim's fingerprint, so honest
+                // peers would later reject the real victim's signed
+                // messages. Now the inner `sender_ed25519_pubkey` is
+                // ignored — the envelope's pubkey is the authoritative one.
+                let signer = match verified_signer {
+                    Some(fp) => fp,
+                    None => {
+                        warn!(%sender_fingerprint, %room_id, "MemberAnnounce arrived unsigned; dropping");
+                        return;
+                    }
+                };
+                if signer != sender_fingerprint {
+                    warn!(%signer, %sender_fingerprint, %room_id, "MemberAnnounce signer mismatch; dropping");
+                    return;
+                }
                 // Drop announcements from banned fingerprints — they
                 // can't rejoin until an owner unbans them (Phase B).
                 if repo::is_member_banned(&self.db, room_id, &sender_fingerprint)
@@ -2486,6 +2576,19 @@ impl AppHandle {
                 if sender_fingerprint == our_fp {
                     return;
                 }
+                // huddle 0.7.11: ban filter on every content-bearing arm.
+                // Pre-0.7.11 only MemberAnnounce was filtered, so banned
+                // peers could still post Encrypted/Plain after a kick
+                // (cosmetically in encrypted rooms post-rotation since
+                // they have no inbound session, but in unencrypted rooms
+                // their plaintext rendered freely — see RoomMessage::Plain
+                // arm below).
+                if repo::is_member_banned(&self.db, room_id, &sender_fingerprint)
+                    .unwrap_or(false)
+                {
+                    debug!(%sender_fingerprint, %room_id, "dropping Encrypted from banned peer");
+                    return;
+                }
                 let ct_bytes = match base64::Engine::decode(
                     &base64::engine::general_purpose::STANDARD,
                     &ciphertext_b64,
@@ -2541,6 +2644,12 @@ impl AppHandle {
                 if sender_fingerprint == our_fp {
                     return;
                 }
+                if repo::is_member_banned(&self.db, room_id, &sender_fingerprint)
+                    .unwrap_or(false)
+                {
+                    debug!(%sender_fingerprint, %room_id, "dropping Plain from banned peer");
+                    return;
+                }
                 let sent_at = now_unix();
                 let _ = repo::insert_room_message(
                     &self.db,
@@ -2561,6 +2670,11 @@ impl AppHandle {
             }
             RoomMessage::Typing { sender_fingerprint } => {
                 if sender_fingerprint == our_fp {
+                    return;
+                }
+                if repo::is_member_banned(&self.db, room_id, &sender_fingerprint)
+                    .unwrap_or(false)
+                {
                     return;
                 }
                 let expiry = now_unix() + TYPING_TTL_SECS;
@@ -2608,6 +2722,20 @@ impl AppHandle {
                 if sender_fingerprint == our_fp {
                     return;
                 }
+                // huddle 0.7.11: MemberLeave must arrive inside a signed
+                // envelope whose signer matches the claimed leaver.
+                // Pre-0.7.11 plain leaves and forged leaves are dropped.
+                let signer = match verified_signer {
+                    Some(fp) => fp,
+                    None => {
+                        warn!(%sender_fingerprint, %room_id, "MemberLeave arrived unsigned; dropping");
+                        return;
+                    }
+                };
+                if signer != sender_fingerprint {
+                    warn!(%signer, %sender_fingerprint, %room_id, "MemberLeave signer mismatch; dropping");
+                    return;
+                }
                 let removed = {
                     let mut rooms = self.active_rooms.lock().unwrap();
                     if let Some(room) = rooms.get_mut(room_id) {
@@ -2635,6 +2763,29 @@ impl AppHandle {
                 if sender_fingerprint == our_fp {
                     return; // ignore our own broadcast
                 }
+                // huddle 0.7.11: FileOffer must be signed so peers can't
+                // spoof attribution. The chunk stream itself stays plain
+                // (sha256 over the assembly is the integrity gate), but
+                // who *announced* the file is now bound to the signer.
+                let signer = match verified_signer {
+                    Some(fp) => fp,
+                    None => {
+                        warn!(%sender_fingerprint, %room_id, %file_id, "FileOffer arrived unsigned; dropping");
+                        return;
+                    }
+                };
+                if signer != sender_fingerprint {
+                    warn!(%signer, %sender_fingerprint, %room_id, %file_id, "FileOffer signer mismatch; dropping");
+                    return;
+                }
+                // Drop offers from banned peers in the same shape as
+                // MemberAnnounce — keeps moderation invariant tight.
+                if repo::is_member_banned(&self.db, room_id, &sender_fingerprint)
+                    .unwrap_or(false)
+                {
+                    info!(%sender_fingerprint, %room_id, %file_id, "dropping FileOffer from banned peer");
+                    return;
+                }
                 self.handle_file_offer(
                     room_id,
                     sender_fingerprint,
@@ -2654,6 +2805,11 @@ impl AppHandle {
                 data_b64,
             } => {
                 if sender_fingerprint == our_fp {
+                    return;
+                }
+                if repo::is_member_banned(&self.db, room_id, &sender_fingerprint)
+                    .unwrap_or(false)
+                {
                     return;
                 }
                 self.handle_file_chunk(
@@ -2790,6 +2946,7 @@ impl AppHandle {
                         sas_code: Some(sas_code.clone()),
                         our_confirmed: false,
                         their_confirmed: false,
+                        finalized: false,
                     },
                 );
                 // Respond with our pubkey so the initiator can compute
@@ -3078,7 +3235,14 @@ impl AppHandle {
                         return;
                     }
                     flow.their_confirmed = true;
-                    if flow.our_confirmed && flow.their_confirmed {
+                    // huddle 0.7.11: only fire finalize from this arm
+                    // when the flow hasn't already been finalized by
+                    // the local `sas_match` path. The `finalized`
+                    // latch is set inside `finish_sas` (taken under
+                    // this same Mutex), so the two paths can't both
+                    // observe it as `false`.
+                    if flow.our_confirmed && flow.their_confirmed && !flow.finalized {
+                        flow.finalized = true;
                         (
                             Some(flow.room_id.clone()),
                             Some(flow.partner_fingerprint.clone()),
@@ -3162,6 +3326,15 @@ impl AppHandle {
             let room = rooms
                 .get_mut(room_id)
                 .ok_or_else(|| HuddleError::Other(format!("not in room {room_id}")))?;
+            // huddle 0.7.11: read-only joiners (code-joined peers) cannot
+            // send files. Mirrors the check in send_room_message; without
+            // it, code-joined peers could broadcast FileOffer/FileChunk
+            // even though existing members ignore their chat messages.
+            if room.read_only {
+                return Err(HuddleError::Other(
+                    "this room is read-only — you can't send files".into(),
+                ));
+            }
             if room.info.encrypted {
                 let crypto = room
                     .crypto
@@ -3213,7 +3386,12 @@ impl AppHandle {
             sender_fingerprint: our_fp.clone(),
         });
 
-        // Publish the offer.
+        // Publish the offer. huddle 0.7.11: FileOffer is now signed so
+        // peers can't announce a file in someone else's name (attribution
+        // spoof). FileChunks themselves stay plain — the receiver
+        // assembles by chunk-index and verifies SHA-256 against
+        // `file_id`, so spoofed chunks waste bandwidth but can't smuggle
+        // mismatched bytes through the hash gate.
         let offer = RoomMessage::FileOffer {
             sender_fingerprint: our_fp.clone(),
             file_id: file_id.clone(),
@@ -3223,10 +3401,12 @@ impl AppHandle {
             chunk_count: total,
             encrypted_meta: encrypted_meta_opt,
         };
-        if let Ok(bytes) = encode_wire(&offer) {
-            self.network
-                .publish_room_message(room_id.to_string(), bytes)
-                .await;
+        if let Ok(env) = crate::crypto::sign_message(&self.identity, &offer) {
+            if let Ok(bytes) = crate::network::protocol::encode_wire_signed(&env) {
+                self.network
+                    .publish_room_message(room_id.to_string(), bytes)
+                    .await;
+            }
         }
 
         // Stream chunks. Brief pacing so gossipsub doesn't see a thundering
@@ -3831,6 +4011,7 @@ impl AppHandle {
                 sas_code: None,
                 our_confirmed: false,
                 their_confirmed: false,
+                finalized: false,
             },
         );
         self.network
@@ -3849,10 +4030,17 @@ impl AppHandle {
                 .get_mut(tx_id)
                 .ok_or_else(|| HuddleError::Other("unknown SAS tx_id".into()))?;
             flow.our_confirmed = true;
+            // huddle 0.7.11: latch finalize so the inbound SasConfirm
+            // handler won't fire `finish_sas` a second time. See
+            // SasConfirm arm for the symmetric guard.
+            let do_finish = flow.our_confirmed && flow.their_confirmed && !flow.finalized;
+            if do_finish {
+                flow.finalized = true;
+            }
             (
                 flow.room_id.clone(),
                 flow.partner_fingerprint.clone(),
-                flow.our_confirmed && flow.their_confirmed,
+                do_finish,
             )
         };
         let msg = RoomMessage::SasConfirm {
@@ -4302,15 +4490,22 @@ impl AppHandle {
     }
 
     /// Emit MentionReceived if `body` contains either our full
-    /// fingerprint or its short form (first hex group).
+    /// fingerprint or our `HD-XXXX-XXXX` 8-hex-char prefix.
+    ///
+    /// huddle 0.7.11: pre-0.7.11 the short-form match used only the
+    /// first 4-hex group (~65 K possibilities), so unrelated peers
+    /// sharing a prefix triggered false mentions — and a hostile peer
+    /// could weaponize a 4-hex literal in their message body to spam
+    /// the victim's terminal bell, bypassing per-room mute. Bumping to
+    /// the first 8 hex chars makes the search space 16^8 ≈ 4 billion
+    /// and effectively eliminates collisions while still being short
+    /// enough to type as a mention ("hey HD-a3b1c2d4 …").
     fn maybe_emit_mention(&self, room_id: &str, body: &str) {
         let full = self.identity.fingerprint().to_lowercase();
-        // First hex group, e.g. "a3b1" of "a3b1-c2d4-...".
-        let short: &str = full.split('-').next().unwrap_or(&full);
+        // First 8 hex chars (two dash-separated groups joined), e.g.
+        // "a3b1c2d4" of "a3b1-c2d4-…".
+        let short: String = full.chars().filter(|c| c.is_ascii_hexdigit()).take(8).collect();
         let lower = body.to_lowercase();
-        // The full fingerprint anywhere counts; the short form counts only
-        // as a standalone hex token, so it can't match an arbitrary
-        // substring of an unrelated hash, URL, or word.
         let hit = lower.contains(full.as_str())
             || lower
                 .split(|c: char| !c.is_ascii_hexdigit())
@@ -4535,10 +4730,23 @@ fn ct_eq_32(a: &[u8; 32], b: &[u8; 32]) -> bool {
 /// `go_dark` only — not a general-purpose util.
 fn wipe_file(path: &Path) {
     use std::io::Write;
+    // huddle 0.7.11: write zeros in a 64 KiB scratch buffer instead of
+    // allocating a vec the full file size. The original implementation
+    // OOM'd `go_dark` mid-wipe whenever a user had downloaded a
+    // multi-GB attachment — the panic aborted before DB / config wipe,
+    // leaving a half-wiped data dir.
+    const SCRATCH: usize = 64 * 1024;
     if let Ok(meta) = std::fs::metadata(path) {
         if let Ok(mut f) = std::fs::OpenOptions::new().write(true).open(path) {
-            let zeros = vec![0u8; meta.len() as usize];
-            let _ = f.write_all(&zeros);
+            let zeros = [0u8; SCRATCH];
+            let mut remaining = meta.len();
+            while remaining > 0 {
+                let n = remaining.min(SCRATCH as u64) as usize;
+                if f.write_all(&zeros[..n]).is_err() {
+                    break;
+                }
+                remaining -= n as u64;
+            }
             let _ = f.sync_all();
         }
     }
@@ -4610,10 +4818,14 @@ fn generate_join_passphrase() -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
-/// Phase F: short human-readable join code. 8 chars from a 32-symbol
-/// alphabet (no easily-confused chars like 0/O/I/1) ≈ 40 bits — plenty
-/// for a 10-minute online gate since the owner's client checks
+/// Phase F: short human-readable join code. 8 chars from a 31-symbol
+/// alphabet (no easily-confused chars like 0/O/I/1/L) ≈ 39.6 bits —
+/// plenty for a 10-minute online gate since the owner's client checks
 /// exact-match (not brute-force-able offline).
+///
+/// huddle 0.7.11: comment said "32-symbol" but the literal contains 31
+/// bytes (A-Z minus I/L/O = 23, plus 2-9 = 8, total 31). Doc updated
+/// to match.
 fn generate_alphanumeric_code(len: usize) -> String {
     use rand::Rng;
     const ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";

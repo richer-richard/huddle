@@ -171,11 +171,23 @@ fn apply_selection_fg<'a>(line: Line<'a>, theme: &Theme, focused: bool, is_sel: 
     }
     let fg = if focused { theme.warn } else { theme.text_dim };
     let line_style = line.style;
+    // huddle 0.7.11: preserve the encryption marker color. Pre-0.7.11
+    // every span had its fg stomped to yellow/dim, which drowned the
+    // magenta 🔒 badge on a selected encrypted room — users lost the
+    // visual signal that a row was encrypted exactly when they were
+    // about to act on it. Spans whose fg is `theme.encrypted` keep
+    // their color but still get the bold modifier so they stay legible
+    // against the selection background.
     let spans: Vec<Span<'a>> = line
         .spans
         .into_iter()
         .map(|s| {
-            let style = s.style.fg(fg).add_modifier(Modifier::BOLD);
+            let keep_fg = s.style.fg == Some(theme.encrypted);
+            let style = if keep_fg {
+                s.style.add_modifier(Modifier::BOLD)
+            } else {
+                s.style.fg(fg).add_modifier(Modifier::BOLD)
+            };
             Span::styled(s.content, style)
         })
         .collect();
@@ -265,14 +277,20 @@ fn render_item<'a>(
                         .map(short_fp)
                         .unwrap_or_else(|| "(pending)".into())
                 });
-            // Connection dot: tracking online-vs-offline for a DM
-            // partner requires cross-referencing known_peers; for v1 we
-            // just show ● if any active dial address matches the
-            // partner.
+            // Connection dot. huddle 0.7.11: pre-0.7.11 compared
+            // `p.label` (the human-readable username) against `fp` (the
+            // fingerprint), so every DM row showed ○ offline even when
+            // the partner was connected. The correct field is
+            // `p.fingerprint`, which Identify populates from the
+            // remote peer's Ed25519 pubkey on first contact.
             let online = partner
                 .as_deref()
-                .map(|fp| app.known_peers.iter().any(|p| p.connected_peer_id.is_some()
-                    && p.label.as_deref() == Some(fp)))
+                .map(|fp| {
+                    app.known_peers.iter().any(|p| {
+                        p.connected_peer_id.is_some()
+                            && p.fingerprint.as_deref() == Some(fp)
+                    })
+                })
                 .unwrap_or(false);
             let dot = if online { "●" } else { "○" };
             let mut spans = vec![

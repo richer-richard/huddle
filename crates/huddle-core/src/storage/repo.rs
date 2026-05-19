@@ -56,7 +56,13 @@ pub fn set_display_name(db: &Db, name: Option<&str>) -> Result<()> {
 }
 
 /// Look up the most-recently-seen display name for a given fingerprint
-/// in a room (or anywhere if room_id is empty).
+/// across all rooms. huddle 0.7.11: pre-0.7.11 the doc comment claimed
+/// per-room scoping ("in a room (or anywhere if room_id is empty)"),
+/// but the function signature takes no room_id. The implementation has
+/// always been room-agnostic — pick the freshest `last_seen` regardless
+/// of which room set the display name. Doc updated to match reality.
+/// Callers that need per-room scoping should use the room_members table
+/// directly with an explicit `room_id` filter.
 pub fn lookup_display_name(db: &Db, fingerprint: &str) -> Result<Option<String>> {
     let conn = db.lock().unwrap();
     let mut stmt = conn.prepare(
@@ -807,7 +813,10 @@ pub fn delete_pending_friend_requests_for_fp(db: &Db, fingerprint: &str) -> Resu
 /// number of rows pruned so callers can surface a status hint if any
 /// pending requests aged out while the user was offline.
 pub fn cleanup_expired_pending_friend_requests(db: &Db, now: i64) -> Result<usize> {
-    let cutoff = now - PENDING_FRIEND_REQUEST_TTL_SECS;
+    // huddle 0.7.11: saturating_sub guards against `now < TTL` (occurs
+    // in tests with hand-crafted timestamps and on freshly-reset clocks)
+    // where a plain `now - TTL` would go negative and match every row.
+    let cutoff = now.saturating_sub(PENDING_FRIEND_REQUEST_TTL_SECS);
     let conn = db.lock().unwrap();
     let removed = conn.execute(
         "DELETE FROM pending_friend_requests WHERE received_at < ?1",

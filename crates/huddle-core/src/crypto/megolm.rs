@@ -229,10 +229,16 @@ impl RoomCrypto {
 }
 
 fn now_unix() -> i64 {
+    // huddle 0.7.11: do NOT panic if the wall clock is set before the
+    // UNIX epoch (rare but reachable: VM clones with reset RTCs, ARM
+    // SBCs without a battery-backed clock, ntpd not yet synced).
+    // `unwrap()` here used to take down the network task on every
+    // encrypt / decrypt / persist; saturating to 0 is safe — the value
+    // is only used as a stored last-seen timestamp.
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]

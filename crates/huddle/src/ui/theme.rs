@@ -12,7 +12,9 @@ use ratatui::style::{Color, Modifier, Style};
 #[derive(Debug, Clone)]
 pub struct Theme {
     pub accent: Color,
-    pub accent_dim: Color,
+    // huddle 0.7.11: dropped unused `accent_dim` field — it was never
+    // read after the 0.7 TUI refactor merged the dim accent into
+    // `text_dim` for hint chips.
     pub text: Color,
     pub text_dim: Color,
     pub border: Color,
@@ -29,7 +31,6 @@ impl Theme {
     pub fn dark() -> Self {
         Self {
             accent: Color::Cyan,
-            accent_dim: Color::DarkGray,
             text: Color::White,
             text_dim: Color::DarkGray,
             border: Color::DarkGray,

@@ -24,6 +24,12 @@ pub fn room_topic(room_id: &str) -> String {
 ///
 /// The following variants MUST be sent inside a `Signed` envelope, and
 /// receivers MUST drop them when they arrive unsigned:
+///   - `MemberLeave` (signer must equal the claimed `sender_fingerprint`;
+///     huddle 0.7.11 — closes the unsigned-leave spoof bug)
+///   - `MemberAnnounce` (signer must equal the claimed `sender_fingerprint`;
+///     huddle 0.7.11 — closes the TOFU-pubkey hijack bug)
+///   - `FileOffer` (signer must equal the claimed `sender_fingerprint`;
+///     huddle 0.7.11 — prevents attribution spoofing)
 ///   - `RotateRoomKey` (signer must equal the claimed `rotator_fingerprint`)
 ///   - `OwnerGrant`, `BanMember` (signer must be a current room owner)
 ///   - `SasInit`, `SasResponse`, `SasConfirm` (SAS handshake — signature
@@ -37,7 +43,9 @@ pub fn room_topic(room_id: &str) -> String {
 ///
 /// Verification happens via `crate::crypto::verify_signed`: it re-derives
 /// the fingerprint from `ed25519_pubkey_b64`, asserts equality with
-/// `fingerprint`, then `Ed25519::verify` over `payload_b64` decoded.
+/// `fingerprint`, runs `Ed25519::verify_strict` over the decoded
+/// `payload_b64`, and rejects envelopes whose `signed_at_ms` falls
+/// outside a ±5 min window from now (replay protection).
 ///
 /// Format choice: payload is base64'd serialized `RoomMessage` JSON
 /// (not the JSON bytes directly) so the envelope itself is plain JSON
@@ -48,6 +56,13 @@ pub struct SignedRoomMessage {
     pub ed25519_pubkey_b64: String,
     pub payload_b64: String,
     pub signature_b64: String,
+    /// huddle 0.7.11: epoch-ms timestamp the sender bound into the
+    /// signature, used by receivers as replay protection. `#[serde(default)]`
+    /// for forward-compat parsing — but the verifier rejects `0` and
+    /// values outside the configured window, so legacy pre-0.7.11 senders
+    /// no longer satisfy `verify_signed`.
+    #[serde(default)]
+    pub signed_at_ms: i64,
 }
 
 /// What actually gets serialized onto a per-room gossipsub topic. New

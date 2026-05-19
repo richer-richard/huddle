@@ -45,6 +45,9 @@ pub fn render(f: &mut Frame, app: &TuiApp) {
         Modal::CommandPalette(s) => modal::render_command_palette(f, s),
         Modal::UpdateCheckOptIn => modal::render_update_opt_in(f),
         Modal::QuitConfirm => modal::render_quit_confirm(f),
+        Modal::ConfirmClearBlocked => {
+            modal::render_clear_blocked_confirm(f, app.handle.list_blocked_peers().len())
+        }
         Modal::Help => modal::render_help(f, app.help_scroll),
         Modal::Error(msg) => modal::render_error(f, msg),
         Modal::Info(msg) => modal::render_info(f, msg),

@@ -132,7 +132,7 @@ pub const ONBOARDING_PAGES: &[OnboardingPage] = &[
             "  ,   jump to Settings pane",
             "  Tab/Shift+Tab   jump between sidebar sections",
             "  Space/←/→       expand/collapse a section",
-            "  Ctrl+I          toggle the member margin in a Group",
+            "  Alt+M           toggle the member margin in a Group",
             "",
             "Retired: tab-bar, Ctrl+B (back-to-lobby), numeric tab jump.",
             "Direct chats and group chats are now visually distinct;",
@@ -478,6 +478,13 @@ pub enum Modal {
     /// in-band picker.
     InvitePicker(InvitePickerState),
     QuitConfirm,
+    /// huddle 0.7.11: confirmation before wiping the entire blocklist.
+    /// Pre-0.7.11 the bare `c` keystroke on Settings → Privacy cleared
+    /// the blocklist instantly — one keystroke from data loss, and the
+    /// same `c` opened the join-code modal in the lobby so muscle
+    /// memory was destructive. Now `c` opens this modal and the user
+    /// must press Enter or `y` to actually clear.
+    ConfirmClearBlocked,
     Help,
     Error(String),
     Info(String),
@@ -1097,13 +1104,10 @@ impl TuiApp {
         }
     }
 
-    /// huddle 0.7: get unread count for a room (0 if untracked).
-    pub fn unread_count(&self, room_id: &str) -> u32 {
-        self.unread.get(room_id).copied().unwrap_or(0)
-    }
-
     /// huddle 0.7: clear unread for a room. Called when that room
-    /// becomes the active pane.
+    /// becomes the active pane. (huddle 0.7.11: removed unused
+    /// `unread_count` accessor — `app.unread.get(...)` is used
+    /// directly at every call site.)
     pub fn clear_unread(&mut self, room_id: &str) {
         self.unread.remove(room_id);
     }
@@ -1271,11 +1275,9 @@ impl TuiApp {
         }
     }
 
-    /// huddle 0.6: count of modals queued behind the active one. Used
-    /// by the lobby/room status bar to render a "[N pending]" badge.
-    pub fn pending_count(&self) -> usize {
-        self.pending_modals.len()
-    }
+    // huddle 0.7.11: removed `pending_count` — the modal-queue badge
+    // ended up not shipping in 0.6 and no caller uses the accessor.
+    // `pending_modals` is still tracked internally.
 
     pub fn handle_app_event(&mut self, ev: AppEvent) {
         match ev {
@@ -2476,6 +2478,10 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             app.modal = Modal::QuitConfirm;
             Ok(false)
         }
+        Action::OpenClearBlockedConfirm => {
+            app.modal = Modal::ConfirmClearBlocked;
+            Ok(false)
+        }
         Action::CloseModal => {
             app.modal = Modal::None;
             Ok(false)
@@ -3474,12 +3480,20 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
                 _ => None,
             };
 
-            let invite = huddle_core::invite::InviteLink {
+            let unsigned = huddle_core::invite::InviteLink {
                 v: 1,
                 host_multiaddr,
                 fingerprint: our_fp,
                 room: room.clone(),
+                creator_pubkey_b64: None,
+                signed_at_ms: 0,
+                signature_b64: None,
             };
+            // huddle 0.7.11: sign via AppHandle so the invite is bound
+            // to the local Ed25519 identity. Falls back to v=1 only if
+            // signing somehow fails — the receiver will then show the
+            // "this invite is unsigned" warning.
+            let invite = app.handle.sign_invite(unsigned.clone()).unwrap_or(unsigned);
             match huddle_core::invite::encode(&invite) {
                 Ok(url) => {
                     app.modal = Modal::ShowInvite(ShowInviteState {
@@ -3885,6 +3899,9 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
                 )
             };
             app.set_status(msg);
+            // huddle 0.7.11: ClearBlockedPeers is now reached via the
+            // ConfirmClearBlocked modal; close it on success.
+            app.modal = Modal::None;
             Ok(false)
         }
         Action::ToggleRoomVerifiedOnly => {
@@ -4570,11 +4587,11 @@ pub fn gather_invite_candidates(
 
     let mut out: Vec<InviteCandidate> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
-    let mut push = |list: &mut Vec<InviteCandidate>,
-                    seen: &mut HashSet<String>,
-                    fp: String,
-                    tier: InviteTier,
-                    username: Option<String>| {
+    let push = |list: &mut Vec<InviteCandidate>,
+                seen: &mut HashSet<String>,
+                fp: String,
+                tier: InviteTier,
+                username: Option<String>| {
         if seen.insert(fp.clone()) {
             list.push(InviteCandidate {
                 fingerprint: fp,
@@ -4690,14 +4707,20 @@ pub fn build_room_invite_link(app: &TuiApp, room_id: &str) -> anyhow::Result<Str
         creator_fingerprint: info.creator_fingerprint,
         owner_fingerprints: app.handle.room_owners(room_id),
     };
-    let invite = huddle_core::invite::InviteLink {
+    let unsigned = huddle_core::invite::InviteLink {
         v: 1,
         host_multiaddr,
         fingerprint: our_fp,
         room: Some(room),
+        creator_pubkey_b64: None,
+        signed_at_ms: 0,
+        signature_b64: None,
     };
-    huddle_core::invite::encode(&invite)
-        .map_err(|e| anyhow!("encode failed: {e}"))
+    let invite = app
+        .handle
+        .sign_invite(unsigned.clone())
+        .unwrap_or(unsigned);
+    huddle_core::invite::encode(&invite).map_err(|e| anyhow!("encode failed: {e}"))
 }
 
 // =========================================================================
@@ -4732,7 +4755,7 @@ const EXTRA_PALETTE_ENTRIES: &[PaletteEntry] = &[
     },
     PaletteEntry {
         label: "invite peers to room…",
-        keys: "Ctrl+I",
+        keys: "Alt+I",
     },
 ];
 

@@ -441,6 +441,166 @@ your platform's Downloads folder. Phase 2 cap is 1 MiB per file.
   doesn't). Per-DM ephemeral ratchets (Double Ratchet-style) are a
   candidate follow-up.
 
+## What's new in 0.7.11 — security + UX hardening pass
+
+A wide audit pass on top of the 0.7.10 follow-up. The wire protocol,
+authorization gates, panic surface, modal handling, notifier, storage,
+clipboard, and SAS derivation all got tightened. **Wire compat with
+0.7.10 and earlier is broken on purpose** — signed envelopes now carry
+a timestamp and several previously-plain messages now require a
+signature. The trade was deliberate: the 0.7.10 line had a few silent
+authentication failures that the audit caught.
+
+### Wire protocol
+
+- `MemberLeave`, `MemberAnnounce`, and `FileOffer` must now arrive
+  inside a `SignedRoomMessage` whose signer matches the claimed
+  sender. Pre-0.7.11 these were plain, so any peer subscribed to a
+  room topic could spoof another member's leave (evicting them from
+  honest rosters) or pin a fabricated Ed25519 pubkey under a victim's
+  fingerprint via a TOFU race.
+- `SignedRoomMessage` gained a `signed_at_ms` field. The verifier
+  rejects envelopes outside a ±5 min window — closing the indefinite
+  replay of captured `BanMember` / `OwnerGrant` / `SasConfirm` /
+  `ProfileUpdate`. The timestamp is signature-bound.
+- Switched from `Ed25519::verify` to `verify_strict`, which rejects
+  low-order / mixed-order pubkeys.
+
+### Invite links
+
+- Bumped invite version to 2. v2 invites carry the creator's Ed25519
+  pubkey + an Ed25519 signature over the rest of the payload. Tampering
+  with `host_multiaddr`, `salt_b64`, `owner_fingerprints`, or any other
+  field is now detected before the receiver dials. v=1 invites still
+  decode (with a "this invite is unsigned" hint) so older shared links
+  keep working.
+
+### Authorization gaps
+
+- The ban filter now applies to **every** content-bearing arm
+  (`Plain`, `Encrypted`, `FileOffer`, `FileChunk`, `Typing`), not just
+  `MemberAnnounce`. Banned peers in unencrypted rooms used to keep
+  posting plaintext that honest clients rendered.
+- The outbound dial-then-auto-DM flow now consults the persistent
+  blocklist before opening a DM tab. Previously, dialing a blocked
+  peer's address still triggered `AutoOpenDm`.
+- `send_file` rejects read-only joiners (code-joined peers). Previously
+  the read-only gate only covered `send_room_message`.
+- The Direct-announcement auto-bootstrap rejects messages from blocked
+  peers before creating a DM row.
+
+### Panic prevention
+
+- `now_unix` returns 0 on a backwards clock instead of panicking. The
+  network task used to crash on every encrypt/decrypt when the wall
+  clock sat before 1970 (ARM SBCs without RTC, virt clones).
+- `wipe_file` writes zeros in a fixed 64 KiB scratch buffer rather
+  than allocating `vec![0u8; meta.len()]`. Go-dark used to OOM
+  mid-wipe when a user had downloaded a multi-GB attachment.
+- `bootstrap_direct_room` returns an error instead of `.expect()`-ing,
+  so a transient DB write failure can't take down the spawned task.
+- `cleanup_expired_pending_friend_requests` uses `saturating_sub` for
+  the cutoff so a `now < TTL` clock doesn't match every row.
+
+### Critical UX
+
+- Settings → Privacy `c` opens a confirmation modal before wiping the
+  blocklist. Pre-0.7.11 it cleared everything instantly — one
+  keystroke from total data loss, and the same `c` opened the
+  join-code modal in the lobby so muscle memory was destructive.
+- Clipboard yank now runs on a dedicated OS thread with a 2 s
+  timeout. Previously, `xclip`/`wl-copy` with no display could hang
+  the entire TUI on a routine `y`.
+- File-chunk receiver caps per-chunk size (256 KiB), bounds
+  `chunk_index < total_chunks`, and tracks `bytes_received` against
+  the advertised `expected_size`. Pre-0.7.11 a hostile peer could
+  advertise 1 MiB and stream multi-GB chunks before the SHA gate ran.
+- DM sidebar "online" dot now compares the partner's fingerprint to
+  `known_peers[i].fingerprint` instead of `.label`. Every DM showed
+  `○` offline even when the partner was connected.
+- The member-margin toggle is now bound to **Alt+M** (Ctrl+I was
+  unreachable — terminals deliver it as Tab). Hint bar and help
+  screen updated.
+- Activity pane `c` now clears the status history, matching the hint
+  text. Previously it fell through to `OpenJoinWithCode`.
+
+### Crypto correctness
+
+- SAS emoji derivation switched from `mod 49` (biased — indices 0..14
+  were twice as likely) to rejection sampling with HKDF re-expansion.
+  Restores the full uniform distribution over the 49^7 table.
+- Argon2id-derived passphrase keys returned in a `Zeroizing<[u8; 32]>`
+  wrapper so they don't linger on the heap after their last use.
+
+### Network resilience
+
+- `ConnectionClosed` now emits `PeerDisconnected` so the lobby's
+  "online" dots clear for relay / internet peers, not just mDNS
+  expiries. Also cleans gossipsub's explicit-peers set.
+- `RelayClient` events are no longer swallowed — reservation status
+  surfaces in the logs.
+- DCUtR failures cap at 6 warn-logs per peer so symmetric-NAT pairs
+  don't spam.
+
+### Modal + input
+
+- `Shift+?` now opens the "what's new" card from the sidebar (the
+  cheat sheet advertised this for a while; the handler was missing).
+- Inside the command palette, **Ctrl+N / Ctrl+P** navigate the result
+  list instead of typing literal `n`/`p` into the filter. Other Ctrl
+  chords inside the palette are dropped instead of corrupting the
+  query.
+- `Help` / `Info` / `QrIdentity` / `ShowJoinCode` / `ShowInvite` now
+  dismiss only on `Esc` / `Enter` / `q`. Pre-0.7.11 any unbound key
+  closed them — reflexive vim-`h` or `?` silently dismissed.
+- `Modal::Sas` no longer cancels on bare `c` or `q`. Common letters
+  when reading emoji words aloud used to abort the verification.
+- `Modal::AttachPicker` no longer ascends on bare `h` (typo hazard).
+- `Ctrl+C` only opens the quit-confirm modal when no modal is open.
+  Mid-typing a passphrase / username / GoDark confirmation, an
+  accidental Ctrl+C used to discard the typed buffer.
+- Settings tab digits 1-4 require pane focus, matching the 0.7.9
+  Tab/BackTab fix.
+- The Onboarding modal degrades gracefully on tiny terminals instead
+  of returning a zero-rect and silently disappearing.
+
+### Storage
+
+- Migrations now run inside `BEGIN; …; PRAGMA user_version = N;
+  COMMIT;` so a partial-batch failure rolls back cleanly. Pre-0.7.11
+  a mid-migration error left the schema half-applied with
+  `user_version` un-bumped and wedged every subsequent startup.
+- After `PRAGMA key`, we run `SELECT count(*) FROM sqlite_master` as
+  a sentinel. A wrong master passphrase now returns a clean
+  "wrong master passphrase, or DB file corrupt" instead of a cryptic
+  downstream `CREATE TABLE` error.
+
+### Notifier
+
+- macOS / Linux / Windows notifier paths strip control characters
+  from titles + bodies. Pre-0.7.11 a peer-controllable room name
+  with a literal CR broke the AppleScript invocation silently.
+- `notify-send` now passes `--category=im.received` for proper
+  app-grouping in GNOME Shell / KDE.
+- `is_focused()` defaults to `true` when no FocusChange event has
+  ever been observed. tmux without `set -g focus-events on` and
+  basic SSH shells no longer fire a desktop notification for every
+  message regardless of focus.
+
+### Polish + dead code
+
+- Removed dead `let r = app.active_room()` shadow, unused
+  `Theme.accent_dim`, unused `UnreadCounts::unread_count` /
+  `pending_count`. Build now warning-free at warn level.
+- Mention detection bumped from a 4-hex-char prefix to 8 hex chars,
+  cutting false positives from ~1/65 K to ~1/4 B per token and
+  closing the trivial "include the victim's prefix to bell their
+  terminal" weaponization.
+- SAS double-fire race fixed via a `finalized` latch on `SasFlow`.
+- Selected encrypted-room rows in the sidebar now preserve the
+  magenta lock-marker color instead of stomping it to selection-yellow.
+- Generate-join-code doc clarified: 31 chars / ~39.6 bits, not 32.
+
 ## What's new in 0.7.10 — restore the Profile sidebar-nav gate
 
 A follow-up to 0.7.9. Dropping the pane-focus gate on Profile's

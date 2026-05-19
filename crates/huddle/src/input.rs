@@ -144,6 +144,9 @@ pub enum Action {
     /// `c` in the Settings modal. Sledgehammer for now — finer-grained
     /// per-peer unblock is a future refinement.
     ClearBlockedPeers,
+    /// huddle 0.7.11: opens the confirm modal for the "clear all blocked
+    /// peers" action. Used to be the bare `c` direct-fire.
+    OpenClearBlockedConfirm,
     // Phase G: SAS verification
     VerifyStartSas,
     SasMatch,
@@ -251,7 +254,17 @@ fn is_godark_chord(key: KeyEvent) -> bool {
 }
 
 pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
-    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+    // huddle 0.7.11: Ctrl+C used to unconditionally open QuitConfirm
+    // (replacing whatever modal was open). Mid-typing a master
+    // passphrase / GoDark confirmation / EditUsername / Onboarding,
+    // an accidental Ctrl+C wiped the typed input. Now Ctrl+C only
+    // opens the quit prompt when no modal is open; inside a modal it
+    // falls through to that modal's own handler, where most modals
+    // route Esc to a clean cancel anyway.
+    if key.modifiers.contains(KeyModifiers::CONTROL)
+        && key.code == KeyCode::Char('c')
+        && matches!(app.modal, Modal::None)
+    {
         return Action::OpenQuitConfirm;
     }
 
@@ -260,6 +273,22 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
     // would conflict otherwise). Ctrl+P = command palette,
     // Ctrl+H = status history, Shift+? = re-open onboarding.
     if matches!(app.modal, Modal::None) {
+        // huddle 0.7.11: Shift+? (or bare `?` in a non-typing context)
+        // re-opens the "what's new" card. Pre-0.7.11 the cheat sheet
+        // advertised this but no handler dispatched it.
+        if matches!(key.code, KeyCode::Char('?'))
+            && !matches!(app.pane, Pane::Dm(_) | Pane::Group(_))
+        {
+            // Only when no chat-input is taking the keystroke. In chat
+            // panes, `?` still goes to the input handler via the
+            // existing in-room logic; from sidebar/Welcome/Profile/
+            // People/Activity/Settings, `?` opens the help, and
+            // Shift+? opens what's-new. Decide based on the SHIFT
+            // modifier when present.
+            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                return Action::OpenWhatsNew;
+            }
+        }
         // huddle 0.7.3: Shift+Left / Shift+Right = focus jump between
         // sidebar and pane. Swapped from Ctrl+arrows in 0.7.2 because
         // macOS claims Ctrl+arrows for Mission Control Space-switching
@@ -312,6 +341,16 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => Action::Quit,
             _ => Action::CloseModal,
         },
+        Modal::ConfirmClearBlocked => match key.code {
+            // Explicit confirm: y / Y / Enter actually clears.
+            // Anything else (Esc, n, q, any letter) safely cancels —
+            // matches the QuitConfirm shape so users with muscle memory
+            // for that pattern aren't surprised.
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                Action::ClearBlockedPeers
+            }
+            _ => Action::CloseModal,
+        },
         Modal::Error(_) => match key.code {
             _ => Action::CloseModal,
         },
@@ -320,7 +359,12 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
             KeyCode::Char('k') | KeyCode::Up => Action::HelpScrollUp,
             KeyCode::PageDown => Action::HelpPageDown,
             KeyCode::PageUp => Action::HelpPageUp,
-            _ => Action::CloseModal,
+            // huddle 0.7.11: require an explicit Esc/Enter/q to close.
+            // Pre-0.7.11 *any* key dismissed the modal — reflexive
+            // vim-`h` (back), `?` (re-show), or just typing while
+            // scanning the list silently nuked the help screen.
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => Action::CloseModal,
+            _ => Action::Nothing,
         },
         Modal::StartRoom(_) => match key.code {
             KeyCode::Esc => Action::CloseModal,
@@ -364,8 +408,12 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
             KeyCode::Esc => Action::CloseModal,
             KeyCode::Char('j') | KeyCode::Down => Action::AttachPickerDown,
             KeyCode::Char('k') | KeyCode::Up => Action::AttachPickerUp,
-            KeyCode::Char('h') | KeyCode::Backspace | KeyCode::Left => Action::AttachPickerAscend,
-            KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => Action::AttachPickerDescendOrPick,
+            // huddle 0.7.11: bare `h` no longer ascends — too easy to
+            // hit by mistake when scanning a deep directory tree. Use
+            // Backspace or Left for ascend, which match the vim/file-
+            // browser convention without the typo hazard.
+            KeyCode::Backspace | KeyCode::Left => Action::AttachPickerAscend,
+            KeyCode::Enter | KeyCode::Right => Action::AttachPickerDescendOrPick,
             _ => Action::Nothing,
         },
         Modal::RotateRoom(_) => match key.code {
@@ -383,7 +431,10 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
             _ => Action::Nothing,
         },
         Modal::Verify(_) => match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => Action::CloseModal,
+            // huddle 0.7.11: bare `q` removed — accidentally typing `q`
+            // while reading a member list aloud (q/quill/queue) used
+            // to dismiss the modal. Esc still closes.
+            KeyCode::Esc => Action::CloseModal,
             KeyCode::Char('j') | KeyCode::Down => Action::VerifyNext,
             KeyCode::Char('k') | KeyCode::Up => Action::VerifyPrev,
             KeyCode::Enter | KeyCode::Char(' ') => Action::VerifyToggle,
@@ -391,7 +442,14 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
             _ => Action::Nothing,
         },
         Modal::Sas(_) => match key.code {
-            KeyCode::Esc | KeyCode::Char('c') | KeyCode::Char('q') => Action::SasCancel,
+            // huddle 0.7.11: bare `c` and `q` removed from the cancel
+            // chord set — they used to fire when the user spoke the
+            // emoji-words "cat" / "queen" aloud during OOB comparison.
+            // Esc remains the explicit cancel; Ctrl+C also reaches
+            // here (which we route to the same SasCancel action via
+            // the modal-aware Ctrl+C fallthrough at the top of
+            // map_key).
+            KeyCode::Esc => Action::SasCancel,
             KeyCode::Char('m') | KeyCode::Enter => Action::SasMatch,
             _ => Action::Nothing,
         },
@@ -417,7 +475,11 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
             _ => Action::Nothing,
         },
         Modal::ShowJoinCode(_) => match key.code {
-            _ => Action::CloseModal,
+            // huddle 0.7.11: Esc/Enter/q only. Pre-0.7.11 any key
+            // dismissed the join-code modal — accidental typo
+            // discarded a code the owner was about to share OOB.
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => Action::CloseModal,
+            _ => Action::Nothing,
         },
         Modal::JoinWithCode(_) => match key.code {
             KeyCode::Esc => Action::CloseModal,
@@ -427,7 +489,8 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
             _ => Action::Nothing,
         },
         Modal::ShowInvite(_) => match key.code {
-            _ => Action::CloseModal,
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => Action::CloseModal,
+            _ => Action::Nothing,
         },
         Modal::PasteInvite(_) => match key.code {
             KeyCode::Esc => Action::CloseModal,
@@ -472,7 +535,24 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
             KeyCode::Enter => Action::CommandPaletteConfirm,
             KeyCode::Down => Action::CommandPaletteNext,
             KeyCode::Up => Action::CommandPalettePrev,
+            // huddle 0.7.11: Ctrl+N / Ctrl+P navigate inside the palette
+            // (Emacs/readline convention). Pre-0.7.11 these inserted
+            // literal `n` / `p` into the filter because the Char(c)
+            // catch-all didn't check modifiers.
+            KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Action::CommandPaletteNext
+            }
+            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Action::CommandPalettePrev
+            }
             KeyCode::Backspace => Action::CommandPaletteBackspace,
+            // Other Ctrl chords inside the palette should not be typed
+            // into the filter as plain characters. Drop them silently
+            // so the user's muscle memory for Ctrl+H / Ctrl+P outside
+            // the palette doesn't corrupt their search query.
+            KeyCode::Char(_) if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Action::Nothing
+            }
             KeyCode::Char(c) => Action::CommandPaletteTypeChar(c),
             _ => Action::Nothing,
         },
@@ -493,10 +573,12 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
             _ => Action::Nothing,
         },
         Modal::Info(_) => match key.code {
-            _ => Action::CloseModal,
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => Action::CloseModal,
+            _ => Action::Nothing,
         },
         Modal::QrIdentity => match key.code {
-            _ => Action::CloseModal,
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => Action::CloseModal,
+            _ => Action::Nothing,
         },
         Modal::InboundDial(_) => match key.code {
             // Esc = reject. Anything more permissive would defeat the
@@ -571,12 +653,29 @@ fn map_sidebar(key: KeyEvent, app: &TuiApp) -> Action {
             // tab so a stray `c` on Account/Network/Appearance can't
             // wipe the blocklist by accident.
             KeyCode::Char('c') if matches!(app.settings_tab, SettingsTab::Privacy) => {
-                return Action::ClearBlockedPeers;
+                // huddle 0.7.11: opens a confirm modal first. Bare `c`
+                // used to dispatch ClearBlockedPeers directly, which
+                // was one keystroke from total blocklist loss and
+                // shadowed the lobby's `c` = "join with code" binding.
+                return Action::OpenClearBlockedConfirm;
             }
-            KeyCode::Char('1') => return Action::SettingsTabSelect(SettingsTab::Account),
-            KeyCode::Char('2') => return Action::SettingsTabSelect(SettingsTab::Network),
-            KeyCode::Char('3') => return Action::SettingsTabSelect(SettingsTab::Appearance),
-            KeyCode::Char('4') => return Action::SettingsTabSelect(SettingsTab::Privacy),
+            // huddle 0.7.11: digits 1-4 require pane focus, same as
+            // Tab/BackTab. Pre-0.7.11 the digits worked from sidebar
+            // focus, which was inconsistent with Tab (sidebar focus →
+            // sidebar/pane toggle) and let a stray digit jump tabs
+            // while the user was navigating sections.
+            KeyCode::Char('1') if matches!(app.sidebar.focus, SidebarFocus::Pane) => {
+                return Action::SettingsTabSelect(SettingsTab::Account);
+            }
+            KeyCode::Char('2') if matches!(app.sidebar.focus, SidebarFocus::Pane) => {
+                return Action::SettingsTabSelect(SettingsTab::Network);
+            }
+            KeyCode::Char('3') if matches!(app.sidebar.focus, SidebarFocus::Pane) => {
+                return Action::SettingsTabSelect(SettingsTab::Appearance);
+            }
+            KeyCode::Char('4') if matches!(app.sidebar.focus, SidebarFocus::Pane) => {
+                return Action::SettingsTabSelect(SettingsTab::Privacy);
+            }
             // huddle 0.7.9: Tab/BackTab cycle Settings tabs ONLY when
             // the pane is focused. With the sidebar focused, Tab keeps
             // its universal "toggle sidebar↔pane focus" meaning so the
@@ -618,6 +717,26 @@ fn map_sidebar(key: KeyEvent, app: &TuiApp) -> Action {
             KeyCode::Char('Q') => return Action::OpenQrIdentity,
             _ => {}
         }
+    }
+    // huddle 0.7.11: Activity pane `c` clears the status-history list.
+    // Pre-0.7.11 the pane's hint advertised this but no pane-level
+    // handler was wired, so `c` fell through to the lobby's
+    // OpenJoinWithCode binding — hint contradicted behavior.
+    if matches!(app.pane, Pane::Activity) {
+        if let KeyCode::Char('c') = key.code {
+            return Action::ClearStatusHistory;
+        }
+    }
+    // huddle 0.7.11: Alt+M toggles the member margin in a Group pane.
+    // Pre-0.7.11 the help screen and hint bar both advertised Ctrl+I
+    // for this, but Ctrl+I == Tab in every terminal we care about, so
+    // ToggleMemberMargin was unreachable. Alt+M is unclaimed by macOS
+    // Terminal / iTerm2 / kitty / alacritty / wezterm by default.
+    if key.modifiers.contains(KeyModifiers::ALT)
+        && matches!(key.code, KeyCode::Char('m') | KeyCode::Char('M'))
+        && matches!(app.pane, Pane::Group(_))
+    {
+        return Action::ToggleMemberMargin;
     }
     // huddle 0.7.7: People-pane row bindings. The pane header advertises
     // `m message · r reconnect · b block · u unblock · x forget`, but
@@ -727,14 +846,27 @@ fn map_in_room(key: KeyEvent, app: &TuiApp) -> Action {
             KeyCode::Char('g') if !input_active => Action::OpenGrantPicker,
             KeyCode::Char('o') if !input_active => Action::ToggleRoomVerifiedOnly,
             KeyCode::Char('j') if !input_active => Action::OpenGenerateJoinCode,
-            KeyCode::Char('I') if !input_active => Action::GenerateInvite,
-            // huddle 0.7.7: in-band invite picker. Opens a multi-select
-            // candidate list; on confirm, DMs the invite link to each
-            // selected peer. `Shift+I` (above) still generates the OOB
-            // link for paste-into-Signal flows — both coexist.
-            KeyCode::Char('i') if !input_active => Action::OpenInvitePicker,
             _ => Action::Nothing,
         };
+    }
+    // huddle 0.7.11: invite chords moved off Ctrl+i / Ctrl+I because
+    // both collapse to ASCII Tab in every terminal we ship for, so the
+    // pre-0.7.11 chords were unreachable. Now bare `I` (Shift+I) opens
+    // the OOB link generator and Alt+I opens the in-band invite
+    // picker. Both fire only when the chat input is blurred so they
+    // don't fight with text composition.
+    if matches!(app.pane, Pane::Group(_) | Pane::Dm(_)) {
+        let input_active = app.active_room().map(|r| r.input_active).unwrap_or(false);
+        if !input_active {
+            if matches!(key.code, KeyCode::Char('I')) && !key.modifiers.contains(KeyModifiers::CONTROL) {
+                return Action::GenerateInvite;
+            }
+            if key.modifiers.contains(KeyModifiers::ALT)
+                && matches!(key.code, KeyCode::Char('i') | KeyCode::Char('I'))
+            {
+                return Action::OpenInvitePicker;
+            }
+        }
     }
 
     if key.code == KeyCode::Tab {

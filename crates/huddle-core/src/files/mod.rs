@@ -161,6 +161,34 @@ impl FileManager {
                 expected_size
             )));
         }
+        // huddle 0.7.11: pre-0.7.11 only `expected_size` was capped,
+        // not the per-chunk `data.len()`, `chunk_index`, or the running
+        // `bytes_received`. A hostile peer could advertise expected_size
+        // = 1 MiB and stream chunks summing to far more (DoS via heap
+        // exhaustion). Now we enforce all four invariants up front and
+        // drop the transfer if any is violated.
+        if total_chunks == 0 {
+            return Err(HuddleError::Other(
+                "FileChunk: total_chunks must be ≥ 1".into(),
+            ));
+        }
+        if chunk_index >= total_chunks {
+            return Err(HuddleError::Other(format!(
+                "FileChunk: chunk_index {} >= total_chunks {}",
+                chunk_index, total_chunks
+            )));
+        }
+        // Each chunk is bounded by gossipsub's 256 KiB max_transmit_size
+        // anyway, but enforce here too so we don't accept oversize
+        // chunks that snuck past a misbehaving forwarder.
+        const MAX_CHUNK_BYTES: usize = 256 * 1024;
+        if data.len() > MAX_CHUNK_BYTES {
+            return Err(HuddleError::Other(format!(
+                "FileChunk: data {} bytes exceeds per-chunk cap of {}",
+                data.len(),
+                MAX_CHUNK_BYTES
+            )));
+        }
         // Fast-skip if already complete.
         let cache_path = self.cache_path(file_id);
         if cache_path.exists() {
@@ -187,7 +215,27 @@ impl FileManager {
             ));
         }
         if !entry.chunks.contains_key(&chunk_index) {
-            entry.bytes_received += data.len() as u64;
+            let new_total = entry.bytes_received.saturating_add(data.len() as u64);
+            let ceiling = entry.expected_size.saturating_add(1024);
+            // expected_size acts as the running ceiling. Some senders'
+            // expected_size may be slightly off because of encryption
+            // overhead (Megolm ciphertext > plaintext); allow a 1KiB
+            // grace before rejecting outright.
+            if new_total > ceiling {
+                let advertised = entry.expected_size;
+                // Drop the whole transfer — we've overshot the advertised
+                // size which means either the peer is malicious or the
+                // file changed mid-stream. The mutable borrow on `entry`
+                // dies here so `map.remove` can take the second mut
+                // borrow cleanly.
+                let _ = entry; // make the implicit borrow explicit-end
+                map.remove(file_id);
+                return Err(HuddleError::Other(format!(
+                    "FileChunk: bytes_received {} would exceed expected_size {}",
+                    new_total, advertised
+                )));
+            }
+            entry.bytes_received = new_total;
             entry.chunks.insert(chunk_index, data);
         }
 

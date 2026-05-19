@@ -127,12 +127,14 @@ pub fn derive_sas_code(
     raw_emoji[4] = b[3] >> 2;
     raw_emoji[5] = ((b[3] & 0x03) << 4) | (b[4] >> 4);
     raw_emoji[6] = ((b[4] & 0x0f) << 2) | (b[5] >> 6);
-    let mut emoji_indices = [0u8; 7];
-    for i in 0..7 {
-        // MSC 2241: clients SHOULD NOT generate values 49-63; spec
-        // recommendation is to take mod 49 to coerce into the table.
-        emoji_indices[i] = raw_emoji[i] % (SAS_EMOJI.len() as u8);
-    }
+    // huddle 0.7.11: rejection sampling instead of `raw % 49`.
+    // 6-bit values in 0..64 mod 49 makes indices 0..14 twice as likely
+    // (hit by raw 0..14 AND raw 49..63), measurably under-sampling the
+    // 49^7 SAS space and reducing effective entropy. Now we expand
+    // additional HKDF output to refill any byte that falls in 49..63
+    // — the canonical MSC 2241 approach. The expansion is cheap and
+    // deterministic, so both sides still derive the same code.
+    let emoji_indices = derive_emoji_indices_rejection(&hk, raw_emoji);
 
     // Bytes 6..11 = 40 bits. Use the high 39 bits for the decimal
     // (3 × 13-bit chunks, each offset by 1000).
@@ -204,6 +206,68 @@ pub const SAS_EMOJI: [(&str, &str); 49] = [
     ("🔑", "key"),
     ("🔨", "hammer"),
 ];
+
+/// huddle 0.7.11: rejection-sampling emoji-index derivation. Refills any
+/// index ≥ 49 with deterministic additional HKDF expansion so the
+/// distribution over the 49-element table is uniform.
+fn derive_emoji_indices_rejection(
+    hk: &Hkdf<Sha256>,
+    initial: [u8; 7],
+) -> [u8; 7] {
+    let mut out = [0u8; 7];
+    let mut accepted = 0usize;
+    // Use the initial bytes first.
+    for &v in &initial {
+        if v < 49 {
+            out[accepted] = v;
+            accepted += 1;
+            if accepted == 7 {
+                return out;
+            }
+        }
+    }
+    // Refill by expanding additional 6-bit chunks. We pull in 6-byte
+    // blocks of HKDF output, each yielding 8 candidate 6-bit values
+    // (high-bit pair discarded — each byte gives one 6-bit candidate
+    // via `v & 0x3f`). The info string includes a salt counter so
+    // multiple refills don't repeat the same bytes.
+    let mut counter: u32 = 0;
+    while accepted < 7 {
+        let info = {
+            let mut buf = [0u8; 24];
+            buf[..16].copy_from_slice(b"huddle-sas-v1-rs");
+            buf[16..20].copy_from_slice(&counter.to_be_bytes());
+            buf
+        };
+        let mut block = [0u8; 32];
+        if hk.expand(&info, &mut block).is_err() {
+            // The expander only fails when len > 255 * HashLen (8160
+            // bytes for SHA-256); 32 is far under, so this branch is
+            // unreachable in practice. Fall back to modulo if it
+            // somehow happens — degrades to pre-0.7.11 behavior but
+            // never panics or hangs.
+            for v in &mut initial.iter().copied() {
+                if accepted < 7 {
+                    out[accepted] = v % 49;
+                    accepted += 1;
+                }
+            }
+            break;
+        }
+        for &byte in block.iter() {
+            let candidate = byte & 0x3f;
+            if candidate < 49 {
+                out[accepted] = candidate;
+                accepted += 1;
+                if accepted == 7 {
+                    return out;
+                }
+            }
+        }
+        counter += 1;
+    }
+    out
+}
 
 /// Decode a base64-encoded 32-byte X25519 pubkey received over the wire.
 pub fn parse_pubkey(b64: &str) -> Result<PublicKey> {

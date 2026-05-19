@@ -60,11 +60,15 @@ pub fn set_focused(focused: bool) {
 
 pub fn is_focused() -> bool {
     if !FOCUS_OBSERVED.load(Ordering::Relaxed) {
-        // Treat "we haven't heard anything yet" as unfocused so the
-        // user still gets notified for messages that arrive before
-        // any focus event lands. Common case: app launched, terminal
-        // is already in the background.
-        return false;
+        // huddle 0.7.11: pre-0.7.11 this defaulted to `false`, which
+        // meant terminals that never emit FocusChange events (tmux
+        // without `set -g focus-events on`, screen, basic SSH shells)
+        // fired a desktop notification for *every* message regardless
+        // of whether the user was looking. That defeats the entire
+        // focus-gate. The right default for "no signal yet" is `true`
+        // (assume focused = don't spam); the worst case is one missed
+        // notification per session if the user is actually unfocused.
+        return true;
     }
     WINDOW_FOCUSED.load(Ordering::Relaxed)
 }
@@ -156,12 +160,23 @@ pub fn preview(body: &str) -> String {
 
 #[cfg(target_os = "macos")]
 fn send_notification(title: &str, body: &str) -> std::io::Result<()> {
-    // AppleScript string escaping: `\` → `\\`, `"` → `\"`.
-    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    // huddle 0.7.11: AppleScript strings can't contain literal CR / LF,
+    // and treat both `\` and `"` as special. Pre-0.7.11 only the
+    // backslash and double-quote were escaped, so a room name or
+    // username containing a CR (a peer-controlled value!) silently
+    // broke the osascript invocation. Now we strip every control char
+    // before passing to osascript.
+    let sanitize = |s: &str| -> String {
+        s.chars()
+            .filter(|c| !c.is_control())
+            .collect::<String>()
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+    };
     let script = format!(
         r#"display notification "{}" with title "{}""#,
-        esc(body),
-        esc(title)
+        sanitize(body),
+        sanitize(title)
     );
     std::process::Command::new("osascript")
         .args(["-e", &script])
@@ -173,11 +188,17 @@ fn send_notification(title: &str, body: &str) -> std::io::Result<()> {
 
 #[cfg(target_os = "linux")]
 fn send_notification(title: &str, body: &str) -> std::io::Result<()> {
+    // huddle 0.7.11: strip control chars from title/body so a peer-
+    // controlled username with embedded CR can't confuse the daemon.
+    // Also pass --category=im.received which most notification daemons
+    // (GNOME Shell, KDE) use to group desktop messaging notifications.
+    let sanitize = |s: &str| -> String { s.chars().filter(|c| !c.is_control()).collect() };
     std::process::Command::new("notify-send")
         .arg("--app-name=huddle")
+        .arg("--category=im.received")
         .arg("--expire-time=5000")
-        .arg(title)
-        .arg(body)
+        .arg(sanitize(title))
+        .arg(sanitize(body))
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()?;
@@ -186,8 +207,17 @@ fn send_notification(title: &str, body: &str) -> std::io::Result<()> {
 
 #[cfg(target_os = "windows")]
 fn send_notification(title: &str, body: &str) -> std::io::Result<()> {
-    // PowerShell single-quoted strings: `'` → `''`.
-    let esc = |s: &str| s.replace('\'', "''");
+    // huddle 0.7.11: strip control chars + PowerShell single-quote
+    // escape. A literal LF / CR in a peer-controlled username used to
+    // smuggle a multi-line PowerShell statement (low-impact since the
+    // surrounding context constrains what can be injected, but worth
+    // closing). PowerShell single-quoted strings: `'` → `''`.
+    let esc = |s: &str| -> String {
+        s.chars()
+            .filter(|c| !c.is_control())
+            .collect::<String>()
+            .replace('\'', "''")
+    };
     let script = format!(
         "[reflection.assembly]::loadwithpartialname('System.Windows.Forms') | Out-Null; \
          [reflection.assembly]::loadwithpartialname('System.Drawing') | Out-Null; \

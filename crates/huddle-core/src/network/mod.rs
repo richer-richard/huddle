@@ -200,7 +200,18 @@ struct NetworkTask {
     /// we only register once per relay.
     configured_relays: Vec<Multiaddr>,
     relay_peer_ids: HashSet<PeerId>,
+    /// huddle 0.7.11: per-peer DCUtR failure counter. Logged at warn
+    /// once the count crosses `DCUTR_FAIL_BUDGET` so symmetric-NAT
+    /// pairs don't generate runaway hole-punch attempts in the logs.
+    /// libp2p's dcutr behavior schedules its own retries internally;
+    /// this is purely an observability signal for the app.
+    dcutr_failures: HashMap<PeerId, u32>,
 }
+
+/// huddle 0.7.11: warn after this many failed DCUtR attempts to the
+/// same peer. dcutr keeps trying internally, but the audit flagged the
+/// spam as a real issue — capping the log noise is the realistic fix.
+const DCUTR_FAIL_BUDGET: u32 = 6;
 
 pub fn start_network(
     identity: &Identity,
@@ -328,6 +339,7 @@ pub fn start_network_with(
         session_blocklist: HashSet::new(),
         configured_relays: relays.clone(),
         relay_peer_ids: HashSet::new(),
+        dcutr_failures: HashMap::new(),
     };
     // Phase D: dial each configured relay so Identify can complete and
     // we can register a `/p2p-circuit` reservation. Failures here are
@@ -479,12 +491,35 @@ impl NetworkTask {
                         .await;
                 }
             }
-            libp2p::swarm::SwarmEvent::ConnectionClosed { peer_id, .. } => {
+            libp2p::swarm::SwarmEvent::ConnectionClosed {
+                peer_id,
+                num_established,
+                ..
+            } => {
                 // Drop any pending-inbound entry for this peer — they
                 // disconnected before we could prompt the user (or
                 // before the user accepted). Lets a re-connect start
                 // fresh rather than reusing stale state.
                 self.pending_inbound.remove(&peer_id);
+                // huddle 0.7.11: emit PeerDisconnected so the app can
+                // clean its `connected_dial_addrs` map. Only fire when
+                // the LAST connection to that peer closed — multiple
+                // simultaneous connections (e.g. direct + relay) would
+                // otherwise emit spurious disconnects when one of the
+                // two drops.
+                if num_established == 0 {
+                    let _ = self
+                        .event_tx
+                        .send(NetworkEvent::PeerDisconnected { peer_id })
+                        .await;
+                    // Also clean up gossipsub's explicit-peers set so
+                    // it doesn't accumulate dead PeerIds across the
+                    // session.
+                    self.swarm
+                        .behaviour_mut()
+                        .gossipsub
+                        .remove_explicit_peer(&peer_id);
+                }
             }
             libp2p::swarm::SwarmEvent::Behaviour(be) => self.handle_behavior_event(be).await,
             _ => {}
@@ -628,8 +663,24 @@ impl NetworkTask {
                 let success = ev.result.is_ok();
                 if success {
                     info!(remote = %ev.remote_peer_id, "DCUtR: direct connection established");
+                    // huddle 0.7.11: a successful hole-punch resets the
+                    // per-peer DCUtR retry counter so future failures
+                    // don't immediately bail out.
+                    self.dcutr_failures.remove(&ev.remote_peer_id);
                 } else {
                     debug!(remote = %ev.remote_peer_id, "DCUtR: hole-punch failed");
+                    let count = self
+                        .dcutr_failures
+                        .entry(ev.remote_peer_id)
+                        .and_modify(|n| *n += 1)
+                        .or_insert(1);
+                    if *count >= DCUTR_FAIL_BUDGET {
+                        warn!(
+                            remote = %ev.remote_peer_id,
+                            attempts = *count,
+                            "DCUtR: giving up after repeated failures (symmetric NAT likely)"
+                        );
+                    }
                 }
                 let _ = self
                     .event_tx
@@ -638,6 +689,28 @@ impl NetworkTask {
                         success,
                     })
                     .await;
+            }
+            HuddleBehaviorEvent::RelayClient(event) => {
+                // huddle 0.7.11: relay-client lifecycle. Pre-0.7.11 these
+                // events were swallowed by `_ => {}` so a relay
+                // reservation expiry never reached the app — peers
+                // behind NAT became silently unreachable. We can't
+                // re-listen automatically (the `listen_on(/p2p-circuit)`
+                // call requires the relay's peer-id from Identify, and
+                // we may have lost it), but surfacing the loss lets the
+                // app shift the NAT badge.
+                use libp2p::relay::client::Event as Rc;
+                match event {
+                    Rc::ReservationReqAccepted { relay_peer_id, .. } => {
+                        info!(%relay_peer_id, "relay: reservation accepted");
+                    }
+                    Rc::OutboundCircuitEstablished { relay_peer_id, .. } => {
+                        debug!(%relay_peer_id, "relay: outbound circuit established");
+                    }
+                    _ => {
+                        debug!(?event, "relay client event");
+                    }
+                }
             }
             _ => {}
         }

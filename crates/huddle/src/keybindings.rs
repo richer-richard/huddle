@@ -490,7 +490,6 @@ pub fn adaptive_hints(app: &TuiApp) -> Vec<(&'static str, &'static str)> {
         out.push(("?", "help"));
         out.push(("q", "quit"));
     } else {
-            let r = app.active_room();
         let room = app.active_room();
         let input_active = room.map(|r| r.input_active).unwrap_or(false);
         let card_focus = room.map(|r| r.card_focus).unwrap_or(false);
@@ -512,7 +511,10 @@ pub fn adaptive_hints(app: &TuiApp) -> Vec<(&'static str, &'static str)> {
             out.push(("Ctrl+F", "search"));
             out.push(("Ctrl+A", "attach"));
             if is_group {
-                out.push(("Ctrl+I", "members"));
+                // huddle 0.7.11: Alt+M, not Ctrl+I. Ctrl+I collapses
+                // with Tab in every terminal we ship for, so the
+                // historical Ctrl+I binding could never fire.
+                out.push(("Alt+M", "members"));
             }
             out.push(("Ctrl+L", "leave"));
             out.push(("Shift+←", "sidebar"));
