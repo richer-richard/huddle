@@ -1835,13 +1835,12 @@ impl AppHandle {
                     .retain(|_addr, pid| *pid != peer_id);
                 let _ = self.app_event_tx.send(AppEvent::PeerExpired { peer_id });
             }
-            NetworkEvent::RelayReservationLost { relay_peer } => {
-                warn!(%relay_peer, "relay reservation lost; reachability may degrade");
-                // No app-event yet — the next AutoNAT probe will
-                // reflect reachability accurately. Future work: surface
-                // as a dedicated AppEvent so the TUI can flag it in
-                // the NAT badge.
-            }
+            // huddle 0.7.12: `RelayReservationLost` was removed —
+            // libp2p 0.56's relay client doesn't surface a failure
+            // variant we can listen on. Reservation loss currently
+            // manifests as the next AutoNAT probe flipping to
+            // "private" once the circuit drops; a future health-
+            // check timer can re-introduce the dedicated signal.
             NetworkEvent::ListeningOn { address } => {
                 let _ = self.app_event_tx.send(AppEvent::ListeningOn {
                     address: address.to_string(),

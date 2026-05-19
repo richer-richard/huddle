@@ -441,6 +441,38 @@ your platform's Downloads folder. Phase 2 cap is 1 MiB per file.
   doesn't). Per-DM ephemeral ratchets (Double Ratchet-style) are a
   candidate follow-up.
 
+## What's new in 0.7.12 — self-review follow-ups to the 0.7.11 audit pass
+
+A short follow-up after independent self-review of the 0.7.11 release
+caught three issues:
+
+- **Notification focus-default trade-off.** 0.7.11 flipped the
+  "haven't observed a focus event yet" default from `false` (always
+  notify) to `true` (assume focused, suppress). That fixed the
+  audit's spam complaint for tmux-without-focus-events but caused
+  the opposite regression for the same cohort — they got zero
+  notifications instead of all of them. 0.7.12 splits the
+  difference: assume focused during a 5-second startup grace
+  window, then if no `FocusGained` / `FocusLost` has ever fired,
+  fall back to `false` (always notify). Terminals that DO speak
+  focus events behave normally throughout.
+- **`RelayReservationLost` was dead-wired.** 0.7.11 declared the
+  variant and a consumer in `app/mod.rs`, but libp2p 0.56's
+  `relay::client::Event` doesn't expose a `ReservationReqFailed`
+  arm we can match on, so the producer never emitted it. 0.7.12
+  removes the dead variant and consumer rather than ship code
+  that's silently unreachable. Reservation loss currently manifests
+  as the next AutoNAT probe flipping to "private" once the circuit
+  drops; a future health-check timer can re-introduce a dedicated
+  signal when libp2p's API supports it.
+- **SAS code incompatibility documented.** 0.7.11's rejection
+  sampler is correct, but it produces different emoji codes than
+  0.7.10's `mod 49` derivation in ~84% of pairings. A 0.7.11↔0.7.10
+  SAS verification will silently fail to match. This is a deliberate
+  break (the new derivation is uniformly distributed; the old one
+  wasn't), but it wasn't called out in the 0.7.11 notes. Both ends
+  need to be on 0.7.11+ for SAS to succeed.
+
 ## What's new in 0.7.11 — security + UX hardening pass
 
 A wide audit pass on top of the 0.7.10 follow-up. The wire protocol,

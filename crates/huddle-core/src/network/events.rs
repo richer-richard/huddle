@@ -68,8 +68,8 @@ pub enum NetworkEvent {
     /// internet peers stayed "online" in the lobby long after they
     /// dropped.
     PeerDisconnected { peer_id: PeerId },
-    /// huddle 0.7.11: a relay reservation we were holding has expired
-    /// or failed to renew, so we're no longer reachable via that
-    /// circuit. The app surfaces this in the NAT badge.
-    RelayReservationLost { relay_peer: PeerId },
+    // huddle 0.7.11 declared `RelayReservationLost { relay_peer }`
+    // here but no producer in libp2p 0.56 actually emits it; we
+    // removed the variant in 0.7.12 rather than ship dead code.
+    // A future health-check timer can re-introduce it.
 }

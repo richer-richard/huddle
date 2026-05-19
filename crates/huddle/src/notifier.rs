@@ -47,11 +47,25 @@ fn rate_state() -> &'static Mutex<RateState> {
 
 static WINDOW_FOCUSED: AtomicBool = AtomicBool::new(true);
 /// Becomes `true` after the terminal has emitted at least one
-/// FocusGained or FocusLost event. Until then, `is_focused()`
-/// pessimistically returns `false` so notifications still fire even
-/// if huddle was launched into a terminal that's already in the
-/// background. Worst case: one extra notification right after start.
+/// FocusGained or FocusLost event.
 static FOCUS_OBSERVED: AtomicBool = AtomicBool::new(false);
+
+fn startup_instant() -> Instant {
+    static START: OnceLock<Instant> = OnceLock::new();
+    *START.get_or_init(Instant::now)
+}
+
+/// huddle 0.7.12: time after which a terminal that has NEVER emitted a
+/// FocusChange event is assumed to lack focus tracking entirely. Until
+/// then `is_focused()` returns `true` (don't spam during a launch
+/// window). After the grace period elapses with no signal, we flip to
+/// `false` so users on tmux-without-focus-events / basic SSH still get
+/// notifications.
+///
+/// The trade-off: 0.7.10 defaulted false (spam), 0.7.11 defaulted true
+/// (silence on legacy terminals). 0.7.12 splits the difference — calm
+/// during startup, then assume focus tracking is broken and notify.
+const FOCUS_DETECTION_GRACE: Duration = Duration::from_secs(5);
 
 pub fn set_focused(focused: bool) {
     WINDOW_FOCUSED.store(focused, Ordering::Relaxed);
@@ -60,15 +74,12 @@ pub fn set_focused(focused: bool) {
 
 pub fn is_focused() -> bool {
     if !FOCUS_OBSERVED.load(Ordering::Relaxed) {
-        // huddle 0.7.11: pre-0.7.11 this defaulted to `false`, which
-        // meant terminals that never emit FocusChange events (tmux
-        // without `set -g focus-events on`, screen, basic SSH shells)
-        // fired a desktop notification for *every* message regardless
-        // of whether the user was looking. That defeats the entire
-        // focus-gate. The right default for "no signal yet" is `true`
-        // (assume focused = don't spam); the worst case is one missed
-        // notification per session if the user is actually unfocused.
-        return true;
+        // If we're still inside the grace window, assume focused
+        // (suppresses startup-burst notifications on slow-to-signal
+        // terminals). After the grace window, assume the terminal
+        // doesn't speak focus events and fall back to "always notify"
+        // so the user isn't silently missing every message.
+        return Instant::now().duration_since(startup_instant()) < FOCUS_DETECTION_GRACE;
     }
     WINDOW_FOCUSED.load(Ordering::Relaxed)
 }

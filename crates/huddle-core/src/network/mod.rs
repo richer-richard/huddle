@@ -691,14 +691,16 @@ impl NetworkTask {
                     .await;
             }
             HuddleBehaviorEvent::RelayClient(event) => {
-                // huddle 0.7.11: relay-client lifecycle. Pre-0.7.11 these
-                // events were swallowed by `_ => {}` so a relay
-                // reservation expiry never reached the app — peers
-                // behind NAT became silently unreachable. We can't
-                // re-listen automatically (the `listen_on(/p2p-circuit)`
-                // call requires the relay's peer-id from Identify, and
-                // we may have lost it), but surfacing the loss lets the
-                // app shift the NAT badge.
+                // huddle 0.7.12: libp2p 0.56's `relay::client::Event`
+                // only exposes the success-path variants
+                // (`ReservationReqAccepted`, `OutboundCircuitEstablished`,
+                // `InboundCircuitEstablished`). There's no
+                // `ReservationReqFailed` arm we can match on, so we
+                // can't reliably surface reservation loss without a
+                // separate health-check timer (future work). For now
+                // we log every event so operators can see the
+                // lifecycle in `huddle.log` — pre-0.7.11 the whole
+                // arm was swallowed by `_ => {}` which hid even that.
                 use libp2p::relay::client::Event as Rc;
                 match event {
                     Rc::ReservationReqAccepted { relay_peer_id, .. } => {
@@ -707,8 +709,8 @@ impl NetworkTask {
                     Rc::OutboundCircuitEstablished { relay_peer_id, .. } => {
                         debug!(%relay_peer_id, "relay: outbound circuit established");
                     }
-                    _ => {
-                        debug!(?event, "relay client event");
+                    other => {
+                        debug!(?other, "relay client event");
                     }
                 }
             }
