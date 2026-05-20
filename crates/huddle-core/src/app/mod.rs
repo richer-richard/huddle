@@ -1436,6 +1436,43 @@ impl AppHandle {
         self.dial(address).await
     }
 
+    /// huddle 0.7.12: pre-seed an invite's room so an immediate join
+    /// works without waiting for the host's gossip announcement to
+    /// arrive over the just-opened connection. Decodes the (optional)
+    /// salt into `ROOM_SALT_CACHE` and inserts a `discovered_rooms`
+    /// entry, so `join_room` can resolve the room's metadata AND derive
+    /// the passphrase key the moment the user submits.
+    ///
+    /// Pre-0.7.12 the invite's `salt_b64` + room metadata were decoded
+    /// and then thrown away; `join_room` could only learn the room from
+    /// a live announcement, so submitting the passphrase before that
+    /// announcement landed errored "room {id} not found". The invite
+    /// already carries everything required — we just plumb it through.
+    pub fn seed_invite_room(&self, room: &crate::invite::InviteRoom) {
+        if let Some(salt) = room.salt_b64.as_deref().and_then(|b| B64.decode(b).ok()) {
+            ROOM_SALT_CACHE
+                .lock()
+                .unwrap()
+                .insert(room.id.clone(), salt);
+        }
+        let discovered = DiscoveredRoom {
+            room_id: room.id.clone(),
+            name: room.name.clone(),
+            encrypted: room.encrypted,
+            member_count: 0,
+            creator_fingerprint: room.creator_fingerprint.clone(),
+            last_seen: now_unix(),
+            restorable: false,
+            host_addrs: Vec::new(),
+            // Invites are group-scoped — DMs are 1-1 and never invited.
+            kind: RoomKind::Group,
+        };
+        self.discovered_rooms
+            .lock()
+            .unwrap()
+            .insert(room.id.clone(), discovered);
+    }
+
     pub fn known_peers(&self) -> Vec<KnownPeerStatus> {
         let connected = self.connected_dial_addrs.lock().unwrap().clone();
         let stored = repo::list_known_peers(&self.db).unwrap_or_default();
@@ -4140,6 +4177,17 @@ impl AppHandle {
     /// call sites get the authenticated value without churn.
     pub fn lookup_member_display_name(&self, fingerprint: &str) -> Option<String> {
         self.lookup_username(fingerprint)
+    }
+
+    /// huddle 0.7.12: reverse of `lookup_username` — every fingerprint
+    /// that has broadcast `username` via a signed `ProfileUpdate`.
+    /// Usernames aren't unique, so callers must handle 0 / 1 / many.
+    /// Backs the Compose-DM resolver so typing a contact's name opens a
+    /// DM over the existing mesh instead of falling through to a fresh
+    /// dial (matching the resolution `dial_by_id_or_username` already
+    /// does for the add-friend flow).
+    pub fn peers_with_username(&self, username: &str) -> Vec<String> {
+        repo::find_peers_by_username(&self.db, username).unwrap_or_default()
     }
 
     pub fn is_room_muted(&self, room_id: &str) -> bool {

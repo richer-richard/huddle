@@ -100,9 +100,11 @@ they haven't, do scenario 2 first.
 
 ## 6. Phase A — inbound dial accept gate
 
-- [ ] On A, from the sidebar, press `d` and enter B's listen multiaddr
-      (visible in B's Profile pane) with B's peer-id appended, e.g.
-      `/ip4/10.0.0.5/tcp/56825/p2p/12D3Koo...`
+- [ ] On A, from the sidebar, press `d` and enter B's dial address —
+      copy it straight from B's Profile pane: the `dial address N` rows
+      are complete multiaddrs that already include B's peer-id, e.g.
+      `/ip4/10.0.0.5/tcp/56825/p2p/12D3Koo...` (the bare `peer-id` row
+      is shown separately too)
 - [ ] On B, an "InboundDial" modal appears with A's short fingerprint
       and the options `[a]ccept` / `[r]eject` / `[t]rust+accept`
 - [ ] Press `a` on B — the modal dismisses; A's fingerprint appears

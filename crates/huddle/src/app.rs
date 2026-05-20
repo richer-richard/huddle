@@ -1822,8 +1822,21 @@ pub fn profile_fields(app: &TuiApp) -> Vec<(String, String)> {
     out.push(("HD-ID".into(), hd));
     out.push(("Safety Code".into(), app.handle.safety_code()));
     out.push(("fingerprint".into(), app.handle.fingerprint().to_string()));
+    // huddle 0.7.12: expose the libp2p peer-id and render each listen
+    // address as a complete, copy-paste dialable multiaddr (with the
+    // /p2p/<peer-id> suffix the dial flow + MANUAL_TESTING §6 ask you to
+    // append). Pre-0.7.12 the pane showed bare listen addrs and no
+    // peer-id anywhere, so the documented "dial B's multiaddr with
+    // peer-id appended" step was impossible from the UI.
+    let peer_id = app.handle.peer_id().to_string();
+    out.push(("peer-id".into(), peer_id.clone()));
     for (i, addr) in app.listen_addresses.iter().take(6).enumerate() {
-        out.push((format!("listen address {}", i + 1), addr.clone()));
+        let dial = if addr.contains(&peer_id) {
+            addr.clone()
+        } else {
+            format!("{addr}/p2p/{peer_id}")
+        };
+        out.push((format!("dial address {}", i + 1), dial));
     }
     out
 }
@@ -3439,25 +3452,30 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
         }
         Action::GenerateInvite => {
             // Build an invite payload from what we know. host_multiaddr
-            // comes from the first listen address + our peer_id. Room
+            // is the best routable host address + our peer_id. Room
             // section is included iff we're in a room view.
             let our_peer = app.handle.peer_id().to_string();
             let our_fp = app.handle.fingerprint().to_string();
-            let listen = match app.listen_addresses.first() {
-                Some(a) => a.clone(),
+            // huddle 0.7.12: prefer a routable address (relay-circuit /
+            // AutoNAT-confirmed, then a non-loopback listen addr) instead
+            // of `listen_addresses.first()`, which is frequently
+            // 127.0.0.1 / 0.0.0.0 and useless to the recipient.
+            let listen = match pick_invite_host_addr(app) {
+                Some(a) => a,
                 None => {
                     app.set_status("no listen address yet — try again in a sec");
                     return Ok(false);
                 }
             };
             // libp2p multiaddrs need /p2p/<peer-id> appended so the
-            // dialer's pubkey check fires. Listen addr is usually
-            // /ip4/0.0.0.0/tcp/<port> — substitute a real host on the
-            // receiver's end isn't ideal but the IP is what the user
-            // shared OOB anyway. For LAN we leave the 0.0.0.0 as-is;
-            // the user can fix the URL before sharing if their auto-
-            // detected addr isn't reachable from outside.
-            let host_multiaddr = format!("{}/p2p/{}", listen, our_peer);
+            // dialer's pubkey check fires. A relay-circuit address from
+            // `dialable_addrs` already ends in /p2p-circuit; appending
+            // our id yields the correct full circuit dial target.
+            let host_multiaddr = if listen.contains(&our_peer) {
+                listen
+            } else {
+                format!("{}/p2p/{}", listen, our_peer)
+            };
 
             let room = match app.active_room() {
                 Some(r) => {
@@ -3563,6 +3581,11 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
                 }
             }
             if let Some(room) = invite.room {
+                // huddle 0.7.12: seed the room (salt + metadata) from the
+                // invite so the join below doesn't race the host's gossip
+                // announcement and error "room not found". Covers both the
+                // encrypted (passphrase-modal) and unencrypted branches.
+                app.handle.seed_invite_room(&room);
                 if room.encrypted {
                     app.modal = Modal::JoinRoom(JoinRoomState {
                         room_id: room.id.clone(),
@@ -4534,19 +4557,23 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
 fn resolve_dm_target(app: &TuiApp, input: &str) -> Option<String> {
     let trimmed = input.trim();
     // Reuse the dial-by-id-or-username normalizer for HD/hex paths.
-    let normalized = huddle_core::app::normalize_to_fingerprint(trimmed);
-    if let Some(fp) = normalized {
+    if let Some(fp) = huddle_core::app::normalize_to_fingerprint(trimmed) {
         return Some(fp);
     }
-    // Username lookup — peer_profiles cache keyed by username.
-    for p in &app.known_peers {
-        if let Some(label) = &p.label {
-            if let Some(name) = app.handle.lookup_username(label) {
-                if name.eq_ignore_ascii_case(trimmed) {
-                    return Some(label.clone());
-                }
-            }
-        }
+    // Username → fingerprint via the signed-ProfileUpdate cache
+    // (`peer_profiles`). huddle 0.7.12: previously this iterated
+    // `known_peers` and fed `p.label` (always `None`, and a label is
+    // not a fingerprint) to `lookup_username`, so the branch was dead
+    // and every typed username fell through to the dial path — which
+    // hard-fails for a peer we share a room with but have no dialable
+    // address for. Now we resolve over every peer whose name we've
+    // learned, whether or not we've ever dialed them. Resolve only on
+    // an unambiguous single match; an ambiguous or unknown name returns
+    // `None` so the caller's AddFriend fallback can surface the proper
+    // "ambiguous — use their HD- ID" / "no peer named X" guidance.
+    let matches = app.handle.peers_with_username(trimmed);
+    if matches.len() == 1 {
+        return matches.into_iter().next();
     }
     None
 }
@@ -4677,6 +4704,39 @@ pub fn filtered_invite_candidates(state: &InvitePickerState) -> Vec<InviteCandid
         .collect()
 }
 
+/// huddle 0.7.12: pick the best host address to embed in an invite.
+/// Prefers addresses meant for the wire — relay-circuit reservations /
+/// AutoNAT-confirmed external addresses (`dialable_addrs`), which work
+/// across NAT — then the first routable listen address. Only falls back
+/// to a loopback / unspecified-bind address (`127.0.0.1`, `0.0.0.0`,
+/// `::1`, `::`) when that's literally all we have, since those are
+/// useless to a remote peer. Pre-0.7.12 the invite builders grabbed
+/// `listen_addresses.first()`, which is frequently `127.0.0.1`.
+fn pick_invite_host_addr(app: &TuiApp) -> Option<String> {
+    if let Some(a) = app.handle.dialable_addrs().into_iter().next() {
+        return Some(a);
+    }
+    if let Some(a) = app
+        .listen_addresses
+        .iter()
+        .find(|a| !is_unspecified_or_loopback(a))
+    {
+        return Some(a.clone());
+    }
+    // Nothing routable yet — last resort so the user at least gets a
+    // (hand-editable) link instead of an error.
+    app.listen_addresses.first().cloned()
+}
+
+/// True for multiaddrs a remote peer can't reach us on: IPv4/IPv6
+/// loopback and the unspecified bind addresses.
+fn is_unspecified_or_loopback(addr: &str) -> bool {
+    addr.contains("/ip4/127.")
+        || addr.contains("/ip4/0.0.0.0")
+        || addr.contains("/ip6/::1/")
+        || addr.contains("/ip6/::/")
+}
+
 /// Build a room-scoped invite link the same way `Action::GenerateInvite`
 /// does — but reusable so the InvitePicker can call it without
 /// duplicating the listen-address / encode dance. Errors when we don't
@@ -4685,12 +4745,16 @@ pub fn build_room_invite_link(app: &TuiApp, room_id: &str) -> anyhow::Result<Str
     use anyhow::anyhow;
     let our_peer = app.handle.peer_id().to_string();
     let our_fp = app.handle.fingerprint().to_string();
-    let listen = app
-        .listen_addresses
-        .first()
-        .ok_or_else(|| anyhow!("no listen address yet — try again in a sec"))?
-        .clone();
-    let host_multiaddr = format!("{}/p2p/{}", listen, our_peer);
+    // huddle 0.7.12: pick the best routable host address (see
+    // `pick_invite_host_addr`) rather than `listen_addresses.first()`,
+    // which is frequently loopback / unspecified and useless to a peer.
+    let listen = pick_invite_host_addr(app)
+        .ok_or_else(|| anyhow!("no listen address yet — try again in a sec"))?;
+    let host_multiaddr = if listen.contains(&our_peer) {
+        listen
+    } else {
+        format!("{}/p2p/{}", listen, our_peer)
+    };
 
     let info = app
         .handle
@@ -4991,4 +5055,31 @@ fn parse_max_stable_version(body: &str) -> Option<String> {
 /// true iff `remote > current`.
 fn is_version_newer(remote: &str, current: &str) -> bool {
     parse_semver(remote) > parse_semver(current)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // huddle 0.7.12 — guards Bug E: an invite must never embed a
+    // loopback / unspecified host the recipient can't reach.
+    #[test]
+    fn is_unspecified_or_loopback_filters_useless_addrs() {
+        assert!(is_unspecified_or_loopback("/ip4/127.0.0.1/tcp/9000"));
+        assert!(is_unspecified_or_loopback("/ip4/0.0.0.0/tcp/9000"));
+        assert!(is_unspecified_or_loopback("/ip6/::1/tcp/9000"));
+        assert!(is_unspecified_or_loopback("/ip6/::/tcp/9000"));
+    }
+
+    #[test]
+    fn is_unspecified_or_loopback_passes_routable_addrs() {
+        assert!(!is_unspecified_or_loopback("/ip4/192.168.1.5/tcp/9000"));
+        assert!(!is_unspecified_or_loopback("/ip4/10.0.0.5/tcp/9000"));
+        assert!(!is_unspecified_or_loopback("/ip4/8.8.8.8/tcp/9000"));
+        assert!(!is_unspecified_or_loopback("/ip6/2001:db8::1/tcp/9000"));
+        // A relay-circuit address must pass through untouched.
+        assert!(!is_unspecified_or_loopback(
+            "/ip4/1.2.3.4/tcp/4001/p2p/12D3KooRelay/p2p-circuit"
+        ));
+    }
 }
