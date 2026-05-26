@@ -101,90 +101,105 @@ fn render_account<'a>(app: &TuiApp, theme: &Theme) -> Vec<Line<'a>> {
 }
 
 fn render_network<'a>(app: &TuiApp, theme: &Theme) -> Vec<Line<'a>> {
-    let mdns_on = app.handle.mdns_enabled();
-    let nat = match app.nat_status.as_deref() {
-        Some("reachable") => "🌐 reachable",
-        Some("private") => "🏠 private",
-        _ => "🔍 detecting",
-    };
+    let libp2p = app.libp2p_active();
     let mut lines: Vec<Line> = Vec::new();
+
+    // huddle 0.8: the Tor-onion relay is the default (and usually only)
+    // transport. libp2p is opt-in via `--mode mdns|direct`.
     lines.push(Line::from(vec![Span::styled(
-        "  Three connection paths run in parallel:",
+        "  huddle routes over a Tor-onion relay by default —",
         theme.dim(),
     )]));
+    lines.push(Line::from(vec![Span::styled(
+        "  end-to-end encrypted, anonymous, no NAT hole-punching:",
+        theme.dim(),
+    )]));
+    lines.push(Line::raw(""));
+
+    let (relay_label, relay_style) = if !app.handle.server_enabled() {
+        ("off (--no-server)".to_string(), theme.warn_style())
+    } else if app.handle.server_connected() {
+        ("🧅 connected".to_string(), theme.ok())
+    } else {
+        ("🧅 connecting…  (is Tor running?)".to_string(), theme.dim())
+    };
     lines.push(Line::from(vec![
-        Span::styled("    LAN (mDNS)   ", theme.dim()),
-        Span::styled(
-            if mdns_on { "on" } else { "off" },
-            if mdns_on {
-                theme.ok()
-            } else {
-                theme.warn_style()
-            },
+        Span::styled("    Onion relay  ", theme.dim()),
+        Span::styled(relay_label, relay_style),
+    ]));
+
+    let (libp2p_label, libp2p_style) = if libp2p {
+        (
+            format!("on  ·  {}", app.mode_str()),
+            theme.ok(),
+        )
+    } else {
+        (
+            "off  ·  opt in with --mode mdns|direct".to_string(),
+            theme.dim(),
+        )
+    };
+    lines.push(Line::from(vec![
+        Span::styled("    libp2p (LAN) ", theme.dim()),
+        Span::styled(libp2p_label, libp2p_style),
+    ]));
+    lines.push(Line::raw(""));
+
+    // Override hint — repoint the relay without recompiling.
+    lines.push(Line::from(vec![Span::styled(
+        format!(
+            "  override relay in {}  (server_url / tor_socks)",
+            huddle_core::config::config_path().display()
         ),
-        Span::raw("    "),
-        Span::styled("(default: on)", theme.dim()),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("    Direct dial ", theme.dim()),
-        Span::styled("always available", theme.ok()),
-        Span::raw("    "),
-        Span::styled("(d to dial)", theme.dim()),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("    Invite link ", theme.dim()),
-        Span::styled("always available", theme.ok()),
-        Span::raw("    "),
-        Span::styled("(Shift+I to generate)", theme.dim()),
-    ]));
-    lines.push(Line::raw(""));
-    lines.push(row(
-        theme,
-        "M",
-        "LAN discovery (mDNS)",
-        if mdns_on {
-            "on  ·  restart to apply changes"
+        theme.dim(),
+    )]));
+
+    // The rest is libp2p-specific; only meaningful when a swarm is up.
+    if libp2p {
+        lines.push(Line::raw(""));
+        let mdns_on = app.handle.mdns_enabled();
+        lines.push(row(
+            theme,
+            "M",
+            "LAN discovery (mDNS)",
+            if mdns_on {
+                "on  ·  restart to apply changes"
+            } else {
+                "off · restart to apply changes"
+            }
+            .into(),
+        ));
+        lines.push(Line::raw(""));
+        let nat = match app.nat_status.as_deref() {
+            Some("reachable") => "🌐 reachable",
+            Some("private") => "🏠 private",
+            _ => "🔍 detecting",
+        };
+        lines.push(Line::from(vec![
+            Span::styled("  reachability  ", theme.dim()),
+            Span::styled(nat.to_string(), theme.text_style()),
+        ]));
+        lines.push(Line::raw(""));
+        lines.push(Line::from(vec![Span::styled(
+            "  listen addresses (cross-network dialable):",
+            theme.dim(),
+        )]));
+        if app.listen_addresses.is_empty() {
+            lines.push(Line::from(vec![Span::styled("    (binding…)", theme.dim())]));
         } else {
-            "off · restart to apply changes"
+            for a in app.listen_addresses.iter().take(6) {
+                lines.push(Line::from(vec![Span::styled(
+                    format!("    {}", a),
+                    theme.text_style(),
+                )]));
+            }
         }
-        .into(),
-    ));
-    lines.push(Line::raw(""));
-    lines.push(Line::from(vec![
-        Span::styled("  reachability  ", theme.dim()),
-        Span::styled(nat.to_string(), theme.text_style()),
-    ]));
-    lines.push(Line::raw(""));
-    lines.push(Line::from(vec![Span::styled(
-        "  listen addresses (cross-network dialable):",
-        theme.dim(),
-    )]));
-    if app.listen_addresses.is_empty() {
+        lines.push(Line::raw(""));
+        let relays = huddle_core::config::load_relays().unwrap_or_default();
         lines.push(Line::from(vec![Span::styled(
-            "    (binding…)",
+            format!("  libp2p relays from config.toml: {}", relays.len()),
             theme.dim(),
         )]));
-    } else {
-        for a in app.listen_addresses.iter().take(6) {
-            lines.push(Line::from(vec![Span::styled(
-                format!("    {}", a),
-                theme.text_style(),
-            )]));
-        }
-    }
-    lines.push(Line::raw(""));
-    let cfg_path = huddle_core::config::config_path();
-    lines.push(Line::from(vec![Span::styled(
-        format!("  relays from config.toml: {}", cfg_path.display()),
-        theme.dim(),
-    )]));
-    let relays = huddle_core::config::load_relays().unwrap_or_default();
-    if relays.is_empty() {
-        lines.push(Line::from(vec![Span::styled(
-            "    (none — default; LAN + direct dial only)",
-            theme.dim(),
-        )]));
-    } else {
         for r in &relays {
             lines.push(Line::from(vec![Span::styled(
                 format!("    {}", r),

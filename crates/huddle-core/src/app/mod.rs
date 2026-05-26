@@ -19,6 +19,7 @@ use crate::files::encryption::{self as file_encryption, EncryptedFileMeta};
 use crate::files::FileManager;
 use crate::identity::Identity;
 use crate::network::events::NetworkEvent;
+use crate::network::server::{ServerClient, ServerEvent};
 use crate::network::protocol::{encode_wire, RoomAnnouncement, RoomMessage, WireMessage};
 use crate::network::{self, NetworkHandle, NetworkMode};
 use crate::storage::repo::{
@@ -154,6 +155,15 @@ struct SasFlow {
     finalized: bool,
 }
 
+/// huddle 0.8: the canonical centralized server, reachable only as a Tor
+/// v3 onion. Baked in so the client connects to the operator's relay by
+/// default; override with the `--server <ws-url>` CLI flag, disable with
+/// `--no-server`. Reached through the local Tor SOCKS5 proxy.
+pub const DEFAULT_SERVER_URL: &str =
+    "ws://huddleg2647kbrmngflqai23f4rrc7l5dnszz5lij76uhqzmkebx2mid.onion:80/ws";
+/// Local Tor SOCKS5 proxy used to dial `.onion` server URLs.
+pub const DEFAULT_TOR_SOCKS: &str = "127.0.0.1:9050";
+
 #[derive(Clone)]
 pub struct AppHandle {
     identity: Arc<Identity>,
@@ -231,6 +241,11 @@ pub struct AppHandle {
     /// inbound dial never triggers the auto-DM.
     pending_auto_dm_addrs: Arc<Mutex<HashSet<String>>>,
     app_event_tx: broadcast::Sender<AppEvent>,
+    /// huddle 0.8: whether a centralized-server URL was configured at
+    /// startup (i.e. NOT `--no-server`). Drives the TUI relay badge: with
+    /// no server configured we show nothing, rather than a permanently
+    /// "disconnected" indicator. Set once at construction, never changes.
+    server_enabled: bool,
 }
 
 /// Phase D follow-up: minimum seconds between two opportunistic
@@ -244,7 +259,7 @@ const PROFILE_REBROADCAST_FLOOR_MS: i64 = 60_000;
 
 impl AppHandle {
     pub async fn start() -> Result<Self> {
-        Self::start_with_options(NetworkMode::Mdns, 0, None, Vec::new()).await
+        Self::start_with_options(NetworkMode::Server, 0, None, Vec::new(), None, None).await
     }
 
     /// huddle 0.7.8: peek the persisted `mdns_enabled` setting without
@@ -268,6 +283,8 @@ impl AppHandle {
         port: u16,
         master_key: Option<&[u8; 32]>,
         relays: Vec<Multiaddr>,
+        server_url: Option<String>,
+        tor_socks: Option<String>,
     ) -> Result<Self> {
         config::ensure_data_dir()?;
         // Megolm session state is encrypted at rest with an HKDF subkey
@@ -279,11 +296,29 @@ impl AppHandle {
             None => [0u8; 32],
         };
         let db = storage::open_db(&config::db_path(), master_key)?;
-        Self::start_with_db_and_options(db, mode, port, session_persist_key, relays).await
+        Self::start_with_db_and_options(
+            db,
+            mode,
+            port,
+            session_persist_key,
+            relays,
+            server_url,
+            tor_socks,
+        )
+        .await
     }
 
     pub async fn start_with_db(db: Db) -> Result<Self> {
-        Self::start_with_db_and_options(db, NetworkMode::Mdns, 0, [0u8; 32], Vec::new()).await
+        Self::start_with_db_and_options(
+            db,
+            NetworkMode::Mdns,
+            0,
+            [0u8; 32],
+            Vec::new(),
+            None,
+            None,
+        )
+        .await
     }
 
     pub async fn start_with_db_and_options(
@@ -292,6 +327,8 @@ impl AppHandle {
         port: u16,
         session_persist_key: [u8; 32],
         relays: Vec<Multiaddr>,
+        server_url: Option<String>,
+        tor_socks: Option<String>,
     ) -> Result<Self> {
         let identity = Self::load_or_create_identity(&db)?;
         let identity = Arc::new(identity);
@@ -299,8 +336,17 @@ impl AppHandle {
 
         let (net_event_tx, net_event_rx) = tokio::sync::mpsc::channel::<NetworkEvent>(256);
         let (app_event_tx, _) = broadcast::channel::<AppEvent>(256);
-        let network =
-            network::start_network_with(&identity, net_event_tx, mode, port, relays)?;
+        // huddle 0.8: the default `Server` mode runs NO libp2p — the Tor
+        // onion relay is the only transport. `--mode mdns|direct` opts back
+        // into a libp2p swarm running alongside the relay. In `Server` mode
+        // `net_event_tx` is simply dropped, so the event processor (which
+        // only carries libp2p events) winds down; server messages reach
+        // `process_network_event` directly from `spawn_server_connection`.
+        let network = if mode.uses_libp2p() {
+            network::start_network_with(&identity, net_event_tx, mode, port, relays)?
+        } else {
+            network::start_network_disabled()
+        };
 
         let active_rooms = Arc::new(Mutex::new(HashMap::new()));
         let discovered_rooms = Arc::new(Mutex::new(HashMap::new()));
@@ -328,6 +374,7 @@ impl AppHandle {
             last_profile_broadcast_at_ms: Arc::new(Mutex::new(HashMap::new())),
             pending_auto_dm_addrs: Arc::new(Mutex::new(HashSet::new())),
             app_event_tx,
+            server_enabled: server_url.is_some(),
         };
 
         handle.spawn_event_processor(net_event_rx);
@@ -335,6 +382,14 @@ impl AppHandle {
         handle.spawn_discovered_room_pruner();
         handle.spawn_known_peer_reconnector();
         handle.restore_rooms_from_db().await;
+        // huddle 0.8: now that active rooms are loaded, open the persistent
+        // connection to the centralized server (if configured). Connecting
+        // after restore means our `hello` carries the restored room ids, so
+        // the server registers our memberships and flushes any offline
+        // mailbox for rooms we already have active.
+        if let Some(url) = server_url {
+            handle.spawn_server_connection(url, tor_socks);
+        }
         // huddle 0.7.7: prune any friend requests that aged out while
         // we were offline. Best-effort — a DB failure here shouldn't
         // block startup, so we log and move on.
@@ -347,6 +402,21 @@ impl AppHandle {
 
     pub fn mode(&self) -> NetworkMode {
         self.mode
+    }
+
+    /// huddle 0.8: whether the centralized-server connection is currently
+    /// up. Used by the TUI status line and by tests waiting for connect.
+    pub fn server_connected(&self) -> bool {
+        self.network.has_server()
+    }
+
+    /// huddle 0.8: whether a centralized server was configured at startup
+    /// (vs `--no-server` / a `None` server URL). The TUI uses this to
+    /// decide whether to render the relay indicator at all — there's no
+    /// point showing a "disconnected" badge for a feature the user turned
+    /// off.
+    pub fn server_enabled(&self) -> bool {
+        self.server_enabled
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<AppEvent> {
@@ -1791,6 +1861,68 @@ impl AppHandle {
                 handle.process_network_event(event).await;
             }
             info!("event processor stopped");
+        });
+    }
+
+    /// huddle 0.8: maintain a connection to the centralized server (a Tor
+    /// onion relay) for the life of the process. Reconnects with capped
+    /// exponential backoff. While connected, the [`NetworkHandle`] mirrors
+    /// outgoing room traffic to it (see `attach_server`), and incoming
+    /// server messages are funneled into the *same* `RoomMessageReceived`
+    /// handler as gossipsub — so a message that arrives via the server is
+    /// decoded, verified, and decrypted by exactly the same code path.
+    fn spawn_server_connection(&self, url: String, tor_socks: Option<String>) {
+        // `.onion` hosts must be dialed through Tor's SOCKS5 proxy; a plain
+        // ws:// host (tests / a clearnet relay) is dialed directly. The
+        // proxy address defaults to `127.0.0.1:9050` but is overridable
+        // (`--tor-socks` / `config.toml`) for e.g. the Tor Browser bundle's
+        // 9150 port.
+        let socks = if url.contains(".onion") {
+            Some(tor_socks.unwrap_or_else(|| DEFAULT_TOR_SOCKS.to_string()))
+        } else {
+            None
+        };
+        let handle = self.clone();
+        tokio::spawn(async move {
+            let mut backoff = 1u64;
+            loop {
+                let fp = handle.identity.fingerprint().to_string();
+                let rooms: Vec<String> =
+                    handle.active_rooms.lock().unwrap().keys().cloned().collect();
+                match ServerClient::connect(&url, socks.as_deref(), fp, rooms).await {
+                    Ok((client, mut rx)) => {
+                        backoff = 1;
+                        handle.network.attach_server(client);
+                        info!(%url, "connected to huddle-server");
+                        while let Some(ev) = rx.recv().await {
+                            match ev {
+                                ServerEvent::Message { room, payload, .. } => {
+                                    // Reuse the gossipsub receive path verbatim.
+                                    // `from_peer` is ignored by that handler.
+                                    handle
+                                        .process_network_event(
+                                            NetworkEvent::RoomMessageReceived {
+                                                room_id: room,
+                                                payload,
+                                                from_peer: PeerId::random(),
+                                            },
+                                        )
+                                        .await;
+                                }
+                                // Delivery receipts and the ready ack are not
+                                // surfaced to the UI yet; reconnect on close.
+                                ServerEvent::Ready | ServerEvent::Sent { .. } => {}
+                                ServerEvent::Disconnected => break,
+                            }
+                        }
+                        handle.network.detach_server();
+                        warn!("huddle-server connection closed; reconnecting");
+                    }
+                    Err(e) => warn!(error = %e, "huddle-server connect failed; will retry"),
+                }
+                tokio::time::sleep(Duration::from_secs(backoff)).await;
+                backoff = (backoff * 2).min(30);
+            }
         });
     }
 

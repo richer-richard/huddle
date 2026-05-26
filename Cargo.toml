@@ -3,4 +3,5 @@ resolver = "2"
 members = [
     "crates/huddle-core",
     "crates/huddle",
+    "crates/huddle-server",
 ]

@@ -20,8 +20,10 @@ struct Cli {
     #[arg(long, help = "Override data directory")]
     data_dir: Option<String>,
 
-    /// Connection mode. If omitted, you'll be asked at startup.
-    /// Values: `mdns` (LAN auto-discover) or `direct` (manual dial only).
+    /// Connection mode. huddle 0.8 defaults to `server` (onion-relay
+    /// only — no libp2p). Pass `mdns` (LAN auto-discover) or `direct`
+    /// (manual dial only) to ALSO start a libp2p swarm alongside the
+    /// relay. `server` is the recommended default for internet use.
     #[arg(long, value_parser = parse_mode)]
     mode: Option<NetworkMode>,
 
@@ -52,6 +54,26 @@ struct Cli {
     /// entries. LAN-only operation.
     #[arg(long)]
     no_relay: bool,
+
+    /// huddle 0.8: override the centralized server (a Tor onion relay)
+    /// WebSocket URL. Defaults to the baked-in onion. `.onion` hosts are
+    /// dialed through the local Tor SOCKS5 proxy (127.0.0.1:9050).
+    #[arg(long = "server", value_name = "WS_URL")]
+    server: Option<String>,
+
+    /// huddle 0.8: don't connect to the centralized server. Combined with
+    /// the default (no `--mode`), this leaves NO transport — useful only
+    /// for offline inspection. With `--mode mdns|direct` it falls back to
+    /// libp2p-only (LAN / relay).
+    #[arg(long)]
+    no_server: bool,
+
+    /// huddle 0.8: override the local Tor SOCKS5 proxy used to reach
+    /// `.onion` server URLs (default 127.0.0.1:9050) — e.g. the Tor
+    /// Browser bundle's 127.0.0.1:9150. Also settable in config.toml as
+    /// `tor_socks = "..."`; this flag wins.
+    #[arg(long = "tor-socks", value_name = "HOST:PORT")]
+    tor_socks: Option<String>,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -99,10 +121,10 @@ async fn main() -> Result<()> {
     app::install_panic_hook();
 
     let cli_mode_explicit = cli.mode.is_some();
-    // Provisional mode; the persisted `mdns_enabled` setting is read
-    // after the DB is unlocked further down and may override this if
-    // the CLI didn't pass `--mode`.
-    let mut mode = cli.mode.unwrap_or(NetworkMode::Mdns);
+    // huddle 0.8: default to `Server` — the Tor-onion relay is the sole
+    // transport and no libp2p swarm starts. `--mode mdns|direct` opts back
+    // into libp2p (running alongside the relay) for LAN / direct dial.
+    let mode = cli.mode.unwrap_or(NetworkMode::Server);
 
     // Skip the welcome card if a mode was given explicitly — power users
     // who script `--mode direct` don't want a prompt in the way.
@@ -170,18 +192,35 @@ async fn main() -> Result<()> {
         parsed
     };
 
-    // huddle 0.7.8: if the CLI didn't pass `--mode`, honor the persisted
-    // `mdns_enabled` setting (default ON). The peek opens the DB
-    // read-only ahead of `start_with_options`; migrations are idempotent
-    // so running them twice is harmless.
-    if !cli_mode_explicit {
-        match huddle_core::app::AppHandle::peek_mdns_enabled(master_key.as_ref()) {
-            Ok(true) => mode = NetworkMode::Mdns,
-            Ok(false) => mode = NetworkMode::Direct,
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to read mdns_enabled setting; defaulting to mDNS on");
-            }
-        }
+    // huddle 0.8: libp2p is now strictly opt-in via `--mode mdns|direct`.
+    // The persisted `mdns_enabled` toggle no longer auto-starts a libp2p
+    // swarm (it only matters once you've opted in), so the startup mode is
+    // exactly what the CLI resolved above — `Server` by default.
+
+    // huddle 0.8: resolve the centralized-server URL. `--no-server` wins;
+    // otherwise precedence is `--server` flag → config.toml `server_url` →
+    // the baked-in default onion. The onion address is self-authenticating
+    // (it IS the server's key), so baking it in pins the server identity;
+    // the override exists so you can repoint without recompiling.
+    let server_url: Option<String> = if cli.no_server {
+        None
+    } else {
+        Some(
+            cli.server
+                .clone()
+                .or_else(huddle_core::config::server_url)
+                .unwrap_or_else(|| huddle_core::app::DEFAULT_SERVER_URL.to_string()),
+        )
+    };
+    // SOCKS proxy override: `--tor-socks` flag → config.toml `tor_socks` →
+    // (core default 127.0.0.1:9050). `None` lets core pick the default.
+    let tor_socks: Option<String> = cli.tor_socks.clone().or_else(huddle_core::config::tor_socks);
+
+    if server_url.is_none() && !mode.uses_libp2p() {
+        tracing::warn!(
+            "no transport configured (--no-server with default mode) — \
+             huddle will run offline; pass --mode mdns|direct for LAN"
+        );
     }
 
     let handle = huddle_core::app::AppHandle::start_with_options(
@@ -189,6 +228,8 @@ async fn main() -> Result<()> {
         cli.port,
         master_key.as_ref(),
         relays,
+        server_url,
+        tor_socks,
     )
     .await
     .map_err(|e| anyhow!(e))?;

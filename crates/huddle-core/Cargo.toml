@@ -1,6 +1,6 @@
 [package]
 name = "huddle-core"
-version = "0.7.13"
+version = "0.8.0"
 edition = "2021"
 description = "Protocol, networking, crypto, and storage layer for huddle — a decentralized terminal chat app."
 license = "MIT OR Apache-2.0"
@@ -22,6 +22,12 @@ libp2p = { version = "0.56", features = [
     # succeeds.
     "relay", "autonat", "dcutr",
 ] }
+# huddle 0.8: client connector to the centralized huddle-server. The
+# server is reachable only as a Tor v3 onion, so we dial it through Tor's
+# local SOCKS5 proxy (tokio-socks) and speak WebSocket over that stream
+# (tokio-tungstenite, version-matched to the server crate).
+tokio-tungstenite = "0.24"
+tokio-socks = "0.5"
 vodozemac = "0.10"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 rusqlite = { version = "0.39", features = ["bundled-sqlcipher-vendored-openssl"] }

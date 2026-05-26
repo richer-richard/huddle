@@ -7,8 +7,9 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use crossterm::{
     event::{
-        self, poll, DisableFocusChange, DisableMouseCapture, EnableFocusChange,
-        EnableMouseCapture, Event, MouseButton, MouseEventKind,
+        self, poll, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture,
+        EnableBracketedPaste, EnableFocusChange, EnableMouseCapture, Event, KeyCode, KeyEvent,
+        KeyModifiers, MouseButton, MouseEventKind,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -57,11 +58,12 @@ pub const ONBOARDING_PAGES: &[OnboardingPage] = &[
     OnboardingPage {
         title: "huddle is not iMessage",
         body: &[
-            "every member is a peer — no host, no central server.",
-            "rooms outlive whoever created them.",
-            "anyone with the room passphrase can join, send, rotate the key.",
-            "leaderless + persistent mesh; the protocol has no admin tier",
-            "by default, only the soft 'owner' role you can grant per room.",
+            "messages are end-to-end encrypted — the relay that passes",
+            "them only ever sees ciphertext, never your keys.",
+            "by default everything routes over a Tor-onion relay, so",
+            "there's no IP, no DNS, no account — just your identity key.",
+            "rooms outlive whoever created them; anyone with the room",
+            "passphrase can join, send, and rotate the key.",
             "",
             "press → / Tab / Enter / Space to continue.",
         ],
@@ -186,6 +188,27 @@ pub const ONBOARDING_PAGES: &[OnboardingPage] = &[
             "permission prompt for Script Editor / Terminal — click Allow.",
         ],
         min_version: "0.7.4",
+    },
+    OnboardingPage {
+        title: "what's new in 0.8 — Tor onion relay",
+        body: &[
+            "huddle now routes over a centralized Tor-onion relay by",
+            "default — no more flaky NAT hole-punching. It's still fully",
+            "end-to-end encrypted; the relay only ever sees ciphertext.",
+            "",
+            "  · works anywhere with Tor, behind any NAT or firewall",
+            "  · no IP / DNS / account — your onion + identity key only",
+            "  · the 🧅 by your name = relay connected (· = connecting)",
+            "",
+            "Requires Tor running locally (SOCKS5 127.0.0.1:9050).",
+            "First contact: make a group room (g) and share an invite",
+            "(Shift+I) — your friend pastes it and joins over the relay.",
+            "",
+            "libp2p (LAN mDNS + direct dial) is now OPT-IN: start with",
+            "`--mode mdns` or `--mode direct` to also run it alongside.",
+            "Repoint the relay in config.toml (server_url / tor_socks).",
+        ],
+        min_version: "0.8.0",
     },
 ];
 
@@ -718,17 +741,60 @@ pub struct VerifyState {
     pub selected: usize,
 }
 
+/// Rows of the attach picker visible at once. The renderer and the
+/// scroll-clamp logic must agree on this, so it lives here and is
+/// imported by `ui::modal`.
+pub const ATTACH_VISIBLE_ROWS: usize = 14;
+
+/// Soft cap on entries read per directory. Keeps `rebuild_flat` cheap and
+/// the picker responsive even if someone expands a pathologically large
+/// directory; the overflow is silently dropped (rare in practice).
+const ATTACH_MAX_CHILDREN: usize = 5000;
+
+/// One node in the lazily-loaded attach tree. Collapsed children are
+/// retained so re-expanding a directory is instant (no re-read).
 #[derive(Debug, Clone)]
-pub struct AttachEntry {
+pub struct TreeNode {
+    /// Display name (`to_string_lossy`). Never used for filesystem access.
+    pub name: String,
+    /// Authoritative absolute path — safe for non-UTF8 names.
+    pub path: std::path::PathBuf,
+    pub is_dir: bool,
+    pub expanded: bool,
+    /// Children fetched yet? Directories load lazily on first expand.
+    pub loaded: bool,
+    /// Set when the directory could not be read (permissions, IO). We
+    /// still mark it `loaded` so we never re-hammer it.
+    pub load_error: Option<String>,
+    pub children: Vec<TreeNode>,
+}
+
+/// A flattened, currently-visible tree row. The flat list is the cursor
+/// index space and the render surface; it is rebuilt on every structural
+/// change. `path` is the stable identity used to keep the cursor pinned
+/// to the same node across rebuilds.
+#[derive(Debug, Clone)]
+pub struct FlatRow {
+    pub path: std::path::PathBuf,
     pub name: String,
     pub is_dir: bool,
+    pub expanded: bool,
+    pub depth: usize,
+    /// Directory that failed to load — render as "(no access)".
+    pub has_error: bool,
+    /// Expanded directory with no children — render as "(empty)".
+    pub is_empty_dir: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct AttachPickerState {
-    pub cwd: std::path::PathBuf,
-    pub entries: Vec<AttachEntry>,
+    /// Starting directory; the tree is rooted here and cannot ascend above it.
+    pub root: std::path::PathBuf,
+    pub roots: Vec<TreeNode>,
+    pub flat: Vec<FlatRow>,
     pub selected: usize,
+    pub scroll: usize,
+    pub show_hidden: bool,
     pub error: Option<String>,
 }
 
@@ -738,66 +804,309 @@ impl AttachPickerState {
             .or_else(dirs::home_dir)
             .unwrap_or_else(|| std::path::PathBuf::from("/"));
         let mut s = Self {
-            cwd: start,
-            entries: Vec::new(),
+            root: start,
+            roots: Vec::new(),
+            flat: Vec::new(),
             selected: 0,
+            scroll: 0,
+            show_hidden: false,
             error: None,
         };
-        s.reload();
+        s.load_root();
         s
     }
 
-    pub fn reload(&mut self) {
-        self.error = None;
-        self.entries.clear();
-        self.selected = 0;
-        match std::fs::read_dir(&self.cwd) {
-            Ok(rd) => {
-                let mut tmp: Vec<AttachEntry> = Vec::new();
-                for entry in rd.flatten() {
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    if name.starts_with('.') {
-                        continue;
-                    }
-                    let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-                    tmp.push(AttachEntry { name, is_dir });
-                }
-                tmp.sort_by(|a, b| match (a.is_dir, b.is_dir) {
-                    (true, false) => std::cmp::Ordering::Less,
-                    (false, true) => std::cmp::Ordering::Greater,
-                    _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-                });
-                self.entries = tmp;
+    /// (Re)read the root directory and rebuild the visible list. Used on
+    /// open and whenever `show_hidden` toggles.
+    fn load_root(&mut self) {
+        match Self::read_children(&self.root, self.show_hidden) {
+            Ok(nodes) => {
+                self.roots = nodes;
+                self.error = None;
             }
             Err(e) => {
-                self.error = Some(format!("cannot read {}: {}", self.cwd.display(), e));
+                self.roots.clear();
+                self.error = Some(format!("cannot read {}: {}", self.root.display(), e));
+            }
+        }
+        self.selected = 0;
+        self.scroll = 0;
+        // Cursor anchoring in rebuild_flat keys off the prior flat list,
+        // which we've intentionally discarded here (full reset).
+        self.flat.clear();
+        self.rebuild_flat();
+    }
+
+    /// Read one directory's immediate children into unexpanded nodes.
+    /// `metadata()` (not `file_type()`) is used so symlinks-to-dirs are
+    /// navigable. Dirs sort first, then case-insensitive by name.
+    fn read_children(
+        dir: &std::path::Path,
+        show_hidden: bool,
+    ) -> std::io::Result<Vec<TreeNode>> {
+        let rd = std::fs::read_dir(dir)?;
+        let mut tmp: Vec<TreeNode> = Vec::new();
+        for entry in rd.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !show_hidden && name.starts_with('.') {
+                continue;
+            }
+            let path = entry.path();
+            let is_dir = std::fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false);
+            tmp.push(TreeNode {
+                name,
+                path,
+                is_dir,
+                expanded: false,
+                loaded: false,
+                load_error: None,
+                children: Vec::new(),
+            });
+            if tmp.len() >= ATTACH_MAX_CHILDREN {
+                break;
+            }
+        }
+        tmp.sort_by(|a, b| match (a.is_dir, b.is_dir) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+        });
+        Ok(tmp)
+    }
+
+    /// Recompute the flat visible-row list from the tree, then re-pin the
+    /// cursor to the node it was on (by path) and clamp the scroll window.
+    fn rebuild_flat(&mut self) {
+        let keep = self.flat.get(self.selected).map(|r| r.path.clone());
+        let mut flat: Vec<FlatRow> = Vec::new();
+        Self::flatten_into(&self.roots, 0, &mut flat);
+        self.flat = flat;
+        match keep.and_then(|p| self.flat.iter().position(|r| r.path == p)) {
+            Some(idx) => self.selected = idx,
+            None => self.selected = self.selected.min(self.flat.len().saturating_sub(1)),
+        }
+        self.clamp_scroll();
+    }
+
+    fn flatten_into(nodes: &[TreeNode], depth: usize, out: &mut Vec<FlatRow>) {
+        for n in nodes {
+            let is_empty_dir = n.is_dir
+                && n.expanded
+                && n.loaded
+                && n.load_error.is_none()
+                && n.children.is_empty();
+            out.push(FlatRow {
+                path: n.path.clone(),
+                name: n.name.clone(),
+                is_dir: n.is_dir,
+                expanded: n.expanded,
+                depth,
+                has_error: n.load_error.is_some(),
+                is_empty_dir,
+            });
+            if n.is_dir && n.expanded {
+                Self::flatten_into(&n.children, depth + 1, out);
             }
         }
     }
 
-    pub fn descend(&mut self) {
-        if let Some(e) = self.entries.get(self.selected) {
-            if e.is_dir {
-                self.cwd.push(&e.name);
-                self.reload();
+    /// Locate a node by path, descending only through expanded directories
+    /// (the focused path is always visible, so its ancestors are expanded).
+    fn find_node_mut<'a>(
+        nodes: &'a mut [TreeNode],
+        path: &std::path::Path,
+    ) -> Option<&'a mut TreeNode> {
+        for n in nodes.iter_mut() {
+            if n.path == path {
+                return Some(n);
+            }
+            if n.is_dir && n.expanded {
+                if let Some(found) = Self::find_node_mut(&mut n.children, path) {
+                    return Some(found);
+                }
             }
         }
+        None
     }
 
-    pub fn ascend(&mut self) {
-        if let Some(parent) = self.cwd.parent() {
-            self.cwd = parent.to_path_buf();
-            self.reload();
+    /// Space / Enter-on-dir: expand or collapse the focused directory,
+    /// lazily reading its children the first time it opens.
+    pub fn toggle_expand(&mut self) {
+        let path = match self.flat.get(self.selected) {
+            Some(r) if r.is_dir => r.path.clone(),
+            _ => return,
+        };
+        let show_hidden = self.show_hidden;
+        if let Some(node) = Self::find_node_mut(&mut self.roots, &path) {
+            if !node.expanded && !node.loaded {
+                match Self::read_children(&node.path, show_hidden) {
+                    Ok(children) => {
+                        node.children = children;
+                        node.loaded = true;
+                        node.load_error = None;
+                    }
+                    Err(e) => {
+                        node.loaded = true;
+                        node.load_error = Some(e.to_string());
+                        node.children.clear();
+                    }
+                }
+            }
+            node.expanded = !node.expanded;
+        }
+        self.rebuild_flat();
+    }
+
+    pub fn move_up(&mut self) {
+        if self.selected > 0 {
+            self.selected -= 1;
+        }
+        self.clamp_scroll();
+    }
+
+    pub fn move_down(&mut self) {
+        if self.selected + 1 < self.flat.len() {
+            self.selected += 1;
+        }
+        self.clamp_scroll();
+    }
+
+    /// Keep `selected` inside the visible window and `scroll` in range.
+    fn clamp_scroll(&mut self) {
+        let visible = ATTACH_VISIBLE_ROWS;
+        if self.selected < self.scroll {
+            self.scroll = self.selected;
+        } else if self.selected >= self.scroll + visible {
+            self.scroll = self.selected + 1 - visible;
+        }
+        let max_scroll = self.flat.len().saturating_sub(visible);
+        if self.scroll > max_scroll {
+            self.scroll = max_scroll;
         }
     }
 
+    /// Right: open a collapsed dir, or step into an already-open one.
+    pub fn expand(&mut self) {
+        match self.flat.get(self.selected) {
+            Some(r) if r.is_dir && !r.expanded => self.toggle_expand(),
+            Some(r) if r.is_dir && r.expanded => self.move_down(),
+            _ => {}
+        }
+    }
+
+    /// Left / Backspace: collapse an open dir, else jump to the parent row.
+    pub fn collapse_or_parent(&mut self) {
+        match self.flat.get(self.selected) {
+            Some(r) if r.is_dir && r.expanded => self.toggle_expand(),
+            Some(r) => {
+                let depth = r.depth;
+                if depth > 0 {
+                    let mut i = self.selected;
+                    while i > 0 {
+                        i -= 1;
+                        if self.flat[i].depth < depth {
+                            self.selected = i;
+                            break;
+                        }
+                    }
+                    self.clamp_scroll();
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// `.`: toggle dotfiles. Simplest correct approach — collapse all and
+    /// re-read the root, avoiding inconsistent per-directory hidden state.
+    pub fn toggle_hidden(&mut self) {
+        self.show_hidden = !self.show_hidden;
+        self.load_root();
+    }
+
+    /// The path to attach: `Some` only when a regular file is focused.
     pub fn selected_path(&self) -> Option<std::path::PathBuf> {
-        let e = self.entries.get(self.selected)?;
-        if e.is_dir {
+        let r = self.flat.get(self.selected)?;
+        if r.is_dir {
             None
         } else {
-            Some(self.cwd.join(&e.name))
+            Some(r.path.clone())
         }
+    }
+}
+
+#[cfg(test)]
+mod attach_picker_tests {
+    use super::{AttachPickerState, TreeNode};
+    use std::path::PathBuf;
+
+    fn dir(name: &str, children: Vec<TreeNode>) -> TreeNode {
+        TreeNode {
+            name: name.into(),
+            path: PathBuf::from(name),
+            is_dir: true,
+            expanded: false,
+            loaded: true, // pre-loaded so toggling never touches the FS
+            load_error: None,
+            children,
+        }
+    }
+    fn file(name: &str) -> TreeNode {
+        TreeNode {
+            name: name.into(),
+            path: PathBuf::from(name),
+            is_dir: false,
+            expanded: false,
+            loaded: true,
+            load_error: None,
+            children: vec![],
+        }
+    }
+    fn state(roots: Vec<TreeNode>) -> AttachPickerState {
+        let mut s = AttachPickerState {
+            root: PathBuf::from("/"),
+            roots,
+            flat: vec![],
+            selected: 0,
+            scroll: 0,
+            show_hidden: false,
+            error: None,
+        };
+        s.rebuild_flat();
+        s
+    }
+
+    #[test]
+    fn expand_collapse_preserves_cursor() {
+        // roots: a/ (contains x), b
+        let mut s = state(vec![dir("a", vec![file("x")]), file("b")]);
+        assert_eq!(s.flat.len(), 2);
+
+        // expand `a` in place: child `x` appears, cursor stays on `a`.
+        s.selected = 0;
+        s.toggle_expand();
+        assert_eq!(s.flat.len(), 3);
+        assert_eq!(s.flat[s.selected].name, "a");
+        assert_eq!(s.flat[1].name, "x");
+        assert_eq!(s.flat[1].depth, 1);
+
+        // navigate down to `b`, then collapse `a` and confirm cursor pins
+        // back to `a` and the child disappears.
+        s.move_down();
+        s.move_down();
+        assert_eq!(s.flat[s.selected].name, "b");
+        s.selected = 0;
+        s.toggle_expand();
+        assert_eq!(s.flat.len(), 2);
+        assert_eq!(s.flat[s.selected].name, "a");
+    }
+
+    #[test]
+    fn selected_path_is_none_for_dirs() {
+        let mut s = state(vec![dir("a", vec![file("x")]), file("b")]);
+        s.selected = 0; // on `a` (dir)
+        assert!(s.selected_path().is_none());
+        s.selected = 1; // on `b` (file)
+        assert_eq!(s.selected_path(), Some(PathBuf::from("b")));
     }
 }
 
@@ -1099,9 +1408,17 @@ impl TuiApp {
 
     pub fn mode_str(&self) -> &'static str {
         match self.mode {
-            NetworkMode::Mdns => "LAN (mDNS)",
-            NetworkMode::Direct => "Direct (manual dial)",
+            NetworkMode::Server => "Tor onion (relay-only)",
+            NetworkMode::Mdns => "LAN (mDNS) + relay",
+            NetworkMode::Direct => "Direct dial + relay",
         }
+    }
+
+    /// huddle 0.8: true when a libp2p swarm is running (i.e. not the
+    /// onion-relay-only default). The NAT-reachability badge and peer
+    /// counters are libp2p concepts, so the UI hides them otherwise.
+    pub fn libp2p_active(&self) -> bool {
+        self.mode != NetworkMode::Server
     }
 
     /// huddle 0.7: clear unread for a room. Called when that room
@@ -1998,7 +2315,8 @@ impl Drop for TerminalGuard {
             io::stdout(),
             LeaveAlternateScreen,
             DisableMouseCapture,
-            DisableFocusChange
+            DisableFocusChange,
+            DisableBracketedPaste
         );
     }
 }
@@ -2015,7 +2333,8 @@ pub fn install_panic_hook() {
             io::stdout(),
             LeaveAlternateScreen,
             DisableMouseCapture,
-            DisableFocusChange
+            DisableFocusChange,
+            DisableBracketedPaste
         );
         original(info);
     }));
@@ -2030,7 +2349,10 @@ pub async fn run_tui(handle: AppHandle) -> Result<()> {
         stdout,
         EnterAlternateScreen,
         EnableMouseCapture,
-        EnableFocusChange
+        EnableFocusChange,
+        // Bracketed paste lets us tell a single drag-and-dropped file path
+        // (one Paste event) apart from the user typing — see `handle_paste`.
+        EnableBracketedPaste
     )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
@@ -2462,6 +2784,9 @@ async fn main_loop(
                         }
                     }
                 }
+                Event::Paste(text) => {
+                    should_quit = handle_paste(text, app).await?;
+                }
                 Event::FocusGained => crate::notifier::set_focused(true),
                 Event::FocusLost => crate::notifier::set_focused(false),
                 _ => {}
@@ -2481,6 +2806,143 @@ async fn main_loop(
     }
 
     Ok(())
+}
+
+/// Handle a bracketed-paste event. A file dragged onto the terminal
+/// arrives as one paste of its (shell-escaped) path; if the paste
+/// resolves to one or more existing files and we're in a room, attach
+/// them. Otherwise the text is replayed as ordinary keystrokes so normal
+/// pasting into the composer and modal text fields keeps working.
+async fn handle_paste(text: String, app: &mut TuiApp) -> Result<bool> {
+    let files = parse_dropped_paths(&text);
+    if !files.is_empty() {
+        let room_id = match app.active_room() {
+            Some(r) => r.room_id.clone(),
+            None => {
+                app.set_status("open a room to attach a dropped file");
+                return Ok(false);
+            }
+        };
+        // Don't let a dropped path also land in whatever modal is open.
+        app.modal = Modal::None;
+        let mut sent = 0usize;
+        for path in &files {
+            match app.handle.send_file(&room_id, path).await {
+                Ok(_) => sent += 1,
+                Err(e) => app.set_status(format!("attach failed for {}: {e}", path.display())),
+            }
+        }
+        if sent == 1 {
+            app.set_status(format!("sending {}", files[0].display()));
+        } else if sent > 1 {
+            app.set_status(format!("sending {sent} files"));
+        }
+        return Ok(false);
+    }
+
+    // Not a file drop — replay the pasted text as keystrokes so it lands
+    // in the active text field (composer or modal) via the normal path.
+    for c in text.chars() {
+        if c == '\n' || c == '\r' || c.is_control() {
+            continue;
+        }
+        let key = KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+        let action = input::map_key(key, app);
+        if handle_action(action, app).await? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Parse a dragged-and-dropped paste into existing file paths. Handles the
+/// shell-style escaping terminals apply: `\ ` for spaces, single/double
+/// quotes around a path, and multiple space-separated paths. Only paths
+/// that exist as regular files are returned, so ordinary pasted text (no
+/// real file behind it) yields an empty list and falls through to text.
+fn parse_dropped_paths(text: &str) -> Vec<std::path::PathBuf> {
+    tokenize_paste(text)
+        .into_iter()
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_file())
+        .collect()
+}
+
+/// Split a paste into candidate path tokens, honoring the shell-style
+/// escaping terminals apply on drag-and-drop: backslash escapes outside
+/// single quotes, and single/double quoted spans. Pure (no filesystem) so
+/// it can be unit-tested directly.
+fn tokenize_paste(text: &str) -> Vec<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    let mut tokens: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut chars = trimmed.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if !in_single => {
+                if let Some(n) = chars.next() {
+                    cur.push(n);
+                }
+            }
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            c if c.is_whitespace() && !in_single && !in_double => {
+                if !cur.is_empty() {
+                    tokens.push(std::mem::take(&mut cur));
+                }
+            }
+            c => cur.push(c),
+        }
+    }
+    if !cur.is_empty() {
+        tokens.push(cur);
+    }
+    tokens
+}
+
+#[cfg(test)]
+mod paste_tests {
+    use super::tokenize_paste;
+
+    #[test]
+    fn unescapes_backslash_spaces() {
+        assert_eq!(
+            tokenize_paste("/Users/me/My\\ File.txt"),
+            vec!["/Users/me/My File.txt"]
+        );
+    }
+
+    #[test]
+    fn strips_surrounding_quotes() {
+        assert_eq!(
+            tokenize_paste("'/path/with space.txt'"),
+            vec!["/path/with space.txt"]
+        );
+        assert_eq!(
+            tokenize_paste("\"/path/two words.png\""),
+            vec!["/path/two words.png"]
+        );
+    }
+
+    #[test]
+    fn splits_multiple_unquoted_paths() {
+        assert_eq!(
+            tokenize_paste("/a/one.txt /b/two.txt"),
+            vec!["/a/one.txt", "/b/two.txt"]
+        );
+    }
+
+    #[test]
+    fn plain_text_tokenizes_but_wont_be_files() {
+        // The words tokenize; parse_dropped_paths' is_file() filter then
+        // drops them, so ordinary pasted prose falls through to typing.
+        assert_eq!(tokenize_paste("hello world"), vec!["hello", "world"]);
+    }
 }
 
 async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
@@ -3030,23 +3492,37 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
         }
         Action::AttachPickerUp => {
             if let Modal::AttachPicker(s) = &mut app.modal {
-                if s.selected > 0 {
-                    s.selected -= 1;
-                }
+                s.move_up();
             }
             Ok(false)
         }
         Action::AttachPickerDown => {
             if let Modal::AttachPicker(s) = &mut app.modal {
-                if s.selected + 1 < s.entries.len() {
-                    s.selected += 1;
-                }
+                s.move_down();
             }
             Ok(false)
         }
-        Action::AttachPickerAscend => {
+        Action::AttachPickerToggle => {
             if let Modal::AttachPicker(s) = &mut app.modal {
-                s.ascend();
+                s.toggle_expand();
+            }
+            Ok(false)
+        }
+        Action::AttachPickerExpand => {
+            if let Modal::AttachPicker(s) = &mut app.modal {
+                s.expand();
+            }
+            Ok(false)
+        }
+        Action::AttachPickerCollapse => {
+            if let Modal::AttachPicker(s) = &mut app.modal {
+                s.collapse_or_parent();
+            }
+            Ok(false)
+        }
+        Action::AttachPickerToggleHidden => {
+            if let Modal::AttachPicker(s) = &mut app.modal {
+                s.toggle_hidden();
             }
             Ok(false)
         }
@@ -3456,26 +3932,14 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             // section is included iff we're in a room view.
             let our_peer = app.handle.peer_id().to_string();
             let our_fp = app.handle.fingerprint().to_string();
-            // huddle 0.7.12: prefer a routable address (relay-circuit /
-            // AutoNAT-confirmed, then a non-loopback listen addr) instead
-            // of `listen_addresses.first()`, which is frequently
-            // 127.0.0.1 / 0.0.0.0 and useless to the recipient.
-            let listen = match pick_invite_host_addr(app) {
-                Some(a) => a,
-                None => {
-                    app.set_status("no listen address yet — try again in a sec");
-                    return Ok(false);
-                }
-            };
-            // libp2p multiaddrs need /p2p/<peer-id> appended so the
-            // dialer's pubkey check fires. A relay-circuit address from
-            // `dialable_addrs` already ends in /p2p-circuit; appending
-            // our id yields the correct full circuit dial target.
-            let host_multiaddr = if listen.contains(&our_peer) {
-                listen
-            } else {
-                format!("{}/p2p/{}", listen, our_peer)
-            };
+            // huddle 0.8: the libp2p multiaddr is now optional. In the
+            // relay-only default there's no swarm and no listen address —
+            // the recipient joins over the onion relay (seed room +
+            // subscribe), so an empty `host_multiaddr` is expected and
+            // fine. When libp2p IS running we still embed the best routable
+            // address (+ /p2p/<peer-id>) so a direct dial can short-circuit
+            // the relay on a LAN.
+            let host_multiaddr = build_host_multiaddr(app, &our_peer);
 
             let room = match app.active_room() {
                 Some(r) => {
@@ -3560,24 +4024,31 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
                 _ => return Ok(false),
             };
             app.modal = Modal::None;
-            // Dial via the invite-aware path. libp2p enforces the
-            // embedded /p2p/<peer-id> check at the transport level
-            // (structural MITM defense), AND once Identify lands the
-            // app-layer post-dial arm compares the cryptographic fp
-            // against `invite.fingerprint`, disconnecting on mismatch.
-            // If a room was included, we open Join modal speculatively
-            // — the joiner types the passphrase, and the actual
-            // join_room call succeeds once the room announcement
-            // arrives.
-            match app
-                .handle
-                .dial_invite(&invite.host_multiaddr, &invite.fingerprint)
-                .await
-            {
-                Ok(()) => app.set_status(format!("dialing {} via invite…", short_fp(&invite.fingerprint))),
-                Err(e) => {
-                    app.modal = Modal::Error(format!("dial failed: {e}"));
-                    return Ok(false);
+            // huddle 0.8: the libp2p dial is now optional. Relay-only
+            // invites carry an empty `host_multiaddr` — there's no swarm to
+            // dial and the recipient reaches the room purely over the onion
+            // relay (seed + subscribe, below). Only attempt the dial when
+            // an address is present (libp2p invites): libp2p enforces the
+            // embedded /p2p/<peer-id> check at the transport level, AND once
+            // Identify lands the app-layer post-dial arm compares the
+            // cryptographic fp against `invite.fingerprint`, disconnecting
+            // on mismatch. A dial failure here is non-fatal — we still join
+            // over the relay — so it no longer aborts the join.
+            if !invite.host_multiaddr.trim().is_empty() {
+                match app
+                    .handle
+                    .dial_invite(&invite.host_multiaddr, &invite.fingerprint)
+                    .await
+                {
+                    Ok(()) => app.set_status(format!(
+                        "dialing {} via invite…",
+                        short_fp(&invite.fingerprint)
+                    )),
+                    Err(e) => {
+                        // Parse/transport hiccup — log it but keep going;
+                        // the relay path below is what actually delivers.
+                        app.set_status(format!("invite dial skipped: {e}"));
+                    }
                 }
             }
             if let Some(room) = invite.room {
@@ -4142,20 +4613,17 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             }
             Ok(false)
         }
-        Action::AttachPickerDescendOrPick => {
+        Action::AttachPickerConfirm => {
             let pick: Option<std::path::PathBuf> = match &mut app.modal {
-                Modal::AttachPicker(s) => {
-                    if let Some(e) = s.entries.get(s.selected) {
-                        if e.is_dir {
-                            s.descend();
-                            None
-                        } else {
-                            s.selected_path()
-                        }
-                    } else {
+                Modal::AttachPicker(s) => match s.flat.get(s.selected) {
+                    Some(r) if r.is_dir => {
+                        // Enter on a directory toggles it, like Space.
+                        s.toggle_expand();
                         None
                     }
-                }
+                    Some(_) => s.selected_path(),
+                    None => None,
+                },
                 _ => None,
             };
             if let Some(path) = pick {
@@ -4737,6 +5205,23 @@ fn is_unspecified_or_loopback(addr: &str) -> bool {
         || addr.contains("/ip6/::/")
 }
 
+/// huddle 0.8: the invite's libp2p `host_multiaddr`, or an empty string
+/// when there's no usable address (the relay-only default, where no swarm
+/// is listening). An empty value is valid: the recipient ignores the dial
+/// and joins purely over the onion relay. When libp2p is running we embed
+/// the best routable address with the `/p2p/<peer-id>` suffix so a direct
+/// dial can still short-circuit the relay on a LAN.
+fn build_host_multiaddr(app: &TuiApp, our_peer: &str) -> String {
+    if !app.libp2p_active() {
+        return String::new();
+    }
+    match pick_invite_host_addr(app) {
+        Some(listen) if listen.contains(our_peer) => listen,
+        Some(listen) => format!("{}/p2p/{}", listen, our_peer),
+        None => String::new(),
+    }
+}
+
 /// Build a room-scoped invite link the same way `Action::GenerateInvite`
 /// does — but reusable so the InvitePicker can call it without
 /// duplicating the listen-address / encode dance. Errors when we don't
@@ -4745,16 +5230,10 @@ pub fn build_room_invite_link(app: &TuiApp, room_id: &str) -> anyhow::Result<Str
     use anyhow::anyhow;
     let our_peer = app.handle.peer_id().to_string();
     let our_fp = app.handle.fingerprint().to_string();
-    // huddle 0.7.12: pick the best routable host address (see
-    // `pick_invite_host_addr`) rather than `listen_addresses.first()`,
-    // which is frequently loopback / unspecified and useless to a peer.
-    let listen = pick_invite_host_addr(app)
-        .ok_or_else(|| anyhow!("no listen address yet — try again in a sec"))?;
-    let host_multiaddr = if listen.contains(&our_peer) {
-        listen
-    } else {
-        format!("{}/p2p/{}", listen, our_peer)
-    };
+    // huddle 0.8: optional libp2p address (empty in the relay-only
+    // default). The recipient joins over the onion relay regardless; see
+    // `build_host_multiaddr`.
+    let host_multiaddr = build_host_multiaddr(app, &our_peer);
 
     let info = app
         .handle

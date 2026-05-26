@@ -97,11 +97,14 @@ pub enum Action {
     CancelFocusedCard,
     SaveAgainFocusedCard,
     OpenAttachmentPicker,
-    // Attach picker modal
+    // Attach picker modal (expandable tree)
     AttachPickerUp,
     AttachPickerDown,
-    AttachPickerAscend,
-    AttachPickerDescendOrPick,
+    AttachPickerToggle,       // Space / Enter-on-dir: expand or collapse
+    AttachPickerExpand,       // Right: open a dir / step into it
+    AttachPickerCollapse,     // Left / Backspace: collapse or jump to parent
+    AttachPickerConfirm,      // Enter: pick the focused file
+    AttachPickerToggleHidden, // '.': show/hide dotfiles
     // Rotation
     OpenRotateRoom,
     RotateRoomTypeChar(char),
@@ -408,12 +411,17 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
             KeyCode::Esc => Action::CloseModal,
             KeyCode::Char('j') | KeyCode::Down => Action::AttachPickerDown,
             KeyCode::Char('k') | KeyCode::Up => Action::AttachPickerUp,
-            // huddle 0.7.11: bare `h` no longer ascends — too easy to
-            // hit by mistake when scanning a deep directory tree. Use
-            // Backspace or Left for ascend, which match the vim/file-
-            // browser convention without the typo hazard.
-            KeyCode::Backspace | KeyCode::Left => Action::AttachPickerAscend,
-            KeyCode::Enter | KeyCode::Right => Action::AttachPickerDescendOrPick,
+            // Space expands/collapses the focused directory in place — the
+            // core of the tree interaction.
+            KeyCode::Char(' ') => Action::AttachPickerToggle,
+            KeyCode::Right => Action::AttachPickerExpand,
+            // huddle 0.7.11: bare `h` is deliberately not bound — too easy
+            // to hit by mistake when scanning a deep tree. Left/Backspace
+            // collapse the focused dir or step out to its parent.
+            KeyCode::Backspace | KeyCode::Left => Action::AttachPickerCollapse,
+            // Enter picks a file; on a directory it expands/collapses.
+            KeyCode::Enter => Action::AttachPickerConfirm,
+            KeyCode::Char('.') => Action::AttachPickerToggleHidden,
             _ => Action::Nothing,
         },
         Modal::RotateRoom(_) => match key.code {

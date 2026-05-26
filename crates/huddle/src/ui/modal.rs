@@ -5,7 +5,7 @@ use crate::app::{
     AcceptRotationState, AttachPickerState, ConfirmInviteState, DialPeerState, InboundDialState,
     JoinRoomState, JoinWithCodeState, MemberActionKind, MemberActionState, PasteInviteState,
     RotateRoomState, SasStage, SasState, SearchState, ShowInviteState, ShowJoinCodeState,
-    StartField, StartRoomState, VerifyState,
+    StartField, StartRoomState, VerifyState, ATTACH_VISIBLE_ROWS,
 };
 use crate::ui::centered_rect;
 
@@ -651,6 +651,10 @@ pub fn render_verify(f: &mut Frame, s: &VerifyState) {
     f.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: false }), area);
 }
 
+/// Maximum indentation depth we render literally; deeper nodes keep this
+/// indent so the fixed-width modal never wraps.
+const ATTACH_MAX_INDENT: usize = 8;
+
 pub fn render_attach_picker(f: &mut Frame, s: &AttachPickerState) {
     let area = centered_rect(80, 22, f.area());
     f.render_widget(Clear, area);
@@ -666,11 +670,16 @@ pub fn render_attach_picker(f: &mut Frame, s: &AttachPickerState) {
         ))
         .padding(Padding::uniform(1));
 
+    // Width available for a row's name after the modal border + padding,
+    // the focus marker and the caret. Used to truncate long names.
+    let inner_w = area.width.saturating_sub(4) as usize; // 2 borders + 2 padding
+    let name_budget = inner_w.saturating_sub(6); // marker + caret + breathing room
+
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(vec![
         Span::styled("  in ", Style::default().fg(Color::DarkGray)),
         Span::styled(
-            format!("{}", s.cwd.display()),
+            format!("{}", s.root.display()),
             Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
         ),
     ]));
@@ -683,59 +692,108 @@ pub fn render_attach_picker(f: &mut Frame, s: &AttachPickerState) {
         )));
     }
 
-    // Reserve about 14 visible rows for entries.
-    let visible = 14usize;
-    let offset = if s.selected >= visible {
-        s.selected.saturating_sub(visible - 1)
-    } else {
-        0
-    };
-    let take = visible.min(s.entries.len().saturating_sub(offset));
-    if s.entries.is_empty() && s.error.is_none() {
+    let visible = ATTACH_VISIBLE_ROWS;
+    let end = (s.scroll + visible).min(s.flat.len());
+
+    if s.flat.is_empty() && s.error.is_none() {
         lines.push(Line::from(Span::styled(
-            "  (empty directory)",
+            "  (empty)",
             Style::default().fg(Color::DarkGray),
         )));
     }
-    for (i, entry) in s.entries.iter().enumerate().skip(offset).take(take) {
+
+    for (i, row) in s.flat.iter().enumerate().take(end).skip(s.scroll) {
         let is_focused = i == s.selected;
-        let marker = if is_focused { "› " } else { "  " };
-        let icon = if entry.is_dir { "[dir] " } else { "      " };
-        let suffix = if entry.is_dir { "/" } else { "" };
-        let style = if is_focused {
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
-        } else if entry.is_dir {
+        let marker = if is_focused { "›" } else { " " };
+        let indent = "  ".repeat(row.depth.min(ATTACH_MAX_INDENT));
+        let caret = if row.is_dir {
+            if row.expanded {
+                "▾ "
+            } else {
+                "▸ "
+            }
+        } else {
+            "· "
+        };
+        let suffix = if row.is_dir { "/" } else { "" };
+        let name = truncate_middle(&row.name, name_budget.saturating_sub(row.depth.min(ATTACH_MAX_INDENT) * 2));
+        let annotation = if row.has_error {
+            "  (no access)"
+        } else if row.is_empty_dir {
+            "  (empty)"
+        } else {
+            ""
+        };
+
+        let name_style = if is_focused {
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        } else if row.has_error {
+            Style::default().fg(Color::Red)
+        } else if row.is_dir {
             Style::default().fg(Color::Blue)
         } else {
             Style::default().fg(Color::White)
         };
+
         lines.push(Line::from(vec![
-            Span::styled(format!("  {}", marker), Style::default().fg(Color::Yellow)),
-            Span::styled(icon, Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{}{}", entry.name, suffix), style),
+            Span::styled(format!(" {} ", marker), Style::default().fg(Color::Yellow)),
+            Span::raw(indent),
+            Span::styled(caret, Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{}{}", name, suffix), name_style),
+            Span::styled(annotation, Style::default().fg(Color::DarkGray)),
         ]));
     }
-    // Pad to visible rows to keep layout stable.
+    // Pad to a stable height (header rows + visible rows).
     while lines.len() < visible + 4 {
         lines.push(Line::from(""));
     }
 
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled(" j/k", Style::default().fg(Color::Yellow)),
-        Span::styled(" navigate  ", Style::default().fg(Color::DarkGray)),
-        Span::styled("Enter", Style::default().fg(Color::Yellow)),
-        Span::styled(" descend/pick  ", Style::default().fg(Color::DarkGray)),
-        Span::styled("h/Backspace", Style::default().fg(Color::Yellow)),
-        Span::styled(" up  ", Style::default().fg(Color::DarkGray)),
-        Span::styled("Esc", Style::default().fg(Color::Yellow)),
-        Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
-    ]));
+    // Scroll position hint.
+    let more_above = s.scroll > 0;
+    let more_below = end < s.flat.len();
+    let scroll_hint = match (more_above, more_below) {
+        (true, true) => "  ▲▼ more",
+        (true, false) => "  ▲ more above",
+        (false, true) => "  ▼ more below",
+        (false, false) => "",
+    };
+    lines.push(Line::from(Span::styled(
+        scroll_hint,
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let hint = |k: &'static str, d: &'static str| {
+        vec![
+            Span::styled(k, Style::default().fg(Color::Yellow)),
+            Span::styled(d, Style::default().fg(Color::DarkGray)),
+        ]
+    };
+    let mut footer: Vec<Span> = Vec::new();
+    footer.extend(hint(" ↑/↓", " move  "));
+    footer.extend(hint("Space", " expand/collapse  "));
+    footer.extend(hint("Enter", " pick  "));
+    footer.extend(hint("←/→", " out/in  "));
+    footer.extend(hint(".", " hidden  "));
+    footer.extend(hint("Esc", " cancel"));
+    lines.push(Line::from(footer));
 
     let para = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
     f.render_widget(para, area);
+}
+
+/// Shorten `name` to fit `budget` columns, keeping the start and the
+/// extension-bearing tail with an ellipsis in the middle.
+fn truncate_middle(name: &str, budget: usize) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    if budget < 4 || chars.len() <= budget {
+        return name.to_string();
+    }
+    let keep = budget - 1; // room for the ellipsis
+    let head = keep / 2;
+    let tail = keep - head;
+    let head_str: String = chars[..head].iter().collect();
+    let tail_str: String = chars[chars.len() - tail..].iter().collect();
+    format!("{head_str}…{tail_str}")
 }
 
 pub fn render_info(f: &mut Frame, msg: &str) {

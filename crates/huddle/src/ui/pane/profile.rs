@@ -35,19 +35,32 @@ pub fn render(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme) {
     )]));
     f.render_widget(title, parts[0]);
 
-    let nat = match app.nat_status.as_deref() {
-        Some("reachable") => "🌐 reachable",
-        Some("private") => "🏠 private (relay required for cross-internet)",
-        _ => "🔍 detecting…",
+    // huddle 0.8: the centralized Tor-onion relay is the cross-internet
+    // lifeline. In the relay-only default it's the headline status; the
+    // libp2p NAT badge is only shown when a swarm is actually running.
+    let (relay_glyph, relay_text, relay_style) = if !app.handle.server_enabled() {
+        ("", "off".to_string(), theme.dim())
+    } else if app.handle.server_connected() {
+        ("🧅 ", "connected".to_string(), theme.text_style())
+    } else {
+        ("🧅 ", "connecting…".to_string(), theme.dim())
     };
-    let mode_line = Paragraph::new(Line::from(vec![
-        Span::styled("  network  ", theme.dim()),
-        Span::styled(nat.to_string(), theme.text_style()),
-        Span::raw("    "),
-        Span::styled("mode  ", theme.dim()),
-        Span::styled(app.mode_str().to_string(), theme.text_style()),
-    ]));
-    f.render_widget(mode_line, parts[1]);
+    let mut mode_spans = vec![Span::styled("  network  ", theme.dim())];
+    if app.libp2p_active() {
+        let nat = match app.nat_status.as_deref() {
+            Some("reachable") => "🌐 reachable",
+            Some("private") => "🏠 private (relay required for cross-internet)",
+            _ => "🔍 detecting…",
+        };
+        mode_spans.push(Span::styled(nat.to_string(), theme.text_style()));
+        mode_spans.push(Span::raw("    "));
+    }
+    mode_spans.push(Span::styled("relay  ", theme.dim()));
+    mode_spans.push(Span::styled(format!("{relay_glyph}{relay_text}"), relay_style));
+    mode_spans.push(Span::raw("    "));
+    mode_spans.push(Span::styled("mode  ", theme.dim()));
+    mode_spans.push(Span::styled(app.mode_str().to_string(), theme.text_style()));
+    f.render_widget(Paragraph::new(Line::from(mode_spans)), parts[1]);
 
     let fields = profile_fields(app);
     let cursor = app.profile_cursor.min(fields.len().saturating_sub(1));

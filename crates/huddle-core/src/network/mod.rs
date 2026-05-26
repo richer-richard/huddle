@@ -1,11 +1,14 @@
 pub mod behavior;
 pub mod events;
 pub mod protocol;
+pub mod server;
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
+use sha2::{Digest, Sha256};
 use libp2p::core::ConnectedPoint;
 use libp2p::swarm::dial_opts::DialOpts;
 use libp2p::swarm::ConnectionId;
@@ -19,23 +22,41 @@ use tracing::{debug, info, warn};
 /// How the network discovers peers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetworkMode {
-    /// mDNS on: announce ourselves on the LAN and pick up announcements.
+    /// huddle 0.8 default: no libp2p at all. The only transport is the
+    /// centralized Tor-onion relay (see `network::server`). No LAN
+    /// discovery, no direct dial, no NAT machinery — every message rides
+    /// the onion. This is what the binary starts in unless the user
+    /// explicitly opts back into libp2p with `--mode mdns|direct`.
+    Server,
+    /// libp2p with mDNS on: announce ourselves on the LAN and pick up
+    /// announcements. Opt-in (`--mode mdns`); runs *alongside* the onion
+    /// relay so LAN peers connect directly while internet peers route
+    /// through the server.
     Mdns,
-    /// mDNS off: invisible to LAN discovery; the only way to connect is
-    /// for someone to dial our address (or for us to dial theirs).
+    /// libp2p with mDNS off: invisible to LAN discovery; the only libp2p
+    /// way to connect is an explicit dial. Opt-in (`--mode direct`); also
+    /// runs alongside the onion relay.
     Direct,
 }
 
 impl NetworkMode {
     pub fn as_str(&self) -> &'static str {
         match self {
+            NetworkMode::Server => "server",
             NetworkMode::Mdns => "mdns",
             NetworkMode::Direct => "direct",
         }
     }
 
+    /// True when this mode starts a libp2p swarm (LAN / direct dial). The
+    /// `Server` default does not — it's onion-relay-only.
+    pub fn uses_libp2p(&self) -> bool {
+        !matches!(self, NetworkMode::Server)
+    }
+
     pub fn from_str(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
+            "server" | "tor" | "onion" => Some(NetworkMode::Server),
             "mdns" | "lan" | "open" => Some(NetworkMode::Mdns),
             "direct" | "dial" | "private" => Some(NetworkMode::Direct),
             _ => None,
@@ -90,10 +111,46 @@ pub enum NetworkCommand {
 #[derive(Clone)]
 pub struct NetworkHandle {
     cmd_tx: mpsc::Sender<NetworkCommand>,
+    /// huddle 0.8: optional connection to the centralized server (a Tor
+    /// onion relay). When attached, every room subscribe/unsubscribe and
+    /// every published wire message is mirrored to it, so peers we can't
+    /// reach over libp2p still receive our traffic (and we theirs, via the
+    /// server's offline mailbox). `None` until `attach_server` runs.
+    server: Arc<std::sync::Mutex<Option<server::ServerClient>>>,
+}
+
+/// Stable per-message id for the server mailbox/receipts: a short hash of
+/// the wire bytes. Opaque to the server; lets it dedup/queue by id.
+fn server_msg_id(payload: &[u8]) -> String {
+    let mut h = Sha256::new();
+    h.update(payload);
+    hex::encode(&h.finalize()[..8])
 }
 
 impl NetworkHandle {
+    /// Attach a live server connection so subsequent room traffic mirrors
+    /// to it. Replaces any previous one. Called by the app's server
+    /// connection task after each (re)connect.
+    pub fn attach_server(&self, client: server::ServerClient) {
+        *self.server.lock().unwrap() = Some(client);
+    }
+
+    /// Drop the server connection (e.g. after a disconnect) so we stop
+    /// mirroring until it reconnects.
+    pub fn detach_server(&self) {
+        *self.server.lock().unwrap() = None;
+    }
+
+    /// Snapshot the attached server client, if any. Cloned out so we never
+    /// hold the lock across the (sync, non-blocking) mirror call.
+    fn server_client(&self) -> Option<server::ServerClient> {
+        self.server.lock().unwrap().clone()
+    }
+
     pub async fn subscribe_room(&self, room_id: String) {
+        if let Some(s) = self.server_client() {
+            let _ = s.subscribe(&room_id);
+        }
         let _ = self
             .cmd_tx
             .send(NetworkCommand::SubscribeRoom { room_id })
@@ -101,6 +158,9 @@ impl NetworkHandle {
     }
 
     pub async fn unsubscribe_room(&self, room_id: String) {
+        if let Some(s) = self.server_client() {
+            let _ = s.unsubscribe(&room_id);
+        }
         let _ = self
             .cmd_tx
             .send(NetworkCommand::UnsubscribeRoom { room_id })
@@ -108,6 +168,9 @@ impl NetworkHandle {
     }
 
     pub async fn publish_room_message(&self, room_id: String, payload: Vec<u8>) {
+        if let Some(s) = self.server_client() {
+            let _ = s.publish(&room_id, &server_msg_id(&payload), &payload);
+        }
         let _ = self
             .cmd_tx
             .send(NetworkCommand::PublishRoomMessage { room_id, payload })
@@ -116,6 +179,11 @@ impl NetworkHandle {
 
     pub async fn announce_room(&self, ann: RoomAnnouncement) {
         let _ = self.cmd_tx.send(NetworkCommand::AnnounceRoom(ann)).await;
+    }
+
+    /// True when a server connection is currently attached.
+    pub fn has_server(&self) -> bool {
+        self.server.lock().unwrap().is_some()
     }
 
     pub async fn dial(&self, address: Multiaddr) {
@@ -220,6 +288,33 @@ pub fn start_network(
     start_network_with(identity, event_tx, NetworkMode::Mdns, 0, Vec::new())
 }
 
+/// huddle 0.8: build a `NetworkHandle` with **no libp2p swarm** — the
+/// onion-relay-only (`NetworkMode::Server`) path. We still hand back a
+/// fully-functional handle so the rest of the app is oblivious: room
+/// subscribe/unsubscribe/publish mirror to the attached `ServerClient`
+/// exactly as before, while the libp2p-specific commands (dial, announce,
+/// accept/reject, …) are simply drained and dropped. A tiny task consumes
+/// `cmd_rx` so the bounded channel never fills and `send().await` never
+/// blocks; it exits on `Shutdown`.
+pub fn start_network_disabled() -> NetworkHandle {
+    let (cmd_tx, mut cmd_rx) = mpsc::channel::<NetworkCommand>(256);
+    tokio::spawn(async move {
+        while let Some(cmd) = cmd_rx.recv().await {
+            if matches!(cmd, NetworkCommand::Shutdown) {
+                info!("network task (libp2p-disabled) shutting down");
+                break;
+            }
+            // Everything else is a libp2p op with no swarm to run it; the
+            // server mirror (in NetworkHandle) already handled the room
+            // traffic before the command reached us. Drop it.
+        }
+    });
+    NetworkHandle {
+        cmd_tx,
+        server: Arc::new(std::sync::Mutex::new(None)),
+    }
+}
+
 /// Start the network task with explicit mode, TCP listen port, and any
 /// pre-configured relay multiaddrs. `listen_port = 0` requests a
 /// random port. Relays are dialed on startup; once `Identify` lands
@@ -255,7 +350,10 @@ pub fn start_network_with(
                     mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)
                         .expect("mDNS init failed"),
                 ),
-                NetworkMode::Direct => None,
+                // `Direct` runs libp2p without mDNS. `Server` never reaches
+                // here (it takes the `start_network_disabled` path and runs
+                // no swarm), but the match must be exhaustive.
+                NetworkMode::Direct | NetworkMode::Server => None,
             };
             let mdns: libp2p::swarm::behaviour::toggle::Toggle<_> = mdns_opt.into();
 
@@ -357,7 +455,10 @@ pub fn start_network_with(
     }
     tokio::spawn(task.run());
 
-    Ok(NetworkHandle { cmd_tx })
+    Ok(NetworkHandle {
+        cmd_tx,
+        server: Arc::new(std::sync::Mutex::new(None)),
+    })
 }
 
 impl NetworkTask {

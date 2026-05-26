@@ -1,17 +1,30 @@
 # Huddle
 
-Decentralized, terminal-native chat rooms.
+Terminal-native, end-to-end-encrypted chat rooms over Tor.
 
-Open the TUI, browse rooms that other people on the same LAN are
-hosting (or that you've reached by relay across the internet), or
-start one yourself. Rooms can be public (cleartext over gossipsub) or
-encrypted (per-sender Megolm group sessions, session keys wrapped with
-an Argon2id-derived passphrase key).
+Open the TUI, start a room or paste an invite, and chat. Rooms can be
+public (cleartext payloads) or encrypted (per-sender Megolm group
+sessions, session keys wrapped with an Argon2id-derived passphrase
+key). Either way the transport is end-to-end: the relay only ever sees
+ciphertext.
 
-No servers, no accounts, no cloud — by default, no internet required.
-For peers across NATs, opt in to a Circuit Relay v2 host of your choice
-via `--relay` or `config.toml`; AutoNAT v2 + DCUtR will hole-punch to
-direct when possible.
+**huddle 0.8 routes over a centralized Tor v3 onion relay by default.**
+Pure libp2p hole-punching across NATs proved too flaky, so the default
+transport is now a self-hostable onion relay (`crates/huddle-server`)
+reached through your local Tor SOCKS5 proxy. The relay is a dumb
+encrypted router + offline mailbox — it never holds keys and never
+decrypts. The onion address is baked into the client as a default (an
+onion address *is* the server's public key, so this pins its identity);
+override it with `--server <ws-url>` or `config.toml`.
+
+libp2p (LAN mDNS discovery + direct dial + Circuit Relay v2) still
+exists and is **opt-in** via `--mode mdns` or `--mode direct`, running
+alongside the onion relay for same-LAN immediacy.
+
+> **Requires Tor.** The default transport dials a `.onion`, so a local
+> Tor daemon must be running (SOCKS5 on `127.0.0.1:9050`; override with
+> `--tor-socks`). On Debian/Ubuntu: `apt install tor && systemctl
+> enable --now tor`.
 
 > **This is a learning project, not production-audited chat.**
 > SQLCipher protects the database at rest under your master passphrase,
@@ -34,10 +47,10 @@ cargo build --release
 
 1. **Launch** — your Ed25519 identity loads (or generates) from disk
    silently. The TUI opens on the **Welcome** pane with the sidebar
-   on the left. mDNS starts listening for room announcements on the
-   LAN. If you configured a relay (`--relay` or `config.toml`),
-   huddle dials it and reserves a `/p2p-circuit` so peers across the
-   internet can dial you.
+   on the left. huddle connects to the Tor onion relay in the
+   background (the 🧅 next to your name turns solid once the link is
+   up). With `--mode mdns`/`--mode direct` a libp2p swarm also starts
+   for LAN discovery / direct dial alongside the relay.
 2. **First launch only** — a versioned onboarding card explains
    huddle's leaderless model (rooms outlive the creator), the master
    passphrase vs room passphrase distinction, the sidebar layout, and

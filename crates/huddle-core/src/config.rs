@@ -118,6 +118,54 @@ fn collect_relay_items(segment: &str, out: &mut Vec<String>) {
     }
 }
 
+/// huddle 0.8: optional override for the centralized server (a Tor-onion
+/// relay) WebSocket URL, read from `config.toml`:
+///
+/// ```toml
+/// server_url = "ws://<your-onion>.onion:80/ws"
+/// ```
+///
+/// Precedence is resolved by the caller (`main.rs`): the `--server` CLI
+/// flag wins, then this config value, then the baked-in default onion.
+/// So you can repoint the client at a different relay without recompiling
+/// or retyping a flag every launch. Returns `None` if absent.
+pub fn server_url() -> Option<String> {
+    parse_scalar(&std::fs::read_to_string(config_path()).ok()?, "server_url")
+}
+
+/// huddle 0.8: optional override for the local Tor SOCKS5 proxy address
+/// used to reach `.onion` server URLs (default `127.0.0.1:9050`). Set in
+/// `config.toml` as `tor_socks = "127.0.0.1:9150"` — e.g. to use the Tor
+/// Browser bundle's port. `--tor-socks` overrides this. `None` if absent.
+pub fn tor_socks() -> Option<String> {
+    parse_scalar(&std::fs::read_to_string(config_path()).ok()?, "tor_socks")
+}
+
+/// Extract a top-level `key = "value"` string from a config body. Honors
+/// the same header-less, inline-comment-stripping conventions as
+/// `parse_relays`. Section headers and unrelated keys fall through.
+/// Returns the first match's unquoted value, or `None`.
+fn parse_scalar(body: &str, key: &str) -> Option<String> {
+    for raw in body.lines() {
+        let line = strip_inline_comment(raw).trim();
+        let rest = match line.strip_prefix(key) {
+            Some(r) => r.trim_start(),
+            None => continue,
+        };
+        // Guard against prefix collisions (`server_url_backup`): the next
+        // char after the key must begin an assignment.
+        let rest = match rest.strip_prefix('=') {
+            Some(r) => r.trim(),
+            None => continue,
+        };
+        let val = rest.trim_matches('"').trim_matches('\'').trim();
+        if !val.is_empty() {
+            return Some(val.to_string());
+        }
+    }
+    None
+}
+
 pub fn db_path() -> PathBuf {
     data_dir().join("huddle.db")
 }
@@ -214,5 +262,31 @@ mod tests {
     fn parse_relays_ignores_similar_key() {
         // `relays_enabled` must not be mistaken for the `relays` array.
         assert!(parse_relays("relays_enabled = true\n").is_empty());
+    }
+
+    // huddle 0.8 — scalar overrides for the onion relay + SOCKS proxy.
+    #[test]
+    fn parse_scalar_reads_quoted_value() {
+        let body = "server_url = \"ws://abc.onion:80/ws\"\n";
+        assert_eq!(
+            parse_scalar(body, "server_url").as_deref(),
+            Some("ws://abc.onion:80/ws")
+        );
+    }
+
+    #[test]
+    fn parse_scalar_strips_comment_and_header() {
+        let body = "[network]\ntor_socks = \"127.0.0.1:9150\"  # tor browser\n";
+        assert_eq!(
+            parse_scalar(body, "tor_socks").as_deref(),
+            Some("127.0.0.1:9150")
+        );
+    }
+
+    #[test]
+    fn parse_scalar_none_when_absent_or_similar_key() {
+        assert!(parse_scalar("foo = 1\n", "server_url").is_none());
+        // prefix collision must not match
+        assert!(parse_scalar("server_url_backup = \"x\"\n", "server_url").is_none());
     }
 }

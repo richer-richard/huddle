@@ -250,20 +250,39 @@ fn render_item<'a>(
                 .handle
                 .display_name()
                 .unwrap_or_else(|| "[anonymous]".into());
-            let nat_glyph = match app.nat_status.as_deref() {
-                Some("reachable") => "🌐",
-                Some("private") => "🏠",
-                _ => "🔍",
-            };
-            let line = Line::from(vec![
+            let mut spans = vec![
                 Span::styled("  ".to_string(), theme.dim()),
                 Span::styled(label, theme.text_style()),
                 Span::raw("  "),
                 Span::styled(short_fp(our_fp).to_uppercase(), theme.dim()),
-                Span::raw("  "),
-                Span::styled(nat_glyph.to_string(), theme.text_style()),
-            ])
-            .style(highlight(theme, focused, is_sel, Style::default()));
+            ];
+            // The libp2p NAT badge only means something when a swarm is
+            // running. In the 0.8 relay-only default it would just read
+            // "🔍 detecting…" forever, so we omit it.
+            if app.libp2p_active() {
+                let nat_glyph = match app.nat_status.as_deref() {
+                    Some("reachable") => "🌐",
+                    Some("private") => "🏠",
+                    _ => "🔍",
+                };
+                spans.push(Span::raw("  "));
+                spans.push(Span::styled(nat_glyph.to_string(), theme.text_style()));
+            }
+            // huddle 0.8: compact relay (Tor-onion server) indicator. A
+            // bright onion means the relay link is up; a faint dot means
+            // it's configured but not connected (Tor down / circuit still
+            // building / server unreachable). Nothing when `--no-server`.
+            // Full labels live in the Profile pane's network line.
+            if app.handle.server_enabled() {
+                spans.push(Span::raw("  "));
+                if app.handle.server_connected() {
+                    spans.push(Span::styled("🧅".to_string(), theme.text_style()));
+                } else {
+                    spans.push(Span::styled("·".to_string(), theme.dim()));
+                }
+            }
+            let line = Line::from(spans)
+                .style(highlight(theme, focused, is_sel, Style::default()));
             apply_selection_fg(line, theme, focused, is_sel)
         }
         SidebarItem::Dm(room_id) => {
