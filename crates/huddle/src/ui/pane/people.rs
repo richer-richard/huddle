@@ -130,7 +130,7 @@ fn render_pending(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme) {
         let hd_id = format!("HD-{}", short_fp(&req.fingerprint).to_uppercase());
         let age = format_rel(req.received_at);
         let mut spans = vec![
-            Span::styled(" ⏳ ", theme.warn_style()),
+            Span::styled(" [pending] ", theme.warn_style()),
             Span::styled(username, theme.text_style()),
             Span::raw("  "),
             Span::styled(hd_id, theme.dim()),
@@ -297,7 +297,7 @@ fn render_blocked(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme) {
     let mut lines: Vec<Line> = Vec::new();
     for (i, fp) in blocked.iter().enumerate() {
         let mut spans = vec![
-            Span::styled(" ⛔ ", theme.err_style()),
+            Span::styled(" [blocked] ", theme.err_style()),
             Span::styled(short_fp(fp).to_uppercase(), theme.text_style()),
         ];
         if focused && i == app.selected_blocked_idx {

@@ -128,13 +128,14 @@ pub enum AppEvent {
         address: String,
     },
     /// Phase G: SAS code is ready on both sides — both ephemeral
-    /// X25519 pubkeys exchanged + ECDH derived. The TUI shows the
-    /// `code` (emoji + decimal) and the Match/Cancel buttons.
+    /// X25519 pubkeys exchanged + ECDH derived. The TUI shows the SAS
+    /// as its word list (`emoji_labels`) + `decimal` and the
+    /// Match/Cancel buttons. huddle 0.9: the glyph form was dropped from
+    /// the UI (emoji-free), so it's no longer carried here.
     SasCodeReady {
         room_id: String,
         partner_fingerprint: String,
         tx_id: String,
-        emoji_string: String,
         emoji_labels: String,
         decimal: String,
     },

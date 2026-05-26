@@ -104,9 +104,9 @@ pub fn render_join_room(f: &mut Frame, j: &JoinRoomState) {
     let area = centered_rect(54, 9, f.area());
     f.render_widget(Clear, area);
 
-    // 🔒 only appears when the announcement marked this room encrypted
-    // — gives users a visual confirmation before they type a passphrase.
-    let lock = if j.encrypted { "🔒 " } else { "" };
+    // "[enc]" only appears when the announcement marked this room
+    // encrypted — a visual confirmation before they type a passphrase.
+    let lock = if j.encrypted { "[enc] " } else { "" };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Magenta))
@@ -999,7 +999,9 @@ pub fn render_sas(f: &mut Frame, s: &SasState) {
             )));
         }
         SasStage::Comparing {
-            emoji_string,
+            // huddle 0.9: the SAS is shown as its word list + decimal
+            // (emoji-free). Both peers still derive identical indices, so
+            // the word/decimal comparison is exactly as strong.
             emoji_labels,
             decimal,
             our_matched,
@@ -1012,17 +1014,13 @@ pub fn render_sas(f: &mut Frame, s: &SasState) {
             lines.push(Line::from(vec![
                 Span::raw("   "),
                 Span::styled(
-                    emoji_string.clone(),
+                    emoji_labels.clone(),
                     Style::default().fg(Color::Yellow).bold(),
                 ),
             ]));
-            lines.push(Line::from(vec![
-                Span::raw("   "),
-                Span::styled(emoji_labels.clone(), Style::default().fg(Color::DarkGray)),
-            ]));
             lines.push(Line::from(""));
             lines.push(Line::from(vec![
-                Span::styled("  fallback decimal: ", Style::default().fg(Color::DarkGray)),
+                Span::styled("  or compare decimal: ", Style::default().fg(Color::DarkGray)),
                 Span::styled(decimal.clone(), Style::default().fg(Color::Cyan).bold()),
             ]));
             lines.push(Line::from(""));
@@ -1149,7 +1147,7 @@ pub fn render_go_dark(f: &mut Frame, s: &crate::app::GoDarkState) {
                 .border_style(Style::default().fg(Color::Red))
                 .padding(Padding::uniform(1))
                 .title(Span::styled(
-                    " ⚠ delete account (go dark) ",
+                    " delete account (go dark) ",
                     Style::default().fg(Color::Red).bold(),
                 )),
         );
@@ -1619,16 +1617,24 @@ pub fn render_onboarding(f: &mut Frame, page_indices: &[usize], cursor: usize) {
     let page = &all[global_idx];
     let total = page_indices.len();
 
-    let height = (page.body.len() as u16) + 10;
+    // Chrome around the body: title + 4 blank spacers + dots + nav hint
+    // (7) plus the border (2) and uniform padding (2) = 11 lines. Sizing
+    // the card to exactly fit means a normal-size terminal shows the whole
+    // page WITHOUT scrolling (the pages are written to fit ~24 rows).
+    let height = (page.body.len() as u16) + 11;
     // huddle 0.7.11: clamp to the terminal's available space rather
     // than the hard 76×24 the original code requested. On a narrow
     // window (mid-flow resize, ssh from a tablet), `centered_rect`
     // used to return a zero-rect when width < 76 or height < 24 and
     // the onboarding modal silently disappeared. Now we shrink to fit
     // and render a "(resize for full view)" hint when truncated.
+    // huddle 0.8: dropped the hard `.min(24)` cap — it clipped longer
+    // pages on tall terminals and forced the user to (try to) scroll a
+    // non-scrollable modal. We now grow to fit, bounded only by the
+    // terminal height.
     let avail = f.area();
     let target_w = 76u16.min(avail.width.saturating_sub(2));
-    let target_h = height.min(24).min(avail.height.saturating_sub(2));
+    let target_h = height.min(avail.height.saturating_sub(2));
     if target_w < 20 || target_h < 6 {
         // Truly tiny terminal — render a single-line hint instead of
         // a sub-pixel rect. Better degradation than silent dismissal.

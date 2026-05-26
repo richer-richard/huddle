@@ -22,9 +22,10 @@ third machine.
 - [ ] The Welcome pane appears with the sidebar on the left
       (`huddle 0.7.x` banner up top)
 - [ ] In the sidebar's Profile section, your branded `HD-XXXX-XXXX-…`
-      ID is visible along with a NAT-reachability glyph (`🔍`
-      detecting → `🏠` private → `🌐` reachable as AutoNAT probes
-      land)
+      ID is visible. In the default (relay-only) mode the relay dot
+      `●` shows next to your name once the onion link is up. With
+      `--mode mdns|direct`, a libp2p NAT-reachability badge also shows
+      (`detecting` → `private` → `reachable` as AutoNAT probes land)
 - [ ] Open the Profile pane (`Enter` on the Profile row, or any j/k
       until it's selected) — listening multiaddrs show under
       "Listen addresses"
@@ -66,7 +67,7 @@ third machine.
 - [ ] On B, the room appears in the sidebar's Group rooms section
       (under Discover until joined) with an `E` encryption marker
 - [ ] Select the room in B's sidebar, press `Enter` to join — a
-      passphrase modal appears, title shows 🔒
+      passphrase modal appears, title shows `[enc]`
 - [ ] Type `hunter2`, Enter
 - [ ] B joins. If wrong passphrase, an error modal shows.
 
@@ -164,8 +165,8 @@ they haven't, do scenario 2 first.
 - [ ] Select B's row, press `s` — SAS modal opens, "waiting for
       partner to accept…"
 - [ ] On B, a Sas modal appears; B presses Enter / `m` to accept
-- [ ] Both sides see 7 emoji + 3-group decimal code
-      (e.g. `🐶 🐱 🦁 🐎 🦄 🐷 🐘   1234-5678-9012`)
+- [ ] Both sides see the same 7-word + 3-group decimal code
+      (e.g. `dog cat lion horse unicorn pig elephant   1234-5678-9012`)
 - [ ] Compare OOB (call, in-person). Both press `m` to match.
 - [ ] Both modals dismiss; A and B now mark each other verified.
       The Verify modal's `[v]` column for that row turns green.
@@ -226,7 +227,7 @@ they haven't, do scenario 2 first.
 - [ ] Connect A and B to **different** networks (one home, one
       cellular hotspot is enough).
 - [ ] Launch huddle on both. The Profile pane / sidebar NAT badge
-      transitions to `🌐 reachable` within ~30 s.
+      transitions to `reachable` within ~30 s.
 - [ ] A starts a group room. B sees the room in the sidebar's
       Discover row (the gossipsub mesh now spans the relay).
 - [ ] B joins. Messages flow.

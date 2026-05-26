@@ -41,16 +41,16 @@ pub fn render(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme) {
     let (relay_glyph, relay_text, relay_style) = if !app.handle.server_enabled() {
         ("", "off".to_string(), theme.dim())
     } else if app.handle.server_connected() {
-        ("🧅 ", "connected".to_string(), theme.text_style())
+        ("● ", "connected".to_string(), theme.ok())
     } else {
-        ("🧅 ", "connecting…".to_string(), theme.dim())
+        ("○ ", "connecting…".to_string(), theme.dim())
     };
     let mut mode_spans = vec![Span::styled("  network  ", theme.dim())];
     if app.libp2p_active() {
         let nat = match app.nat_status.as_deref() {
-            Some("reachable") => "🌐 reachable",
-            Some("private") => "🏠 private (relay required for cross-internet)",
-            _ => "🔍 detecting…",
+            Some("reachable") => "reachable",
+            Some("private") => "private (relay required for cross-internet)",
+            _ => "detecting…",
         };
         mode_spans.push(Span::styled(nat.to_string(), theme.text_style()));
         mode_spans.push(Span::raw("    "));

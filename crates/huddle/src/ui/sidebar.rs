@@ -173,7 +173,7 @@ fn apply_selection_fg<'a>(line: Line<'a>, theme: &Theme, focused: bool, is_sel: 
     let line_style = line.style;
     // huddle 0.7.11: preserve the encryption marker color. Pre-0.7.11
     // every span had its fg stomped to yellow/dim, which drowned the
-    // magenta 🔒 badge on a selected encrypted room — users lost the
+    // magenta "enc" badge on a selected encrypted room — users lost the
     // visual signal that a row was encrypted exactly when they were
     // about to act on it. Spans whose fg is `theme.encrypted` keep
     // their color but still get the bold modifier so they stay legible
@@ -231,7 +231,7 @@ fn render_item<'a>(
                     if pending > 0 {
                         spans.push(Span::raw(" "));
                         spans.push(Span::styled(
-                            format!("📩 {}", pending),
+                            format!("{} pending", pending),
                             theme.unread(),
                         ));
                     }
@@ -258,15 +258,15 @@ fn render_item<'a>(
             ];
             // The libp2p NAT badge only means something when a swarm is
             // running. In the 0.8 relay-only default it would just read
-            // "🔍 detecting…" forever, so we omit it.
+            // "detecting…" forever, so we omit it.
             if app.libp2p_active() {
                 let nat_glyph = match app.nat_status.as_deref() {
-                    Some("reachable") => "🌐",
-                    Some("private") => "🏠",
-                    _ => "🔍",
+                    Some("reachable") => "wan",
+                    Some("private") => "lan",
+                    _ => "?",
                 };
                 spans.push(Span::raw("  "));
-                spans.push(Span::styled(nat_glyph.to_string(), theme.text_style()));
+                spans.push(Span::styled(nat_glyph.to_string(), theme.dim()));
             }
             // huddle 0.8: compact relay (Tor-onion server) indicator. A
             // bright onion means the relay link is up; a faint dot means
@@ -276,7 +276,7 @@ fn render_item<'a>(
             if app.handle.server_enabled() {
                 spans.push(Span::raw("  "));
                 if app.handle.server_connected() {
-                    spans.push(Span::styled("🧅".to_string(), theme.text_style()));
+                    spans.push(Span::styled("●".to_string(), theme.ok()));
                 } else {
                     spans.push(Span::styled("·".to_string(), theme.dim()));
                 }
@@ -418,7 +418,7 @@ fn render_item<'a>(
                 format!("{} friend requests", n)
             };
             let line = Line::from(vec![
-                Span::styled("  📩 ", theme.warn_style()),
+                Span::styled("  ! ", theme.warn_style()),
                 Span::styled(label, theme.warn_style()),
             ])
             .style(highlight(theme, focused, is_sel, Style::default()));

@@ -119,9 +119,9 @@ fn render_network<'a>(app: &TuiApp, theme: &Theme) -> Vec<Line<'a>> {
     let (relay_label, relay_style) = if !app.handle.server_enabled() {
         ("off (--no-server)".to_string(), theme.warn_style())
     } else if app.handle.server_connected() {
-        ("🧅 connected".to_string(), theme.ok())
+        ("● connected".to_string(), theme.ok())
     } else {
-        ("🧅 connecting…  (is Tor running?)".to_string(), theme.dim())
+        ("○ connecting…  (is Tor running?)".to_string(), theme.dim())
     };
     lines.push(Line::from(vec![
         Span::styled("    Onion relay  ", theme.dim()),
@@ -171,9 +171,9 @@ fn render_network<'a>(app: &TuiApp, theme: &Theme) -> Vec<Line<'a>> {
         ));
         lines.push(Line::raw(""));
         let nat = match app.nat_status.as_deref() {
-            Some("reachable") => "🌐 reachable",
-            Some("private") => "🏠 private",
-            _ => "🔍 detecting",
+            Some("reachable") => "reachable",
+            Some("private") => "private",
+            _ => "detecting",
         };
         lines.push(Line::from(vec![
             Span::styled("  reachability  ", theme.dim()),

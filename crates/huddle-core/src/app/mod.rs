@@ -1448,7 +1448,7 @@ impl AppHandle {
     /// Phase D follow-up: snapshot of the NAT reachability state.
     /// Returns the addresses AutoNAT has confirmed as externally
     /// reachable in this session. The lobby renders an emoji badge
-    /// from this — non-empty ⇒ '🌐 reachable', empty ⇒ '🏠 LAN only'.
+    /// from this — non-empty ⇒ 'reachable', empty ⇒ 'LAN only'.
     pub fn nat_reachable_addrs(&self) -> Vec<String> {
         self.nat_reachable_addrs
             .lock()
@@ -3134,7 +3134,6 @@ impl AppHandle {
                     room_id: room_id.to_string(),
                     partner_fingerprint: signer,
                     tx_id,
-                    emoji_string: sas_code.emoji_string(),
                     emoji_labels: sas_code.emoji_labels(),
                     decimal: sas_code.decimal,
                 });
@@ -3194,7 +3193,6 @@ impl AppHandle {
                     room_id: room_id.to_string(),
                     partner_fingerprint: signer,
                     tx_id,
-                    emoji_string: emit.emoji_string(),
                     emoji_labels: emit.emoji_labels(),
                     decimal: emit.decimal,
                 });

@@ -80,7 +80,7 @@ fn render_header(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme, room_id
     ];
     spans.push(Span::raw("  "));
     if encrypted {
-        spans.push(Span::styled("🔒 encrypted", theme.enc()));
+        spans.push(Span::styled("encrypted", theme.enc()));
     } else {
         spans.push(Span::styled("public", theme.ok()));
     }

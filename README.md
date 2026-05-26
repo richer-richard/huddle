@@ -48,8 +48,8 @@ cargo build --release
 1. **Launch** — your Ed25519 identity loads (or generates) from disk
    silently. The TUI opens on the **Welcome** pane with the sidebar
    on the left. huddle connects to the Tor onion relay in the
-   background (the 🧅 next to your name turns solid once the link is
-   up). With `--mode mdns`/`--mode direct` a libp2p swarm also starts
+   background (the relay dot `●` next to your name turns solid once
+   the link is up). With `--mode mdns`/`--mode direct` a libp2p swarm also starts
    for LAN discovery / direct dial alongside the relay.
 2. **First launch only** — a versioned onboarding card explains
    huddle's leaderless model (rooms outlive the creator), the master
@@ -77,10 +77,10 @@ cargo build --release
 
 ```
 +----------------------------------------------------------------------+
-| huddle 0.7.1  ·  745e-fe8a-…  ·  🌐 reachable          12:34 UTC     |
+| huddle 0.9.0  ·  745e-fe8a-…  ·  relay ●               12:34 UTC     |
 +------------------------+---------------------------------------------+
 | ▾ Profile              | # general                                   |
-|   alice  HD-AAAA-…  🌐 |   4 members · 🔒 encrypted                   |
+|   alice  HD-AAAA-…  ●  |   4 members · encrypted                     |
 | ▾ Direct messages  (2) |                                             |
 |   ● bob       1m   (1) |   12:32  bob          hey                   |
 |   ○ dave       offline |   12:33  carol  ✓     same here              |
@@ -235,8 +235,10 @@ privacy" goal huddle's built around.
 Both peers select each other in the Verify modal (`^V`), one presses
 `s` to start. Each generates an ephemeral X25519 keypair, exchanges
 pubkeys via signed envelopes, and derives a shared secret via ECDH.
-HKDF produces a Matrix MSC 2241-aligned 7-emoji + three-4-digit-group
-decimal code; both peers compare OOB (call/SMS/in-person) and press
+HKDF produces a Matrix MSC 2241-aligned 7-symbol + three-4-digit-group
+decimal code. The TUI shows the symbols as their **English words**
+(dog, cat, lion, … — emoji-free) plus the decimal; both peers compare
+OOB (call/SMS/in-person) and press
 `m` to match. A MITM substituting an ephemeral key gets a different
 SAS code on each side — the OOB comparison catches it.
 
@@ -302,8 +304,8 @@ CLI flags override the config file. No relays are configured by
 default — you pick one explicitly. AutoNAT v2 probes test your
 reachability against the connected peer pool; DCUtR attempts a
 hole-punch upgrade to a direct connection whenever a relayed
-connection forms. The Profile pane / sidebar badge shows the current
-state (`🌐 reachable` / `🏠 LAN only` / `🔍 detecting…`).
+connection forms. When libp2p is enabled the Profile pane / sidebar
+badge shows the current state (`reachable` / `LAN only` / `detecting…`).
 
 Room announcements optionally carry a `host_addrs` field with up to 4
 of the announcer's reachable addresses (relay-circuit and
@@ -729,7 +731,7 @@ pending friend-request counts where you can actually see them.
 - **Sidebar density.** Direct messages and Group rooms each pin a
   `+ Add Friend` / `+ New Group` row at the top so the action is a
   cursor-and-Enter away, not a chord lookup. Pending friend requests
-  surface twice in the People section: as `📩 N` next to the section
+  surface twice in the People section: as `N pending` next to the section
   header, and as a dedicated row at the top of an expanded section
   when there's at least one outstanding request.
 

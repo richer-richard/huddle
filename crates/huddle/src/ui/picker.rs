@@ -33,28 +33,30 @@ pub fn render_welcome(f: &mut Frame) {
     let lines = vec![
         Line::from(""),
         Line::from(Span::styled(
-            "  decentralized, terminal-native chat rooms.",
+            "  terminal-native, end-to-end encrypted chat over Tor.",
             Style::default().fg(Color::White),
         )),
-        Line::from(g("  no servers, no accounts, no cloud.")),
+        Line::from(g(
+            "  routes through a Tor onion relay — ciphertext only, no account.",
+        )),
         Line::from(""),
         Line::from(vec![w("  what you can do")]),
         bullet("start a room", "public or end-to-end encrypted (Megolm)"),
         bullet(
-            "browse the LAN",
-            "rooms on your Wi-Fi appear automatically (mDNS)",
+            "invite a friend",
+            "[Shift+I] — they paste it and join over the relay",
         ),
         bullet(
-            "dial across networks",
-            "press [d] in the lobby to connect by IP:port",
-        ),
-        bullet(
-            "stay reconnected",
-            "dialed peers are remembered and re-dialed next launch",
+            "watch the relay",
+            "the relay dot by your name turns solid once connected",
         ),
         bullet(
             "history",
             "messages persist locally per room across restarts",
+        ),
+        bullet(
+            "go LAN (opt-in)",
+            "--mode mdns | direct also runs libp2p alongside",
         ),
         Line::from(""),
         Line::from(vec![
@@ -72,9 +74,7 @@ pub fn render_welcome(f: &mut Frame) {
             y("  press any key"),
             g(" to continue   ·   "),
             y("?"),
-            g(" for help inside the app   ·   "),
-            y("--mode direct"),
-            g(" hides you from mDNS"),
+            g(" for help   ·   needs Tor running (SOCKS 127.0.0.1:9050)"),
         ]),
     ];
 
