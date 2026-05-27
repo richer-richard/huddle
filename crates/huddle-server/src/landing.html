@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex">
+<meta name="description" content="A huddle relay — terminal-native, end-to-end encrypted chat over Tor. The relay only ever moves ciphertext.">
+<title>huddle · onion relay</title>
+<style>
+  /* Fully self-contained: no external fonts, scripts, or assets — the
+     page is served over a Tor onion and must render with JavaScript
+     disabled (Tor Browser "Safer"/"Safest"). Every effect below is
+     CSS-only and uses transform/opacity so it stays smooth and degrades
+     gracefully. */
+  :root{
+    --bg:#0a0c10;
+    --panel:rgba(255,255,255,.035);
+    --line:rgba(255,255,255,.09);
+    --text:#e7eaf0;
+    --dim:#8a93a4;
+    --accent:#5ad6c9;     /* cyan — matches the TUI accent */
+    --magenta:#c79bff;    /* the TUI's "encrypted" accent */
+    --radius:14px;
+    --mono:ui-monospace,"SFMono-Regular",Menlo,Consolas,"DejaVu Sans Mono","Liberation Mono",monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    min-height:100vh;
+    background:var(--bg);
+    color:var(--text);
+    font-family:var(--mono);
+    line-height:1.6;
+    -webkit-font-smoothing:antialiased;
+    display:flex;align-items:center;justify-content:center;
+    padding:clamp(20px,5vw,64px);
+    overflow-x:hidden;
+  }
+
+  /* ── aurora background ───────────────────────────────────────── */
+  .aurora{position:fixed;inset:0;z-index:-1;overflow:hidden;
+    background:radial-gradient(120% 120% at 50% 0%,#0d1118 0%,#070809 72%)}
+  .blob{position:absolute;border-radius:50%;filter:blur(90px);opacity:.45;will-change:transform}
+  .b1{width:46vmax;height:46vmax;left:-10vmax;top:-14vmax;background:#119c92;animation:drift1 26s ease-in-out infinite}
+  .b2{width:40vmax;height:40vmax;right:-12vmax;top:4vmax;background:#6d28d9;animation:drift2 32s ease-in-out infinite}
+  .b3{width:34vmax;height:34vmax;left:28vmax;bottom:-18vmax;background:#1d4ed8;opacity:.30;animation:drift3 38s ease-in-out infinite}
+  @keyframes drift1{0%,100%{transform:translate(0,0) scale(1)}50%{transform:translate(8vmax,6vmax) scale(1.12)}}
+  @keyframes drift2{0%,100%{transform:translate(0,0) scale(1)}50%{transform:translate(-7vmax,8vmax) scale(1.08)}}
+  @keyframes drift3{0%,100%{transform:translate(0,0) scale(1)}50%{transform:translate(-5vmax,-7vmax) scale(1.15)}}
+
+  main{width:100%;max-width:680px}
+
+  .kicker{font-size:.72rem;letter-spacing:.32em;text-transform:uppercase;color:var(--accent);opacity:.85;margin:0 0 14px}
+
+  h1{font-size:clamp(2.6rem,9vw,4.2rem);line-height:1;margin:0;font-weight:700;letter-spacing:-.02em;display:flex;align-items:center}
+  /* Solid colour by default; only paint the gradient where clip-to-text
+     is supported, so unsupported engines never show invisible text. */
+  .word{color:var(--text)}
+  @supports ((-webkit-background-clip:text) or (background-clip:text)){
+    .word{background:linear-gradient(100deg,#7af2e6,var(--accent) 38%,var(--magenta));
+      -webkit-background-clip:text;background-clip:text;color:transparent}
+  }
+  /* CSS-drawn cursor — no glyph dependency (Safest mode drops some). */
+  .cursor{display:inline-block;width:.5ch;height:.92em;background:var(--accent);
+    margin-left:.14em;border-radius:1px;animation:blink 1.15s steps(1) infinite}
+  @keyframes blink{0%,50%{opacity:1}50.01%,100%{opacity:0}}
+
+  .tag{font-size:clamp(1rem,2.6vw,1.18rem);color:var(--text);margin:20px 0 0}
+  .lede{color:var(--dim);margin:14px 0 0;font-size:.95rem;max-width:60ch}
+
+  /* ── faux terminal ──────────────────────────────────────────── */
+  .term{margin:34px 0 0;border:1px solid var(--line);border-radius:var(--radius);
+    background:var(--panel);overflow:hidden;backdrop-filter:blur(6px)}
+  .term-bar{display:flex;align-items:center;gap:7px;padding:11px 14px;border-bottom:1px solid var(--line)}
+  .dot{width:11px;height:11px;border-radius:50%;background:#2a2f3a}
+  .term-bar .label{margin-left:8px;color:var(--dim);font-size:.76rem;letter-spacing:.04em}
+  .term-body{padding:18px 16px;font-size:.95rem;white-space:pre-wrap;word-break:break-word}
+  .row{display:block}
+  .prompt{color:var(--accent);user-select:none}
+  .cmd{color:var(--text)}
+  .comment{color:var(--dim)}
+
+  /* ── trust chips + honest note ──────────────────────────────── */
+  .chips{display:flex;flex-wrap:wrap;gap:8px;margin:26px 0 0}
+  .chip{font-size:.76rem;color:var(--dim);border:1px solid var(--line);border-radius:999px;padding:6px 12px}
+  .chip b{color:var(--accent);font-weight:600}
+  .note{color:var(--dim);font-size:.82rem;margin:16px 0 0;max-width:60ch}
+  .note b{color:var(--magenta);font-weight:600}
+
+  /* ── this relay's address ───────────────────────────────────── */
+  .relay{margin:26px 0 0}
+  .relay .l{font-size:.72rem;letter-spacing:.2em;text-transform:uppercase;color:var(--dim);margin:0 0 7px}
+  .addr{display:block;font-size:.82rem;color:var(--text);border:1px solid var(--line);
+    border-radius:10px;background:rgba(0,0,0,.25);padding:11px 13px;word-break:break-all;user-select:all}
+
+  footer{margin:34px 0 0;padding-top:18px;border-top:1px solid var(--line);
+    display:flex;flex-wrap:wrap;gap:14px;align-items:center;font-size:.82rem;color:var(--dim)}
+  footer a{color:var(--dim);text-decoration:none;border-bottom:1px solid transparent;transition:color .2s,border-color .2s}
+  footer a:hover{color:var(--accent);border-bottom-color:var(--accent)}
+  .sep{opacity:.4}
+
+  /* ── entrance animation ─────────────────────────────────────── */
+  .rise{opacity:0;transform:translateY(16px);animation:rise .7s cubic-bezier(.2,.65,.3,1) forwards}
+  @keyframes rise{to{opacity:1;transform:none}}
+
+  @media (prefers-reduced-motion:reduce){
+    .blob,.cursor{animation:none}
+    .rise{animation:none;opacity:1;transform:none}
+  }
+</style>
+</head>
+<body>
+  <div class="aurora" aria-hidden="true">
+    <div class="blob b1"></div><div class="blob b2"></div><div class="blob b3"></div>
+  </div>
+
+  <main>
+    <p class="kicker rise" style="animation-delay:.05s">Tor onion relay</p>
+
+    <h1 class="rise" style="animation-delay:.12s">
+      <span class="word">huddle</span><span class="cursor" aria-hidden="true"></span>
+    </h1>
+
+    <p class="tag rise" style="animation-delay:.20s">Terminal-native, end-to-end encrypted chat over Tor.</p>
+
+    <p class="lede rise" style="animation-delay:.28s">
+      You've reached a huddle relay. It moves ciphertext between people and mailboxes
+      messages for whoever's offline — it never holds your keys and never sees what you say.
+    </p>
+
+    <div class="term rise" style="animation-delay:.36s" aria-label="install and run">
+      <div class="term-bar">
+        <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+        <span class="label">bash</span>
+      </div>
+      <div class="term-body"><span class="row"><span class="prompt">$ </span><span class="cmd">cargo install huddle</span></span><span class="row"><span class="prompt">$ </span><span class="cmd">huddle</span></span><span class="row"><span class="comment"># needs a local Tor daemon — SOCKS5 on 127.0.0.1:9050</span></span></div>
+    </div>
+
+    <div class="chips rise" style="animation-delay:.44s">
+      <span class="chip"><b>E2E</b> &nbsp;Megolm group sessions</span>
+      <span class="chip"><b>relay</b> &nbsp;sees only ciphertext</span>
+      <span class="chip"><b>Tor</b> &nbsp;reachable only as an onion</span>
+    </div>
+
+    <p class="note rise" style="animation-delay:.50s">
+      <b>heads up:</b> not yet independently audited — read the client source before trusting it with real secrets.
+    </p>
+
+    <div class="relay rise" style="animation-delay:.56s">
+      <p class="l">this relay</p>
+      <code class="addr">huddleg2647kbrmngflqai23f4rrc7l5dnszz5lij76uhqzmkebx2mid.onion</code>
+    </div>
+
+    <footer class="rise" style="animation-delay:.62s">
+      <a href="https://github.com/richer-richard/huddle">view source</a>
+      <span class="sep">·</span>
+      <span>v0.9.1</span>
+      <span class="sep">·</span>
+      <span>MIT / Apache-2.0</span>
+    </footer>
+  </main>
+</body>
+</html>

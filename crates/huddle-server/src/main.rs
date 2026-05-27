@@ -129,12 +129,20 @@ async fn main() -> Result<()> {
 async fn handle_conn(stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
     let mut buf = [0u8; 1024];
     let n = stream.peek(&mut buf).await?;
-    let head = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
-    if head.contains("upgrade: websocket") {
+    let head = String::from_utf8_lossy(&buf[..n]);
+    if head.to_ascii_lowercase().contains("upgrade: websocket") {
         let ws = tokio_tungstenite::accept_async(stream).await?;
         serve_ws(ws, shared).await
     } else {
-        serve_health(stream).await
+        // Plain HTTP. `/health` keeps the JSON probe contract; every other
+        // path (notably `/`) serves the static landing page so a browser
+        // visiting the onion sees something intentional instead of raw
+        // bytes. The relay protocol lives on the WebSocket upgrade above —
+        // clients (the CLI, and any future frontend) hit `/ws`.
+        match request_target(&head) {
+            "/health" => serve_health(stream).await,
+            _ => serve_landing(stream).await,
+        }
     }
 }
 
@@ -144,6 +152,44 @@ async fn serve_health(mut stream: TcpStream) -> Result<()> {
         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         body.len(),
         body
+    );
+    stream.write_all(resp.as_bytes()).await?;
+    stream.flush().await?;
+    Ok(())
+}
+
+/// The static landing page served at the onion root. Compiled into the
+/// binary (`include_str!`) so the server has no runtime file dependency.
+const LANDING_HTML: &str = include_str!("landing.html");
+
+/// Extract the request target (path) from an HTTP request's head, e.g.
+/// `GET /health HTTP/1.1` → `/health`. The query string is stripped.
+/// Falls back to `/` when the request line can't be parsed.
+fn request_target(head: &str) -> &str {
+    head.lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .map(|target| target.split('?').next().unwrap_or("/"))
+        .unwrap_or("/")
+}
+
+/// Serve the landing page as `text/html` with privacy-hardening headers:
+/// a strict CSP that blocks scripts and every external resource (the page
+/// is fully self-contained), plus no-referrer and no content sniffing.
+/// The page is built to render with JavaScript disabled, so the CSP can
+/// forbid scripts outright.
+async fn serve_landing(mut stream: TcpStream) -> Result<()> {
+    let resp = format!(
+        "HTTP/1.1 200 OK\r\n\
+         Content-Type: text/html; charset=utf-8\r\n\
+         Content-Length: {}\r\n\
+         Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'\r\n\
+         X-Content-Type-Options: nosniff\r\n\
+         Referrer-Policy: no-referrer\r\n\
+         Connection: close\r\n\
+         \r\n{}",
+        LANDING_HTML.len(),
+        LANDING_HTML
     );
     stream.write_all(resp.as_bytes()).await?;
     stream.flush().await?;
@@ -420,4 +466,38 @@ fn take_mailbox(c: &Connection, fp: &str) -> Result<Vec<(String, String, String)
     }
     c.execute("DELETE FROM mailbox WHERE fingerprint = ?1", params![fp])?;
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::request_target;
+
+    #[test]
+    fn parses_plain_paths() {
+        assert_eq!(request_target("GET / HTTP/1.1\r\nHost: x.onion\r\n\r\n"), "/");
+        assert_eq!(request_target("GET /health HTTP/1.1\r\n\r\n"), "/health");
+        assert_eq!(request_target("GET /ws HTTP/1.1\r\n"), "/ws");
+    }
+
+    #[test]
+    fn strips_query_string() {
+        assert_eq!(request_target("GET /health?probe=1 HTTP/1.1\r\n"), "/health");
+        assert_eq!(request_target("GET /?x HTTP/1.1\r\n"), "/");
+    }
+
+    #[test]
+    fn other_methods_keep_their_target() {
+        // The router only special-cases the WebSocket upgrade and /health;
+        // every other method/path falls through to the landing page, so we
+        // just need the target parsed faithfully here.
+        assert_eq!(request_target("HEAD /health HTTP/1.1\r\n"), "/health");
+        assert_eq!(request_target("POST /anything HTTP/1.1\r\n"), "/anything");
+    }
+
+    #[test]
+    fn malformed_requests_fall_back_to_root() {
+        assert_eq!(request_target(""), "/"); // empty
+        assert_eq!(request_target("GET"), "/"); // no target token
+        assert_eq!(request_target("garbage\r\n"), "/"); // single token
+    }
 }
