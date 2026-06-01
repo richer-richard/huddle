@@ -21,6 +21,7 @@ use crate::identity::Identity;
 use crate::network::events::NetworkEvent;
 use crate::network::server::{ServerClient, ServerEvent};
 use crate::network::protocol::{encode_wire, RoomAnnouncement, RoomMessage, WireMessage};
+use crate::network::transport::{self, TransportId, TransportProfile};
 use crate::network::{self, NetworkHandle, NetworkMode};
 use crate::storage::repo::{
     self, derive_room_id, AttachmentStatus, KnownPeer, RoomKind, StoredAttachment, StoredRoom,
@@ -42,6 +43,33 @@ pub struct KnownPeerStatus {
     /// the first successful connect completes. The TUI uses this to
     /// resolve usernames + start DMs against the dialed peer.
     pub fingerprint: Option<String>,
+}
+
+/// huddle 1.0: a unified, display-ready contact assembled from the durable
+/// `contacts` address book joined with live, derived state. Unlike
+/// [`KnownPeerStatus`] (one row per ephemeral libp2p multiaddr), this is
+/// keyed by the stable fingerprint, so it survives a peer leaving the LAN —
+/// the durable link that lets two people keep chatting over the relay.
+#[derive(Debug, Clone)]
+pub struct ContactView {
+    pub fingerprint: String,
+    /// User-chosen alias, if set.
+    pub alias: Option<String>,
+    /// Signed self-declared username from `peer_profiles`, if any.
+    pub username: Option<String>,
+    /// Canonical DM room id for one-step messaging.
+    pub dm_room_id: String,
+    pub verified: bool,
+    pub trusted: bool,
+    /// True when we currently have *any* live path to the peer: a libp2p
+    /// connection (LAN/direct) OR the relay is up (reachable via mailbox).
+    pub reachable: bool,
+    /// True specifically when a direct libp2p connection is live (LAN).
+    pub lan_connected: bool,
+    /// How the contact entered the book: dm / request / dial / lan / invite.
+    pub source: String,
+    pub added_at: i64,
+    pub last_seen: Option<i64>,
 }
 
 /// huddle 0.7: compute the deterministic room_id for a 1-1 DM between two
@@ -246,6 +274,76 @@ pub struct AppHandle {
     /// no server configured we show nothing, rather than a permanently
     /// "disconnected" indicator. Set once at construction, never changes.
     server_enabled: bool,
+    /// huddle 1.0: relay room ids we subscribe to that aren't chat rooms —
+    /// currently just our own `inbox_room_id` for contact requests. Kept
+    /// separate from `active_rooms` so they don't appear in the sidebar, but
+    /// chained into the `Hello` room set so the relay re-registers the
+    /// membership on every reconnect (otherwise inbox requests are missed
+    /// after a reconnect).
+    aux_subscriptions: Arc<Mutex<HashSet<String>>>,
+    /// huddle 1.0: which transport "door" the relay connection is currently
+    /// using (set on connect, cleared on disconnect). Surfaced in the UI/CLI
+    /// so the user knows which anti-censorship path is live.
+    active_transport: Arc<Mutex<Option<TransportId>>>,
+    /// huddle 1.0: the full set of transport doors resolved at startup (for
+    /// the UI/CLI listing — includes unavailable ones with a reason).
+    transport_profiles: Arc<Vec<TransportProfile>>,
+}
+
+/// huddle 1.0: how to reach the relay backend — the bundle of transport
+/// inputs resolved by `main.rs` (CLI + config) and handed to the core. The
+/// core turns these into the ordered set of [`TransportProfile`] doors.
+#[derive(Clone, Default)]
+pub struct TransportConfig {
+    /// The onion relay ws URL (`ws://<onion>.onion:80/ws`), or `None` for
+    /// `--no-server`. Resolved by the caller (includes the baked-in default).
+    pub onion_url: Option<String>,
+    /// A clearnet relay URL — `ws://<ip>:<port>/ws` or `wss://host/ws`. The
+    /// scheme decides which clearnet door (plain / TLS) is usable.
+    pub clearnet_url: Option<String>,
+    /// Local Tor SOCKS5 proxy (`None` → `DEFAULT_TOR_SOCKS`).
+    pub tor_socks: Option<String>,
+    /// Optional bridge line for the bridge door (Arti build / labeling).
+    pub tor_bridge: Option<String>,
+    /// Pin a single door by [`TransportId::as_str`] (CLI `--transport`).
+    pub pin: Option<String>,
+    /// Explicit fallback order as `TransportId::as_str` tokens (CLI
+    /// `--transport-order`).
+    pub order: Option<Vec<String>>,
+}
+
+impl TransportConfig {
+    /// An onion-only config (the common case + most tests).
+    pub fn onion_only(url: impl Into<String>) -> Self {
+        Self {
+            onion_url: Some(url.into()),
+            ..Default::default()
+        }
+    }
+}
+
+/// huddle 1.0: how a conversation's messages are currently reaching the
+/// other side. Status only — the app always picks the path automatically;
+/// this just makes the security context legible per chat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoomTransport {
+    /// A live libp2p connection to a member (same LAN or a direct dial).
+    LanDirect,
+    /// No direct connection, but the relay is up (messages ride the relay /
+    /// its offline mailbox).
+    Relay,
+    /// Neither a direct connection nor the relay — messages only save locally.
+    Offline,
+}
+
+impl RoomTransport {
+    pub fn label(&self) -> &'static str {
+        match self {
+            RoomTransport::LanDirect => "lan",
+            RoomTransport::Relay => "relay",
+            RoomTransport::Offline => "offline",
+        }
+    }
 }
 
 /// Phase D follow-up: minimum seconds between two opportunistic
@@ -259,7 +357,8 @@ const PROFILE_REBROADCAST_FLOOR_MS: i64 = 60_000;
 
 impl AppHandle {
     pub async fn start() -> Result<Self> {
-        Self::start_with_options(NetworkMode::Server, 0, None, Vec::new(), None, None).await
+        Self::start_with_options(NetworkMode::Server, 0, None, Vec::new(), TransportConfig::default())
+            .await
     }
 
     /// huddle 0.7.8: peek the persisted `mdns_enabled` setting without
@@ -288,8 +387,7 @@ impl AppHandle {
         port: u16,
         master_key: Option<&[u8; 32]>,
         relays: Vec<Multiaddr>,
-        server_url: Option<String>,
-        tor_socks: Option<String>,
+        transports: TransportConfig,
     ) -> Result<Self> {
         config::ensure_data_dir()?;
         // Megolm session state is encrypted at rest with an HKDF subkey
@@ -301,16 +399,7 @@ impl AppHandle {
             None => [0u8; 32],
         };
         let db = storage::open_db(&config::db_path(), master_key)?;
-        Self::start_with_db_and_options(
-            db,
-            mode,
-            port,
-            session_persist_key,
-            relays,
-            server_url,
-            tor_socks,
-        )
-        .await
+        Self::start_with_db_and_options(db, mode, port, session_persist_key, relays, transports).await
     }
 
     pub async fn start_with_db(db: Db) -> Result<Self> {
@@ -320,8 +409,7 @@ impl AppHandle {
             0,
             [0u8; 32],
             Vec::new(),
-            None,
-            None,
+            TransportConfig::default(),
         )
         .await
     }
@@ -332,8 +420,7 @@ impl AppHandle {
         port: u16,
         session_persist_key: [u8; 32],
         relays: Vec<Multiaddr>,
-        server_url: Option<String>,
-        tor_socks: Option<String>,
+        transports: TransportConfig,
     ) -> Result<Self> {
         let identity = Self::load_or_create_identity(&db)?;
         let identity = Arc::new(identity);
@@ -359,6 +446,54 @@ impl AppHandle {
         let connected_dial_addrs = Arc::new(Mutex::new(HashMap::new()));
         let file_manager = Arc::new(FileManager::new(&config::data_dir())?);
 
+        // huddle 1.0: resolve the transport "doors" + the order to try them.
+        // CLI inputs (in `transports`) win over config.toml; the pin/order
+        // also fall back to saved settings, then the default most-private-
+        // first fallback.
+        let tor_socks = transports
+            .tor_socks
+            .clone()
+            .or_else(config::tor_socks)
+            .unwrap_or_else(|| DEFAULT_TOR_SOCKS.to_string());
+        let clearnet_url = transports.clearnet_url.clone().or_else(config::clearnet_url);
+        let tor_bridge = transports.tor_bridge.clone().or_else(config::tor_bridge);
+        let transport_profiles = transport::builtin_profiles(
+            transports.onion_url.as_deref(),
+            clearnet_url.as_deref(),
+            &tor_socks,
+            tor_bridge.as_deref(),
+        );
+        let any_relay = transport_profiles.iter().any(|p| p.available());
+        let pin = transports
+            .pin
+            .as_deref()
+            .and_then(TransportId::from_str)
+            .or_else(|| {
+                repo::get_setting(&db, "transport_pin")
+                    .ok()
+                    .flatten()
+                    .as_deref()
+                    .and_then(TransportId::from_str)
+            });
+        let transport_order = if let Some(pin) = pin {
+            vec![pin]
+        } else {
+            transports
+                .order
+                .as_ref()
+                .map(|v| v.iter().filter_map(|s| TransportId::from_str(s)).collect::<Vec<_>>())
+                .filter(|v| !v.is_empty())
+                .or_else(|| {
+                    repo::get_setting(&db, "transport_order")
+                        .ok()
+                        .flatten()
+                        .map(|s| transport::parse_order(&s))
+                        .filter(|v| !v.is_empty())
+                })
+                .unwrap_or_else(transport::default_fallback_order)
+        };
+        let transport_profiles = Arc::new(transport_profiles);
+
         let handle = Self {
             identity,
             network,
@@ -379,7 +514,10 @@ impl AppHandle {
             last_profile_broadcast_at_ms: Arc::new(Mutex::new(HashMap::new())),
             pending_auto_dm_addrs: Arc::new(Mutex::new(HashSet::new())),
             app_event_tx,
-            server_enabled: server_url.is_some(),
+            server_enabled: any_relay,
+            aux_subscriptions: Arc::new(Mutex::new(HashSet::new())),
+            active_transport: Arc::new(Mutex::new(None)),
+            transport_profiles: transport_profiles.clone(),
         };
 
         handle.spawn_event_processor(net_event_rx);
@@ -387,19 +525,35 @@ impl AppHandle {
         handle.spawn_discovered_room_pruner();
         handle.spawn_known_peer_reconnector();
         handle.restore_rooms_from_db().await;
-        // huddle 0.8: now that active rooms are loaded, open the persistent
-        // connection to the centralized server (if configured). Connecting
-        // after restore means our `hello` carries the restored room ids, so
-        // the server registers our memberships and flushes any offline
-        // mailbox for rooms we already have active.
-        if let Some(url) = server_url {
-            handle.spawn_server_connection(url, tor_socks);
+        // huddle 1.0: subscribe to our own relay inbox so "add by HD-ID"
+        // contact requests reach us over the internet, not just over the LAN
+        // mesh. Registered in `aux_subscriptions` so the membership is
+        // re-asserted in every reconnect's `Hello` (see
+        // spawn_server_connection); the live call here also subscribes the
+        // gossipsub topic for the LAN path.
+        {
+            let inbox =
+                crate::network::protocol::inbox_room_id(handle.identity.fingerprint());
+            handle.aux_subscriptions.lock().unwrap().insert(inbox.clone());
+            handle.network.subscribe_room(inbox).await;
+        }
+        // huddle 0.8/1.0: now that active rooms are loaded, open the
+        // persistent relay connection (if any transport door is usable),
+        // trying the doors in `transport_order`. Connecting after restore
+        // means our `hello` carries the restored room ids + the inbox, so the
+        // server registers our memberships and flushes any offline mailbox.
+        if any_relay {
+            handle.spawn_server_connection(transport_order);
         }
         // huddle 0.7.7: prune any friend requests that aged out while
         // we were offline. Best-effort — a DB failure here shouldn't
         // block startup, so we log and move on.
         if let Err(e) = repo::cleanup_expired_pending_friend_requests(&handle.db, now_unix()) {
             warn!(%e, "failed to sweep expired pending friend requests");
+        }
+        // huddle 1.0: same 3-day TTL sweep for relay-inbox contact requests.
+        if let Err(e) = repo::cleanup_expired_pending_contact_requests(&handle.db, now_unix()) {
+            warn!(%e, "failed to sweep expired pending contact requests");
         }
 
         Ok(handle)
@@ -422,6 +576,50 @@ impl AppHandle {
     /// off.
     pub fn server_enabled(&self) -> bool {
         self.server_enabled
+    }
+
+    /// huddle 1.0: the transport door the relay is currently connected
+    /// through (`None` when not connected). For the UI/CLI status line.
+    pub fn active_transport(&self) -> Option<TransportId> {
+        *self.active_transport.lock().unwrap()
+    }
+
+    /// Human label for the live transport door, e.g. "Tor onion (system Tor)".
+    pub fn active_transport_label(&self) -> Option<&'static str> {
+        self.active_transport().map(|id| id.label())
+    }
+
+    /// huddle 1.0: all transport doors (available + unavailable-with-reason)
+    /// for the Settings pane and the `huddle transports` listing.
+    pub fn transport_profiles(&self) -> Vec<TransportProfile> {
+        self.transport_profiles.as_ref().clone()
+    }
+
+    /// huddle 1.0: how messages to `room_id` are currently reaching peers —
+    /// a live libp2p connection (LAN/direct), the relay, or nobody. Used by
+    /// the per-chat transport indicator. Status only.
+    pub fn room_transport(&self, room_id: &str) -> RoomTransport {
+        let members = self.room_members(room_id);
+        if !members.is_empty() {
+            let connected = self.connected_dial_addrs.lock().unwrap().clone();
+            if !connected.is_empty() {
+                if let Ok(known) = repo::list_known_peers(&self.db) {
+                    let lan_live = known.iter().any(|p| {
+                        p.fingerprint.as_deref().is_some_and(|fp| {
+                            members.iter().any(|m| m == fp) && connected.contains_key(&p.address)
+                        })
+                    });
+                    if lan_live {
+                        return RoomTransport::LanDirect;
+                    }
+                }
+            }
+        }
+        if self.server_connected() {
+            RoomTransport::Relay
+        } else {
+            RoomTransport::Offline
+        }
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<AppEvent> {
@@ -728,6 +926,11 @@ impl AppHandle {
             return Err(HuddleError::Other("cannot DM yourself".into()));
         }
         let room_id = canonical_dm_room_id(&our_fp, partner_fingerprint);
+
+        // huddle 1.0: a DM is a relationship — record the partner in the
+        // durable Contacts book so they persist (and stay chattable over the
+        // relay) even after they leave the LAN. Idempotent; best-effort.
+        let _ = self.add_contact(partner_fingerprint, "dm");
 
         // Idempotent reopen: if the room already exists on disk or in
         // memory, surface its id without creating a duplicate. This
@@ -1114,10 +1317,16 @@ impl AppHandle {
         Ok(())
     }
 
-    /// Walk the rooms table at startup. Non-encrypted rooms are silently
-    /// restored (subscribed + re-announced). Encrypted rooms get added to
-    /// `restorable_rooms` so the lobby surfaces them and the user can
-    /// re-enter via the join flow with passphrase.
+    /// Walk the rooms table at startup. Non-encrypted rooms and DMs are
+    /// silently restored (subscribed + re-announced). Encrypted *group*
+    /// rooms get added to `restorable_rooms` so the lobby surfaces them
+    /// and the user can re-enter via the join flow with the passphrase.
+    ///
+    /// huddle 1.0: DMs (always encrypted) are now fully re-activated here
+    /// rather than parked — their key derives from our identity + the
+    /// partner's persisted pubkey, no passphrase needed — so DM chat keeps
+    /// flowing continuously across restarts and across networks (relay
+    /// mailbox + LAN), instead of going dormant until manually reopened.
     async fn restore_rooms_from_db(&self) {
         let rooms = match repo::list_rooms(&self.db) {
             Ok(v) => v,
@@ -1129,6 +1338,42 @@ impl AppHandle {
         let our_fp = self.identity.fingerprint().to_string();
         let count = rooms.len();
         for info in rooms {
+            // DMs: re-activate fully (key derives from identity + the
+            // partner's persisted pubkey, no passphrase). Keeps DMs live so
+            // relay-delivered messages are handled, not dropped.
+            if info.encrypted && info.kind == RoomKind::Direct {
+                let partner = repo::list_room_members(&self.db, &info.id)
+                    .ok()
+                    .into_iter()
+                    .flatten()
+                    .map(|m| m.fingerprint)
+                    .find(|fp| *fp != our_fp);
+                match partner {
+                    Some(partner_fp) => {
+                        if let Err(e) = self.bootstrap_direct_room(&info.id, &partner_fp).await {
+                            warn!(%e, room_id = %info.id, "restore: DM bootstrap failed; parking as restorable");
+                            self.restorable_rooms
+                                .lock()
+                                .unwrap()
+                                .insert(info.id.clone(), info);
+                        } else {
+                            info!(room_id = %info.id, "restored DM");
+                        }
+                    }
+                    // DM created but never reciprocated — partner pubkey
+                    // unknown, nothing to re-activate. Park it (no key, no
+                    // history anyway).
+                    None => {
+                        self.restorable_rooms
+                            .lock()
+                            .unwrap()
+                            .insert(info.id.clone(), info);
+                    }
+                }
+                continue;
+            }
+            // Encrypted GROUP rooms need a passphrase held in memory to
+            // decrypt — park them as restorable for the user to re-enter.
             if info.encrypted {
                 self.restorable_rooms
                     .lock()
@@ -1572,6 +1817,165 @@ impl AppHandle {
         Ok(())
     }
 
+    // -------------------------------------------------------------------
+    // huddle 1.0: Contacts — the durable, fingerprint-keyed address book
+    // -------------------------------------------------------------------
+
+    /// Record (or refresh) a contact. Idempotent; safe to call from every
+    /// relationship path (start_direct, trust_inbound, accepted requests).
+    /// Caches the partner's Ed25519 pubkey when known and the canonical DM
+    /// room id. Never adds ourselves.
+    pub fn add_contact(&self, fingerprint: &str, source: &str) -> Result<()> {
+        let our_fp = self.identity.fingerprint();
+        if fingerprint == our_fp || fingerprint.is_empty() {
+            return Ok(());
+        }
+        let dm_room_id = canonical_dm_room_id(our_fp, fingerprint);
+        let pubkey = repo::lookup_peer_ed25519_pubkey(&self.db, fingerprint)
+            .ok()
+            .flatten();
+        let now = now_unix();
+        repo::upsert_contact(
+            &self.db,
+            &repo::Contact {
+                fingerprint: fingerprint.to_string(),
+                alias: None,
+                ed25519_pubkey: pubkey,
+                dm_room_id: Some(dm_room_id),
+                source: source.to_string(),
+                note: None,
+                added_at: now,
+                last_seen: Some(now),
+            },
+        )
+    }
+
+    pub fn set_contact_alias(&self, fingerprint: &str, alias: Option<&str>) -> Result<()> {
+        repo::set_contact_alias(&self.db, fingerprint, alias)
+    }
+
+    pub fn remove_contact(&self, fingerprint: &str) -> Result<()> {
+        repo::delete_contact(&self.db, fingerprint)
+    }
+
+    pub fn is_contact(&self, fingerprint: &str) -> bool {
+        repo::is_contact(&self.db, fingerprint).unwrap_or(false)
+    }
+
+    /// The unified Contacts list: the durable address book joined with
+    /// derived username / verified / trusted / reachability so the UI never
+    /// has to stitch four tables together.
+    pub fn list_contacts(&self) -> Vec<ContactView> {
+        let our_fp = self.identity.fingerprint().to_string();
+        let verified: HashSet<String> = repo::list_verified_peers(&self.db)
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        // A peer is "LAN-connected" when any known_peer row bearing its
+        // fingerprint currently maps to a live libp2p connection.
+        let connected = self.connected_dial_addrs.lock().unwrap().clone();
+        let lan_fps: HashSet<String> = repo::list_known_peers(&self.db)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|p| connected.contains_key(&p.address))
+            .filter_map(|p| p.fingerprint)
+            .collect();
+        let relay_up = self.server_connected();
+        repo::list_contacts(&self.db)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|c| c.fingerprint != our_fp)
+            .map(|c| {
+                let lan_connected = lan_fps.contains(&c.fingerprint);
+                ContactView {
+                    dm_room_id: c
+                        .dm_room_id
+                        .clone()
+                        .unwrap_or_else(|| canonical_dm_room_id(&our_fp, &c.fingerprint)),
+                    username: repo::get_peer_username(&self.db, &c.fingerprint).unwrap_or(None),
+                    verified: verified.contains(&c.fingerprint),
+                    trusted: repo::is_fingerprint_trusted(&self.db, &c.fingerprint)
+                        .unwrap_or(false),
+                    reachable: lan_connected || relay_up,
+                    lan_connected,
+                    fingerprint: c.fingerprint,
+                    alias: c.alias,
+                    source: c.source,
+                    added_at: c.added_at,
+                    last_seen: c.last_seen,
+                }
+            })
+            .collect()
+    }
+
+    // -------------------------------------------------------------------
+    // huddle 1.0: contact requests over the relay inbox (Phase 1)
+    // -------------------------------------------------------------------
+
+    /// "Add by HD-ID" that works over the internet: publish a signed
+    /// `ContactRequest` to the target's relay inbox. The target picks it up
+    /// (live, or from the relay's offline mailbox) and surfaces it as a
+    /// pending request to accept/decline. On the LAN, the same publish also
+    /// rides gossipsub. Refuses self.
+    pub async fn send_contact_request(
+        &self,
+        target_fingerprint: &str,
+        note: Option<&str>,
+    ) -> Result<()> {
+        let our_fp = self.identity.fingerprint().to_string();
+        if target_fingerprint == our_fp {
+            return Err(HuddleError::Other("that's your own ID".into()));
+        }
+        // Record the target so their accept-echo is recognized as mutual (see
+        // the ContactRequest receive arm) instead of re-prompting us.
+        let _ = self.add_contact(target_fingerprint, "request-sent");
+        let msg = RoomMessage::ContactRequest {
+            requester_fingerprint: our_fp,
+            display_name: repo::get_display_name(&self.db).unwrap_or(None),
+            note: note.map(|s| s.to_string()),
+            sender_ed25519_pubkey: Some(B64.encode(self.identity.public_bytes())),
+        };
+        let env = crate::crypto::sign_message(&self.identity, &msg)?;
+        let bytes = crate::network::protocol::encode_wire_signed(&env)?;
+        let inbox = crate::network::protocol::inbox_room_id(target_fingerprint);
+        self.network.publish_room_message(inbox, bytes).await;
+        Ok(())
+    }
+
+    /// Inbound contact requests awaiting an accept/decline decision.
+    pub fn list_pending_contact_requests(&self) -> Vec<repo::PendingContactRequest> {
+        repo::list_pending_contact_requests(&self.db).unwrap_or_default()
+    }
+
+    /// Accept a pending contact request: record the contact and open the DM
+    /// (idempotent on the canonical room id). Both sides converge — the
+    /// requester opens the same DM when our resulting `MemberAnnounce` /
+    /// announcement reaches them. Removes the pending row regardless.
+    pub async fn accept_contact_request(&self, fingerprint: &str) -> Result<()> {
+        repo::delete_pending_contact_request(&self.db, fingerprint)?;
+        self.add_contact(fingerprint, "request")?;
+        // start_direct subscribes the canonical DM room + broadcasts our
+        // MemberAnnounce, making the DM live on our side.
+        self.start_direct(fingerprint).await?;
+        // Echo a request back to the requester's inbox so they converge: the
+        // requester already has us in their address book (they initiated), so
+        // their ContactRequest receive arm treats this as mutual and
+        // subscribes the same DM room — essential for the relay path, where
+        // our MemberAnnounce can't reach them until they're a room member.
+        let _ = self.send_contact_request(fingerprint, None).await;
+        Ok(())
+    }
+
+    /// Decline a pending contact request. `block` also adds the requester to
+    /// the persistent blocklist so they can't re-request.
+    pub fn reject_contact_request(&self, fingerprint: &str, block: bool) -> Result<()> {
+        repo::delete_pending_contact_request(&self.db, fingerprint)?;
+        if block {
+            repo::block_peer(&self.db, fingerprint, now_unix())?;
+        }
+        Ok(())
+    }
+
     /// Re-dial a stored address — used by the lobby's "reconnect" action.
     pub async fn redial(&self, address: &str) -> Result<()> {
         self.dial(address).await
@@ -1627,6 +2031,8 @@ impl AppHandle {
                 trusted: true,
             },
         )?;
+        // huddle 1.0: trusting a peer makes them a contact.
+        let _ = self.add_contact(fingerprint, "dial");
         Ok(())
     }
 
@@ -1679,6 +2085,8 @@ impl AppHandle {
             }
         }
         repo::delete_pending_friend_requests_for_fp(&self.db, fingerprint)?;
+        // huddle 1.0: accepting a friend request makes them a contact.
+        let _ = self.add_contact(fingerprint, "request");
         if let Some(addr) = chosen_addr {
             // Pre-mark trusted so the upcoming Identify handler skips
             // the inbound-dial modal. Matches the semantics of
@@ -1869,61 +2277,88 @@ impl AppHandle {
         });
     }
 
-    /// huddle 0.8: maintain a connection to the centralized server (a Tor
-    /// onion relay) for the life of the process. Reconnects with capped
-    /// exponential backoff. While connected, the [`NetworkHandle`] mirrors
-    /// outgoing room traffic to it (see `attach_server`), and incoming
-    /// server messages are funneled into the *same* `RoomMessageReceived`
-    /// handler as gossipsub — so a message that arrives via the server is
-    /// decoded, verified, and decrypted by exactly the same code path.
-    fn spawn_server_connection(&self, url: String, tor_socks: Option<String>) {
-        // `.onion` hosts must be dialed through Tor's SOCKS5 proxy; a plain
-        // ws:// host (tests / a clearnet relay) is dialed directly. The
-        // proxy address defaults to `127.0.0.1:9050` but is overridable
-        // (`--tor-socks` / `config.toml`) for e.g. the Tor Browser bundle's
-        // 9150 port.
-        let socks = if url.contains(".onion") {
-            Some(tor_socks.unwrap_or_else(|| DEFAULT_TOR_SOCKS.to_string()))
-        } else {
-            None
-        };
+    /// huddle 0.8/1.0: maintain a connection to the relay backend for the
+    /// life of the process. Reconnects with capped exponential backoff. Each
+    /// attempt tries the transport "doors" in `order` (onion first, clearnet
+    /// last, or a single pinned door) until one connects — so a censored user
+    /// whose Tor is blocked transparently falls through to a clearnet door.
+    /// While connected, the [`NetworkHandle`] mirrors outgoing room traffic
+    /// to it (see `attach_server`), and incoming server messages are funneled
+    /// into the *same* `RoomMessageReceived` handler as gossipsub — so a
+    /// message arriving via the relay is decoded, verified, and decrypted by
+    /// exactly the same code path. The live door is recorded in
+    /// `active_transport` for the UI/CLI.
+    fn spawn_server_connection(&self, order: Vec<TransportId>) {
         let handle = self.clone();
         tokio::spawn(async move {
             let mut backoff = 1u64;
             loop {
                 let fp = handle.identity.fingerprint().to_string();
-                let rooms: Vec<String> =
-                    handle.active_rooms.lock().unwrap().keys().cloned().collect();
-                match ServerClient::connect(&url, socks.as_deref(), fp, rooms).await {
-                    Ok((client, mut rx)) => {
-                        backoff = 1;
-                        handle.network.attach_server(client);
-                        info!(%url, "connected to huddle-server");
-                        while let Some(ev) = rx.recv().await {
-                            match ev {
-                                ServerEvent::Message { room, payload, .. } => {
-                                    // Reuse the gossipsub receive path verbatim.
-                                    // `from_peer` is ignored by that handler.
-                                    handle
-                                        .process_network_event(
-                                            NetworkEvent::RoomMessageReceived {
-                                                room_id: room,
-                                                payload,
-                                                from_peer: PeerId::random(),
-                                            },
-                                        )
-                                        .await;
-                                }
-                                // Delivery receipts and the ready ack are not
-                                // surfaced to the UI yet; reconnect on close.
-                                ServerEvent::Ready | ServerEvent::Sent { .. } => {}
-                                ServerEvent::Disconnected => break,
-                            }
+                // huddle 1.0: the Hello room set is every active chat room
+                // PLUS our aux subscriptions (the contact inbox), so the relay
+                // re-registers inbox membership on every reconnect and flushes
+                // any queued contact requests.
+                let rooms: Vec<String> = {
+                    let mut r: Vec<String> =
+                        handle.active_rooms.lock().unwrap().keys().cloned().collect();
+                    r.extend(handle.aux_subscriptions.lock().unwrap().iter().cloned());
+                    r
+                };
+
+                // Try each door in order until one connects. Unavailable
+                // doors (no URL / wrong build) are skipped.
+                let mut connected: Option<(
+                    ServerClient,
+                    tokio::sync::mpsc::UnboundedReceiver<ServerEvent>,
+                    TransportId,
+                )> = None;
+                for id in &order {
+                    let (url, dial) = match handle
+                        .transport_profiles
+                        .iter()
+                        .find(|p| p.id == *id)
+                    {
+                        Some(p) if p.available() => {
+                            (p.url.clone().unwrap(), p.dial.clone().unwrap())
                         }
-                        handle.network.detach_server();
-                        warn!("huddle-server connection closed; reconnecting");
+                        _ => continue,
+                    };
+                    match ServerClient::connect(&url, &dial, fp.clone(), rooms.clone()).await {
+                        Ok((client, rx)) => {
+                            info!(%url, transport = id.as_str(), "connected to relay");
+                            connected = Some((client, rx, *id));
+                            break;
+                        }
+                        Err(e) => {
+                            debug!(error = %e, transport = id.as_str(), %url, "relay door failed; trying next");
+                        }
                     }
-                    Err(e) => warn!(error = %e, "huddle-server connect failed; will retry"),
+                }
+
+                if let Some((client, mut rx, id)) = connected {
+                    backoff = 1;
+                    handle.network.attach_server(client);
+                    *handle.active_transport.lock().unwrap() = Some(id);
+                    while let Some(ev) = rx.recv().await {
+                        match ev {
+                            ServerEvent::Message { room, payload, .. } => {
+                                handle
+                                    .process_network_event(NetworkEvent::RoomMessageReceived {
+                                        room_id: room,
+                                        payload,
+                                        from_peer: PeerId::random(),
+                                    })
+                                    .await;
+                            }
+                            ServerEvent::Ready | ServerEvent::Sent { .. } => {}
+                            ServerEvent::Disconnected => break,
+                        }
+                    }
+                    handle.network.detach_server();
+                    *handle.active_transport.lock().unwrap() = None;
+                    warn!("relay connection closed; reconnecting");
+                } else {
+                    warn!("all relay doors failed; will retry");
                 }
                 tokio::time::sleep(Duration::from_secs(backoff)).await;
                 backoff = (backoff * 2).min(30);
@@ -3471,6 +3906,68 @@ impl AppHandle {
                 let _ = self.app_event_tx.send(AppEvent::PeerProfileUpdated {
                     fingerprint: sender_fingerprint,
                     username,
+                });
+            }
+            RoomMessage::ContactRequest {
+                requester_fingerprint,
+                display_name,
+                note,
+                sender_ed25519_pubkey: _,
+            } => {
+                // Only honor a contact request that arrived on OUR own inbox
+                // room — never one published into a shared room topic.
+                if room_id != crate::network::protocol::inbox_room_id(&our_fp) {
+                    return;
+                }
+                // Must be signed, and the signer must BE the requester — the
+                // signature is the whole proof of who's asking.
+                let signer = match verified_signer {
+                    Some(fp) => fp,
+                    None => {
+                        warn!(%requester_fingerprint, "dropping unsigned ContactRequest");
+                        return;
+                    }
+                };
+                if signer != requester_fingerprint || requester_fingerprint == our_fp {
+                    return;
+                }
+                if repo::is_peer_blocked(&self.db, &requester_fingerprint).unwrap_or(false) {
+                    debug!(%requester_fingerprint, "ignoring ContactRequest from blocked peer");
+                    return;
+                }
+                // Mutual case: if this fingerprint is already in our address
+                // book (we requested them, or we're already connected), treat
+                // their request as acceptance — open/refresh the DM directly,
+                // no prompt. This is also how the acceptor's echo-back
+                // converges the relay path: both sides end up subscribed to
+                // the canonical DM room, after which the normal MemberAnnounce
+                // exchange shares session keys.
+                if self.is_contact(&requester_fingerprint) {
+                    let _ =
+                        repo::delete_pending_contact_request(&self.db, &requester_fingerprint);
+                    if let Err(e) = self.start_direct(&requester_fingerprint).await {
+                        debug!(%e, "ContactRequest mutual: start_direct failed");
+                    }
+                    return;
+                }
+                // Fresh inbound request — persist + surface for the user to
+                // accept or decline from the Contacts pane.
+                if let Err(e) = repo::upsert_pending_contact_request(
+                    &self.db,
+                    &repo::PendingContactRequest {
+                        fingerprint: requester_fingerprint.clone(),
+                        display_name: display_name.clone(),
+                        note: note.clone(),
+                        received_at: now_unix(),
+                    },
+                ) {
+                    warn!(%e, "upsert pending contact request failed");
+                    return;
+                }
+                let _ = self.app_event_tx.send(AppEvent::ContactRequestReceived {
+                    fingerprint: requester_fingerprint,
+                    display_name,
+                    note,
                 });
             }
         }

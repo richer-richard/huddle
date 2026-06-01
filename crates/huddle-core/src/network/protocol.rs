@@ -7,6 +7,7 @@
 //!     of a room subscribe. All room messages flow here.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::files::encryption::EncryptedFileMeta;
 use crate::storage::repo::RoomKind;
@@ -16,6 +17,22 @@ pub const ROOM_TOPIC_PREFIX: &str = "huddle-room-";
 
 pub fn room_topic(room_id: &str) -> String {
     format!("{ROOM_TOPIC_PREFIX}{room_id}")
+}
+
+/// huddle 1.0: a stable, per-identity "inbox" room id for relay-routed
+/// contact requests — `inbox:<hex(sha256("huddle-inbox-v1" || fingerprint))>`.
+/// Lets "add by HD-ID" work over the internet (not just the LAN mesh): the
+/// requester publishes a signed `ContactRequest` here and the owner, who
+/// auto-subscribes to their own inbox, picks it up (live or from the relay
+/// mailbox). The relay only ever sees this hash, never the raw fingerprint
+/// (preimage resistance), so it can't reconstruct a contact graph; the
+/// `inbox:` prefix + distinct salt keep it from colliding with DM / group
+/// room ids. Both sides derive the same id from the target fingerprint.
+pub fn inbox_room_id(fingerprint: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(b"huddle-inbox-v1");
+    h.update(fingerprint.as_bytes());
+    format!("inbox:{}", hex::encode(h.finalize()))
 }
 
 /// Application-level signed envelope around a `RoomMessage`. Used for
@@ -40,6 +57,8 @@ pub fn room_topic(room_id: &str) -> String {
 ///     it really came from the room)
 ///   - `ProfileUpdate` (signer must equal the claimed `sender_fingerprint`;
 ///     prevents anyone from spoofing another peer's username)
+///   - `ContactRequest` (signer must equal the claimed `requester_fingerprint`;
+///     huddle 1.0 — the signature proves who's asking to connect)
 ///
 /// Verification happens via `crate::crypto::verify_signed`: it re-derives
 /// the fingerprint from `ed25519_pubkey_b64`, asserts equality with
@@ -306,6 +325,21 @@ pub enum RoomMessage {
         sender_fingerprint: String,
         username: Option<String>,
         updated_at: i64,
+    },
+    /// huddle 1.0: a contact/DM request delivered to the target's relay
+    /// inbox (`inbox_room_id`). MUST be sent inside `WireMessage::Signed` —
+    /// the signer's fingerprint IS the requester's identity (the whole
+    /// point: it proves who's asking). Carries the requester's Ed25519
+    /// pubkey so the recipient can TOFU-pin it and later derive the DM ECDH
+    /// key without a round-trip.
+    ContactRequest {
+        requester_fingerprint: String,
+        #[serde(default)]
+        display_name: Option<String>,
+        #[serde(default)]
+        note: Option<String>,
+        #[serde(default)]
+        sender_ed25519_pubkey: Option<String>,
     },
 }
 

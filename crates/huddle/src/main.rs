@@ -20,10 +20,11 @@ struct Cli {
     #[arg(long, help = "Override data directory")]
     data_dir: Option<String>,
 
-    /// Connection mode. huddle 0.8 defaults to `server` (onion-relay
-    /// only — no libp2p). Pass `mdns` (LAN auto-discover) or `direct`
-    /// (manual dial only) to ALSO start a libp2p swarm alongside the
-    /// relay. `server` is the recommended default for internet use.
+    /// Connection mode. By default huddle runs LAN discovery (libp2p
+    /// mDNS) AND the relay together — no flag needed. Pass `mdns`,
+    /// `direct` (libp2p without LAN broadcast), or `server` (relay only,
+    /// no libp2p) to override. When absent, LAN follows the Settings →
+    /// Network toggle (on by default).
     #[arg(long, value_parser = parse_mode)]
     mode: Option<NetworkMode>,
 
@@ -61,10 +62,9 @@ struct Cli {
     #[arg(long = "server", value_name = "WS_URL")]
     server: Option<String>,
 
-    /// huddle 0.8: don't connect to the centralized server. Combined with
-    /// the default (no `--mode`), this leaves NO transport — useful only
-    /// for offline inspection. With `--mode mdns|direct` it falls back to
-    /// libp2p-only (LAN / relay).
+    /// Don't connect to the relay. LAN (libp2p) still works by default,
+    /// so this gives you LAN-only operation. Combined with an explicit
+    /// `--mode server` it leaves no transport (offline inspection only).
     #[arg(long)]
     no_server: bool,
 
@@ -74,6 +74,28 @@ struct Cli {
     /// `tor_socks = "..."`; this flag wins.
     #[arg(long = "tor-socks", value_name = "HOST:PORT")]
     tor_socks: Option<String>,
+
+    /// huddle 1.0: a clearnet relay URL onto the SAME backend as the onion —
+    /// `ws://<ip>:<port>/ws` (plain, fast) or `wss://host/ws` (TLS). For VPN
+    /// users or networks where Tor is blocked. Also `clearnet_url` in config.
+    #[arg(long = "clearnet-server", value_name = "WS_URL")]
+    clearnet_server: Option<String>,
+
+    /// huddle 1.0: pin a single transport "door" by id (run
+    /// `huddle transports` to list them): onion-tor, onion-bridge,
+    /// onion-arti, clearnet-wss, clearnet-ws. Default tries them in order.
+    #[arg(long = "transport", value_name = "ID")]
+    transport: Option<String>,
+
+    /// huddle 1.0: explicit fallback order, comma-separated transport ids
+    /// (most-preferred first). Overrides the default most-private-first order.
+    #[arg(long = "transport-order", value_name = "ID,ID,...")]
+    transport_order: Option<String>,
+
+    /// huddle 1.0: a Tor bridge line (obfs4/WebTunnel) for the bridge door,
+    /// to reach Tor where it's blocked. Also `tor_bridge` in config.
+    #[arg(long = "tor-bridge", value_name = "LINE")]
+    tor_bridge: Option<String>,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -86,6 +108,10 @@ enum Commands {
     /// the TUI, doesn't touch the network, and never asks for the
     /// master passphrase.
     Doctor,
+    /// huddle 1.0: list the transport "doors" onto the relay (onion / bridge
+    /// / Arti / clearnet), each with its privacy tradeoff and whether it's
+    /// usable in this build + config. Runs without the TUI.
+    Transports,
 }
 
 fn parse_mode(s: &str) -> std::result::Result<NetworkMode, String> {
@@ -98,8 +124,11 @@ async fn main() -> Result<()> {
 
     // huddle 0.6: `huddle doctor` runs without the TUI, log appender,
     // or network. Just a pretty diagnostic dump for bug reports.
-    if let Some(Commands::Doctor) = &cli.command {
-        return run_doctor();
+    // huddle 1.0: `huddle transports` lists the anti-censorship doors.
+    match &cli.command {
+        Some(Commands::Doctor) => return run_doctor(),
+        Some(Commands::Transports) => return run_transports(&cli),
+        None => {}
     }
 
     let log_path = huddle_core::config::log_path();
@@ -232,18 +261,36 @@ async fn main() -> Result<()> {
 
     if server_url.is_none() && !mode.uses_libp2p() {
         tracing::warn!(
-            "no transport configured (--no-server with default mode) — \
-             huddle will run offline; pass --mode mdns|direct for LAN"
+            "no transport configured (--no-server with --mode server) — \
+             huddle will run offline; drop --mode server (LAN is on by \
+             default) or remove --no-server"
         );
     }
+
+    // huddle 1.0: bundle the transport inputs. The onion url + tor_socks are
+    // resolved above (CLI → config → default); clearnet / bridge / pin / order
+    // pass the raw CLI values and the core folds in config.toml + saved
+    // settings before building the ordered set of doors.
+    let transports = huddle_core::app::TransportConfig {
+        onion_url: server_url,
+        clearnet_url: cli.clearnet_server.clone(),
+        tor_socks,
+        tor_bridge: cli.tor_bridge.clone(),
+        pin: cli.transport.clone(),
+        order: cli.transport_order.as_ref().map(|s| {
+            s.split(',')
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect()
+        }),
+    };
 
     let handle = huddle_core::app::AppHandle::start_with_options(
         mode,
         cli.port,
         master_key.as_ref(),
         relays,
-        server_url,
-        tor_socks,
+        transports,
     )
     .await
     .map_err(|e| anyhow!(e))?;
@@ -321,5 +368,70 @@ fn run_doctor() -> Result<()> {
 
     println!("for support, open an issue at:");
     println!("  https://github.com/richer-richard/huddle/issues");
+    Ok(())
+}
+
+/// huddle 1.0: print the transport "doors" onto the relay — each one's
+/// privacy / anti-censorship tradeoff and whether it's usable in this build +
+/// config — in the order the app would try them. No TUI, no network.
+fn run_transports(cli: &Cli) -> Result<()> {
+    use huddle_core::network::transport::{builtin_profiles, default_fallback_order, TransportId};
+
+    let onion = if cli.no_server {
+        None
+    } else {
+        Some(
+            cli.server
+                .clone()
+                .or_else(huddle_core::config::server_url)
+                .unwrap_or_else(|| huddle_core::app::DEFAULT_SERVER_URL.to_string()),
+        )
+    };
+    let clearnet = cli
+        .clearnet_server
+        .clone()
+        .or_else(huddle_core::config::clearnet_url);
+    let tor_socks = cli
+        .tor_socks
+        .clone()
+        .or_else(huddle_core::config::tor_socks)
+        .unwrap_or_else(|| huddle_core::app::DEFAULT_TOR_SOCKS.to_string());
+    let bridge = cli.tor_bridge.clone().or_else(huddle_core::config::tor_bridge);
+
+    let profiles = builtin_profiles(onion.as_deref(), clearnet.as_deref(), &tor_socks, bridge.as_deref());
+
+    let order: Vec<TransportId> =
+        if let Some(pin) = cli.transport.as_deref().and_then(TransportId::from_str) {
+            vec![pin]
+        } else if let Some(o) = cli.transport_order.as_deref() {
+            let v: Vec<TransportId> = o.split(',').filter_map(TransportId::from_str).collect();
+            if v.is_empty() {
+                default_fallback_order()
+            } else {
+                v
+            }
+        } else {
+            default_fallback_order()
+        };
+
+    println!("huddle transports — doors onto the relay (most private first)\n");
+    for id in &order {
+        if let Some(p) = profiles.iter().find(|p| p.id == *id) {
+            let status = if p.available() {
+                format!("AVAILABLE   {}", p.url.as_deref().unwrap_or(""))
+            } else {
+                format!("unavailable ({})", p.reason.unwrap_or(""))
+            };
+            println!("  [{}] {}", p.id.as_str(), p.id.label());
+            println!("      {status}");
+            println!("      {}", p.id.description());
+            println!();
+        }
+    }
+    if cli.transport.is_some() {
+        println!("(pinned to a single door via --transport)");
+    } else {
+        println!("Tried top-to-bottom until one connects — onion is most private, clearnet-ws the least.");
+    }
     Ok(())
 }

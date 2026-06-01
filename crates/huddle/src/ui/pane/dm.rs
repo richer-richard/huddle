@@ -78,6 +78,16 @@ fn render_header(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme, room_id
     }
     spans.push(Span::raw("  "));
     spans.push(Span::styled("Direct", theme.dim()));
+    // huddle 1.0: per-chat transport indicator (status only — the app picks
+    // the path automatically). Makes the security context legible: is this
+    // riding the LAN, the Tor/clearnet relay, or nothing right now?
+    spans.push(Span::raw("  ·  "));
+    let (tlabel, tstyle) = match app.handle.room_transport(room_id) {
+        huddle_core::app::RoomTransport::LanDirect => ("via lan", theme.ok()),
+        huddle_core::app::RoomTransport::Relay => ("via relay", theme.warn_style()),
+        huddle_core::app::RoomTransport::Offline => ("offline", theme.dim()),
+    };
+    spans.push(Span::styled(tlabel, tstyle));
 
     let mut lines = vec![Line::from(spans)];
     if let Some(t) = chat_common::typing_line(app, theme, room_id) {

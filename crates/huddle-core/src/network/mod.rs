@@ -2,6 +2,7 @@ pub mod behavior;
 pub mod events;
 pub mod protocol;
 pub mod server;
+pub mod transport;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

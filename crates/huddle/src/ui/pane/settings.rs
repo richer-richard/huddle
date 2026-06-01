@@ -104,45 +104,76 @@ fn render_network<'a>(app: &TuiApp, theme: &Theme) -> Vec<Line<'a>> {
     let libp2p = app.libp2p_active();
     let mut lines: Vec<Line> = Vec::new();
 
-    // huddle 0.8: the Tor-onion relay is the default (and usually only)
-    // transport. libp2p is opt-in via `--mode mdns|direct`.
+    // huddle 1.0: LAN discovery (libp2p mDNS) and the relay both run by
+    // default; the mDNS toggle below switches the next launch to relay-only.
     lines.push(Line::from(vec![Span::styled(
-        "  huddle routes over a Tor-onion relay by default —",
+        "  huddle runs LAN discovery and the relay together by default —",
         theme.dim(),
     )]));
     lines.push(Line::from(vec![Span::styled(
-        "  end-to-end encrypted, anonymous, no NAT hole-punching:",
+        "  messages ride whichever reaches the peer (always E2E encrypted):",
         theme.dim(),
     )]));
     lines.push(Line::raw(""));
 
+    // Relay connection + the live transport door.
     let (relay_label, relay_style) = if !app.handle.server_enabled() {
         ("off (--no-server)".to_string(), theme.warn_style())
     } else if app.handle.server_connected() {
-        ("● connected".to_string(), theme.ok())
-    } else {
-        ("○ connecting…  (is Tor running?)".to_string(), theme.dim())
-    };
-    lines.push(Line::from(vec![
-        Span::styled("    Onion relay  ", theme.dim()),
-        Span::styled(relay_label, relay_style),
-    ]));
-
-    let (libp2p_label, libp2p_style) = if libp2p {
-        (
-            format!("on  ·  {}", app.mode_str()),
-            theme.ok(),
-        )
+        let door = app.handle.active_transport_label().unwrap_or("relay");
+        (format!("● connected  ·  {}", door), theme.ok())
     } else {
         (
-            "off  ·  toggle LAN mDNS below, then restart".to_string(),
+            "○ connecting…  (Tor down? try a clearnet door)".to_string(),
             theme.dim(),
         )
     };
     lines.push(Line::from(vec![
-        Span::styled("    libp2p (LAN) ", theme.dim()),
+        Span::styled("    Relay        ", theme.dim()),
+        Span::styled(relay_label, relay_style),
+    ]));
+
+    let (libp2p_label, libp2p_style) = if libp2p {
+        (format!("on  ·  {}", app.mode_str()), theme.ok())
+    } else {
+        (
+            "off  ·  enable LAN with the Settings toggle / --mode mdns".to_string(),
+            theme.dim(),
+        )
+    };
+    lines.push(Line::from(vec![
+        Span::styled("    LAN (libp2p) ", theme.dim()),
         Span::styled(libp2p_label, libp2p_style),
     ]));
+    lines.push(Line::raw(""));
+
+    // huddle 1.0: the transport "doors" onto the relay + their anti-
+    // censorship tradeoff. Active door is marked; unavailable ones show why
+    // (run `huddle transports` for the full descriptions).
+    lines.push(Line::from(vec![Span::styled(
+        "  transport doors (anti-censorship paths onto the relay):",
+        theme.dim(),
+    )]));
+    for p in app.handle.transport_profiles() {
+        let (mark, mstyle) = if Some(p.id) == app.handle.active_transport() {
+            ("● active ", theme.ok())
+        } else if p.available() {
+            ("· ready  ", theme.dim())
+        } else {
+            ("  off    ", theme.dim())
+        };
+        let detail = if p.available() {
+            String::new()
+        } else {
+            format!("  ({})", p.reason.unwrap_or(""))
+        };
+        lines.push(Line::from(vec![
+            Span::styled("    ", theme.dim()),
+            Span::styled(mark, mstyle),
+            Span::styled(p.id.label(), theme.text_style()),
+            Span::styled(detail, theme.dim()),
+        ]));
+    }
     lines.push(Line::raw(""));
 
     // Override hint — repoint the relay without recompiling.

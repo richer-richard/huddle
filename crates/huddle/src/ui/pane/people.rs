@@ -19,17 +19,25 @@ pub fn render(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme) {
         .constraints([Constraint::Length(2), Constraint::Min(0)])
         .split(area);
 
-    // huddle 0.7.7: surface pending-friend-request count in the
-    // header so the user sees `(2 pending)` at a glance even when the
-    // Pending sub-tab isn't focused.
+    // huddle 0.7.7 / 1.0: surface request counts in the header so the user
+    // sees them at a glance even when the sub-tab isn't focused. "Contacts"
+    // is the address book; relay-inbox contact requests + libp2p friend
+    // requests both surface as their own sub-tabs.
+    let contact_req_count = app.pending_contact_requests.len();
     let pending_count = app.pending_requests.len();
     let mut title_spans = vec![
         Span::styled(
-            "People",
+            "Contacts",
             Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
         ),
         Span::raw("    "),
     ];
+    if contact_req_count > 0 {
+        title_spans.push(Span::styled(
+            format!("({} request{})  ·  ", contact_req_count, if contact_req_count == 1 { "" } else { "s" }),
+            theme.warn_style(),
+        ));
+    }
     if pending_count > 0 {
         title_spans.push(Span::styled(
             format!("({} pending)  ·  ", pending_count),
@@ -37,50 +45,107 @@ pub fn render(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme) {
         ));
     }
     title_spans.extend(vec![
+        Span::styled("a", theme.warn_style()),
+        Span::styled(" add by HD-ID  ·  ", theme.dim()),
         Span::styled("Tab", theme.warn_style()),
         Span::styled(" switches lists  ·  ", theme.dim()),
         Span::styled("m", theme.warn_style()),
         Span::styled(" message  ·  ", theme.dim()),
-        Span::styled("r", theme.warn_style()),
-        Span::styled(" reconnect  ·  ", theme.dim()),
         Span::styled("b", theme.warn_style()),
-        Span::styled(" block  ·  ", theme.dim()),
-        Span::styled("u", theme.warn_style()),
-        Span::styled(" unblock", theme.dim()),
+        Span::styled(" block", theme.dim()),
     ]);
     let title = Paragraph::new(Line::from(title_spans));
     f.render_widget(title, parts[0]);
 
-    // huddle 0.7.7: Pending requests gets a 25% slice at the top when
-    // any exist, pushing the existing three sections down. When empty
-    // the slice collapses so the layout matches the previous shape.
-    if pending_count > 0 {
-        let body = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Percentage(25),
-                Constraint::Percentage(30),
-                Constraint::Percentage(25),
-                Constraint::Percentage(20),
-            ])
-            .split(parts[1]);
-        render_pending(f, body[0], app, theme);
-        render_known(f, body[1], app, theme);
-        render_verified(f, body[2], app, theme);
-        render_blocked(f, body[3], app, theme);
-    } else {
-        let body = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Percentage(40),
-                Constraint::Percentage(30),
-                Constraint::Percentage(30),
-            ])
-            .split(parts[1]);
-        render_known(f, body[0], app, theme);
-        render_verified(f, body[1], app, theme);
-        render_blocked(f, body[2], app, theme);
+    // huddle 1.0: optional Contact-requests + Pending sub-lists sit at the
+    // top (each only when non-empty), then the always-present Known /
+    // Verified / Blocked sections fill the rest.
+    let mut constraints: Vec<Constraint> = Vec::new();
+    if contact_req_count > 0 {
+        constraints.push(Constraint::Min(4));
     }
+    if pending_count > 0 {
+        constraints.push(Constraint::Min(4));
+    }
+    constraints.push(Constraint::Percentage(40));
+    constraints.push(Constraint::Percentage(30));
+    constraints.push(Constraint::Percentage(30));
+    let body = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(parts[1]);
+    let mut i = 0;
+    if contact_req_count > 0 {
+        render_contact_requests(f, body[i], app, theme);
+        i += 1;
+    }
+    if pending_count > 0 {
+        render_pending(f, body[i], app, theme);
+        i += 1;
+    }
+    render_known(f, body[i], app, theme);
+    render_verified(f, body[i + 1], app, theme);
+    render_blocked(f, body[i + 2], app, theme);
+}
+
+fn render_contact_requests(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme) {
+    let focused = app.people_focus == PeopleFocus::ContactRequests;
+    let border = if focused {
+        theme.border_focus_style()
+    } else {
+        theme.border_style()
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border)
+        .padding(Padding::horizontal(1))
+        .title(Span::styled(
+            format!(" Contact requests ({}) ", app.pending_contact_requests.len()),
+            Style::default().fg(theme.warn),
+        ));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let mut lines: Vec<Line> = Vec::new();
+    if focused {
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("a", theme.warn_style()),
+            Span::styled(" accept (opens DM)  ·  ", theme.dim()),
+            Span::styled("r", theme.warn_style()),
+            Span::styled(" decline  ·  ", theme.dim()),
+            Span::styled("j/k", theme.warn_style()),
+            Span::styled(" navigate", theme.dim()),
+        ]));
+    }
+    for (i, req) in app.pending_contact_requests.iter().enumerate() {
+        let name = req
+            .display_name
+            .clone()
+            .or_else(|| app.handle.lookup_username(&req.fingerprint))
+            .unwrap_or_else(|| "[anonymous]".into());
+        let hd_id = format!("HD-{}", short_fp(&req.fingerprint).to_uppercase());
+        let age = format_rel(req.received_at);
+        let mut spans = vec![
+            Span::styled(" [request] ", theme.warn_style()),
+            Span::styled(name, theme.text_style()),
+            Span::raw("  "),
+            Span::styled(hd_id, theme.dim()),
+        ];
+        if let Some(note) = req.note.as_deref().filter(|n| !n.is_empty()) {
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(format!("\"{}\"", note), theme.dim()));
+        }
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(format!("({})", age), theme.dim()));
+        if focused && i == app.selected_contact_request_idx {
+            spans.insert(0, Span::styled("▸", theme.warn_style()));
+        } else {
+            spans.insert(0, Span::raw(" "));
+        }
+        lines.push(Line::from(spans));
+    }
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 fn render_pending(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme) {

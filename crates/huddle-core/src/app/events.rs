@@ -200,4 +200,14 @@ pub enum AppEvent {
         room_id: String,
         fingerprint: String,
     },
+    /// huddle 1.0: a signed `ContactRequest` arrived on our relay inbox
+    /// from a peer we haven't added yet (the "add by HD-ID over the
+    /// internet" path). The TUI surfaces it in the Contacts pane's Requests
+    /// section to accept (opens a DM) or decline. Mutual requests — where we
+    /// already added the sender — auto-connect without firing this.
+    ContactRequestReceived {
+        fingerprint: String,
+        display_name: Option<String>,
+        note: Option<String>,
+    },
 }

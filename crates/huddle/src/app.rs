@@ -352,10 +352,12 @@ impl Default for SidebarState {
 /// action targeting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PeopleFocus {
+    /// huddle 1.0: inbound relay-inbox contact requests ("add by HD-ID over
+    /// the internet"). First tab so a fresh request is the first thing the
+    /// user sees on landing in People.
+    ContactRequests,
     /// huddle 0.7.7: pending inbound friend requests, spilled to disk
-    /// when their 15s modal window times out. First tab so a forgotten
-    /// request from earlier is the first thing the user sees on
-    /// landing in People.
+    /// when their 15s modal window times out.
     Pending,
     Known,
     Verified,
@@ -1188,10 +1190,17 @@ pub struct TuiApp {
     pub selected_blocked_idx: usize,
     /// huddle 0.7.7: cursor inside the People pane's Pending sublist.
     pub selected_pending_idx: usize,
+    /// huddle 1.0: cursor inside the People pane's Contact-requests sublist.
+    pub selected_contact_request_idx: usize,
     /// huddle 0.7.7: cached snapshot of `pending_friend_requests` rows
     /// rendered in the People pane. Refreshed on People focus, after
     /// accept/reject, and after the 15s spill.
     pub pending_requests: Vec<huddle_core::storage::repo::PendingFriendRequest>,
+    /// huddle 1.0: inbound contact requests that arrived over the relay
+    /// inbox ("add by HD-ID over the internet"). Rendered in the Contacts
+    /// pane's Requests section; refreshed on a `ContactRequestReceived`
+    /// event and after accept/decline.
+    pub pending_contact_requests: Vec<huddle_core::storage::repo::PendingContactRequest>,
     pub modal: Modal,
     /// huddle 0.6: a FIFO queue of async-event modals (errors, rotation
     /// requests, inbound dials) that arrived while another modal held
@@ -1291,6 +1300,7 @@ impl TuiApp {
         // huddle 0.7.7: capture the pending-request snapshot before
         // `handle` is moved into Self so we don't pay a clone.
         let pending_requests = handle.list_pending_friend_requests();
+        let pending_contact_requests = handle.list_pending_contact_requests();
         // huddle 0.6: onboarding-pages-to-show is now version-driven.
         // First-launch users see every page; upgrading users see only
         // the "what's new in X.Y" page for releases newer than their
@@ -1321,7 +1331,9 @@ impl TuiApp {
             selected_known_idx: 0,
             selected_blocked_idx: 0,
             selected_pending_idx: 0,
+            selected_contact_request_idx: 0,
             pending_requests,
+            pending_contact_requests,
             modal: Modal::None,
             pending_modals,
             discovered_rooms: Vec::new(),
@@ -1430,6 +1442,11 @@ impl TuiApp {
         {
             self.selected_pending_idx = self.pending_requests.len() - 1;
         }
+    }
+
+    /// huddle 1.0: re-snapshot the relay-inbox contact requests.
+    pub fn refresh_pending_contact_requests(&mut self) {
+        self.pending_contact_requests = self.handle.list_pending_contact_requests();
     }
 
     /// Set the bottom status line with the default 6s TTL. Also
@@ -1934,6 +1951,20 @@ impl TuiApp {
                 self.refresh_known_peers();
                 self.switch_to_room(&room_id);
                 self.set_status(format!("connected — chatting with {}", label));
+            }
+            AppEvent::ContactRequestReceived {
+                fingerprint,
+                display_name,
+                ..
+            } => {
+                // huddle 1.0: a relay-inbox "add by HD-ID" request arrived.
+                // Refresh the Contacts pane's Requests section and flag it in
+                // the status line so it's never silently buried.
+                self.refresh_pending_contact_requests();
+                let who = display_name.unwrap_or_else(|| {
+                    format!("HD-{}", short_fp(&fingerprint).to_uppercase())
+                });
+                self.set_status(format!("contact request from {} — see Contacts", who));
             }
         }
     }
@@ -4240,16 +4271,40 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
                 return Ok(false);
             }
             app.modal = Modal::None;
-            match app.handle.dial_by_id_or_username(input.trim()).await {
-                Ok(()) => {
-                    // libp2p races every known address (LAN > public IP
-                    // > relay-circuit). The status line says "dialing"
-                    // generically — actual transport surfaces in the
-                    // ListeningOn / connected-peer events afterwards.
-                    app.set_status(format!("dialing {} (racing LAN / IP / relay)…", input.trim()));
+            let trimmed = input.trim();
+            // huddle 1.0: a literal HD-ID sends a signed contact request over
+            // the relay inbox — that works over the INTERNET (not just the LAN
+            // mesh), reaching the peer live or via the offline mailbox. We
+            // also race a best-effort LAN dial for same-network immediacy. A
+            // bare username can only be resolved on a shared mesh, so it keeps
+            // the existing dial-by-username path.
+            if let Some(fp) = huddle_core::app::normalize_to_fingerprint(trimmed) {
+                if fp.as_str() == app.handle.fingerprint() {
+                    app.modal = Modal::Error("that's your own HD-ID".into());
+                    return Ok(false);
                 }
-                Err(e) => {
-                    app.modal = Modal::Error(format!("add friend: {e}"));
+                match app.handle.send_contact_request(&fp, None).await {
+                    Ok(()) => {
+                        app.set_status(format!(
+                            "contact request sent to HD-{} — opens a DM when they accept",
+                            short_fp(&fp).to_uppercase()
+                        ));
+                    }
+                    Err(e) => {
+                        app.modal = Modal::Error(format!("add contact: {e}"));
+                        return Ok(false);
+                    }
+                }
+                // Same-LAN immediacy; ignored when the peer isn't on the mesh.
+                let _ = app.handle.dial_by_id_or_username(trimmed).await;
+            } else {
+                match app.handle.dial_by_id_or_username(trimmed).await {
+                    Ok(()) => {
+                        app.set_status(format!("dialing {} (racing LAN / IP / relay)…", trimmed));
+                    }
+                    Err(e) => {
+                        app.modal = Modal::Error(format!("add friend: {e}"));
+                    }
                 }
             }
             Ok(false)
@@ -4616,7 +4671,14 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             // there are pending requests, land on that tab — that's
             // where the user almost certainly wants to look first.
             app.refresh_pending_requests();
-            if !app.pending_requests.is_empty() {
+            app.refresh_pending_contact_requests();
+            // huddle 1.0: land on whichever request list has something to
+            // act on — relay contact requests first, then libp2p friend
+            // requests — so an incoming request is the first thing seen.
+            if !app.pending_contact_requests.is_empty() {
+                app.people_focus = PeopleFocus::ContactRequests;
+                app.selected_contact_request_idx = 0;
+            } else if !app.pending_requests.is_empty() {
                 app.people_focus = PeopleFocus::Pending;
                 app.selected_pending_idx = 0;
             }
@@ -4850,13 +4912,24 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             // zero peers, it shows the "no known peers" hint), so
             // it's the safe fallback at the end.
             app.refresh_pending_requests();
+            app.refresh_pending_contact_requests();
             let has_pending = !app.pending_requests.is_empty();
+            let has_contact_reqs = !app.pending_contact_requests.is_empty();
             app.people_focus = match app.people_focus {
+                PeopleFocus::ContactRequests => {
+                    if has_pending {
+                        PeopleFocus::Pending
+                    } else {
+                        PeopleFocus::Known
+                    }
+                }
                 PeopleFocus::Pending => PeopleFocus::Known,
                 PeopleFocus::Known => PeopleFocus::Verified,
                 PeopleFocus::Verified => PeopleFocus::Blocked,
                 PeopleFocus::Blocked => {
-                    if has_pending {
+                    if has_contact_reqs {
+                        PeopleFocus::ContactRequests
+                    } else if has_pending {
                         PeopleFocus::Pending
                     } else {
                         PeopleFocus::Known
@@ -4911,6 +4984,65 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
                 }
                 app.refresh_pending_requests();
                 if app.pending_requests.is_empty() {
+                    app.people_focus = PeopleFocus::Known;
+                }
+            }
+            Ok(false)
+        }
+        Action::ContactRequestUp => {
+            if app.selected_contact_request_idx > 0 {
+                app.selected_contact_request_idx -= 1;
+            }
+            Ok(false)
+        }
+        Action::ContactRequestDown => {
+            if app.selected_contact_request_idx + 1 < app.pending_contact_requests.len() {
+                app.selected_contact_request_idx += 1;
+            }
+            Ok(false)
+        }
+        Action::ContactRequestAccept => {
+            let fp = app
+                .pending_contact_requests
+                .get(app.selected_contact_request_idx)
+                .map(|r| r.fingerprint.clone());
+            if let Some(fp) = fp {
+                match app.handle.accept_contact_request(&fp).await {
+                    Ok(()) => {
+                        app.set_status(format!("accepted — opening DM with {}", short_fp(&fp)));
+                    }
+                    Err(e) => {
+                        app.modal = Modal::Error(format!("accept failed: {e}"));
+                    }
+                }
+                app.refresh_pending_contact_requests();
+                if app.selected_contact_request_idx >= app.pending_contact_requests.len() {
+                    app.selected_contact_request_idx =
+                        app.pending_contact_requests.len().saturating_sub(1);
+                }
+                if app.pending_contact_requests.is_empty() {
+                    app.people_focus = PeopleFocus::Known;
+                }
+            }
+            Ok(false)
+        }
+        Action::ContactRequestReject => {
+            let fp = app
+                .pending_contact_requests
+                .get(app.selected_contact_request_idx)
+                .map(|r| r.fingerprint.clone());
+            if let Some(fp) = fp {
+                if let Err(e) = app.handle.reject_contact_request(&fp, false) {
+                    app.modal = Modal::Error(format!("decline failed: {e}"));
+                } else {
+                    app.set_status(format!("declined {}", short_fp(&fp)));
+                }
+                app.refresh_pending_contact_requests();
+                if app.selected_contact_request_idx >= app.pending_contact_requests.len() {
+                    app.selected_contact_request_idx =
+                        app.pending_contact_requests.len().saturating_sub(1);
+                }
+                if app.pending_contact_requests.is_empty() {
                     app.people_focus = PeopleFocus::Known;
                 }
             }

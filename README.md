@@ -8,23 +8,38 @@ sessions, session keys wrapped with an Argon2id-derived passphrase
 key). Either way the transport is end-to-end: the relay only ever sees
 ciphertext.
 
-**huddle 0.8 routes over a centralized Tor v3 onion relay by default.**
-Pure libp2p hole-punching across NATs proved too flaky, so the default
-transport is now a self-hostable onion relay (`crates/huddle-server`)
-reached through your local Tor SOCKS5 proxy. The relay is a dumb
-encrypted router + offline mailbox — it never holds keys and never
-decrypts. The onion address is baked into the client as a default (an
-onion address *is* the server's public key, so this pins its identity);
-override it with `--server <ws-url>` or `config.toml`.
+**huddle 1.0 runs LAN discovery and the relay together by default — no
+mode switch.** Friends on the same network connect directly over libp2p
+(mDNS); everyone else is reached through a self-hostable relay
+(`crates/huddle-server`). Each message rides whichever path reaches the
+peer, and the per-chat header shows which (`via lan` / `via relay`). The
+relay is a dumb encrypted router + offline mailbox — it never holds keys
+and never decrypts.
 
-libp2p (LAN mDNS discovery + direct dial + Circuit Relay v2) still
-exists and is **opt-in** via `--mode mdns` or `--mode direct`, running
-alongside the onion relay for same-LAN immediacy.
+**The relay has several "doors", each a different anti-censorship
+tradeoff** (run `huddle transports` to see them): a Tor v3 **onion** via
+your system Tor (most private, the default); the same onion via a private
+**obfs4/WebTunnel bridge** (for networks that block Tor); an in-process
+**Arti** onion (with `--features arti`); and **clearnet** `ws://`/`wss://`
+straight to a raw IP (fast, for VPN users or where Tor is fully blocked —
+the relay sees your IP, but messages stay end-to-end encrypted). The same
+`huddle-server` process can be exposed as an onion **and** on a public IP
+at once, so all doors share one set of rooms + mailboxes. Pick a door with
+`--transport <id>`, set an order with `--transport-order`, or point at a
+clearnet relay with `--clearnet-server ws://<ip>:<port>/ws`.
 
-> **Requires Tor.** The default transport dials a `.onion`, so a local
-> Tor daemon must be running (SOCKS5 on `127.0.0.1:9050`; override with
-> `--tor-socks`). On Debian/Ubuntu: `apt install tor && systemctl
-> enable --now tor`.
+**Contacts** are a durable, fingerprint-keyed address book — keyed by
+identity, not by an ephemeral LAN address — so a conversation keeps
+working after a peer leaves the LAN. `a` adds a contact by HD-ID; over the
+relay this reaches them across the internet (live or via the mailbox), and
+they accept from the Contacts pane to open a DM. DMs persist across
+restarts and keep flowing over the relay.
+
+> **Tor is optional now.** LAN works with no Tor at all, and a clearnet
+> relay door needs no Tor either. The onion doors do need a local Tor
+> daemon (SOCKS5 on `127.0.0.1:9050`; override with `--tor-socks`). On
+> Debian/Ubuntu: `apt install tor && systemctl enable --now tor`. If Tor
+> is down, huddle falls through to the next available door.
 
 > **This is a learning project, not production-audited chat.**
 > SQLCipher protects the database at rest under your master passphrase,
@@ -455,6 +470,62 @@ your platform's Downloads folder. Phase 2 cap is 1 MiB per file.
   two parties (Megolm message keys still ratchet, but the wrap key
   doesn't). Per-DM ephemeral ratchets (Double Ratchet-style) are a
   candidate follow-up.
+
+## What's new in 0.10 — one app, every network, every door
+
+A big one. huddle stops being "relay-only OR libp2p-only" and becomes a
+single E2EE core with both carriers on by default, a durable contact book,
+and a menu of anti-censorship transports onto the relay.
+
+- **LAN + relay on by default — no mode switch.** The startup mode now
+  resolves to libp2p mDNS (LAN) running *alongside* the relay; the
+  Settings LAN toggle picks mDNS vs direct on the next launch, and
+  `--mode` still overrides. Pure-relay (`--mode server`) and no-libp2p
+  setups are still available, but you no longer choose between "nearby"
+  and "internet" — you get both. LAN works even with Tor down.
+
+- **Contacts — a durable, fingerprint-keyed address book.** A new
+  `contacts` table keyed by the stable identity (not an ephemeral libp2p
+  multiaddr) is the link that lets two people keep chatting after they
+  leave the LAN: the relay routes by fingerprint/room, so the DM keeps
+  working. The People pane is now **Contacts**; `list_contacts()` joins
+  the book with derived username / verified / trusted / reachability.
+
+- **"Add by HD-ID" works over the internet.** Each client subscribes to a
+  private relay **inbox** (`inbox:<hash(fingerprint)>` — the relay never
+  sees the raw fingerprint, and stores no contact graph). `a` sends a
+  signed `ContactRequest` there; the recipient sees it in the Contacts
+  pane's **Requests** tab and accepts to open a DM. An echo-back makes
+  both sides converge over the relay. **No `huddle-server` change** — it's
+  a pure client convention over the existing protocol.
+
+- **DMs persist across restarts.** Pre-0.10, DMs (always encrypted) were
+  parked as "restorable" on restart and silently dropped relay-delivered
+  messages until reopened. Now DMs re-activate automatically at startup
+  (their key derives from your identity + the partner's stored pubkey, no
+  passphrase), so a conversation keeps flowing.
+
+- **Transport "doors" onto the relay (anti-censorship).** `huddle
+  transports` lists every door with its privacy tradeoff and whether it's
+  usable: **onion via system Tor** (default, most private), **onion via a
+  private obfs4/WebTunnel bridge** (for blocked-Tor networks), **onion via
+  in-process Arti** (`--features arti`), and **clearnet `wss://` / `ws://`
+  to a raw IP** (fast; the relay sees your IP, content stays E2E). The app
+  tries them in a fallback order (most private first) or a pinned one
+  (`--transport`). One `huddle-server` can serve an onion **and** a
+  clearnet IP simultaneously — same rooms, same mailboxes. New flags:
+  `--clearnet-server`, `--transport`, `--transport-order`, `--tor-bridge`.
+
+- **Per-chat transport indicator.** Every DM/group header shows whether
+  it's currently reaching peers `via lan`, `via relay`, or is `offline` —
+  status only, no manual switch, so the security context is always
+  legible. Settings → Network lists the doors + marks the active one.
+
+- **Clearnet relay needs no domain.** A raw-IP `ws://<ip>:<port>/ws` relay
+  works with zero extra setup (bind `huddle-server` to `0.0.0.0`, open the
+  port). `wss://` (TLS) adds transport encryption via a real cert (a free
+  subdomain + Caddy/Let's Encrypt, or Cloudflare Tunnel). This is the fast
+  lane a VPN user can take when they can't bootstrap Tor.
 
 ## What's new in 0.7.12 — self-review follow-ups to the 0.7.11 audit pass
 

@@ -37,44 +37,73 @@ pub fn render(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme) {
     )]));
     f.render_widget(title, vparts[0]);
 
+    // huddle 1.0: connection status — LAN discovery + relay both run
+    // automatically (no manual mode switch). Shows the live transport door.
+    let (lan_label, lan_style) = if app.libp2p_active() {
+        ("LAN ● on".to_string(), theme.ok())
+    } else {
+        ("LAN ○ off".to_string(), theme.dim())
+    };
+    let (relay_label, relay_style) = if app.handle.server_connected() {
+        (
+            format!(
+                "relay ● {}",
+                app.handle.active_transport_label().unwrap_or("connected")
+            ),
+            theme.ok(),
+        )
+    } else if app.handle.server_enabled() {
+        ("relay ○ connecting…".to_string(), theme.dim())
+    } else {
+        ("relay off".to_string(), theme.dim())
+    };
+
     let intro_lines = vec![
         Line::from(vec![Span::styled(
             "Welcome.",
             Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
         )]),
-        Line::raw(""),
         Line::from(vec![Span::styled(
-            "huddle is a terminal-native chat app — no servers, no accounts, end-to-end encrypted.",
+            "terminal-native · end-to-end encrypted · LAN + relay, automatic.",
             theme.dim(),
         )]),
-        Line::from(vec![Span::styled(
-            "Three parallel ways to connect: LAN (mDNS) · direct IP dial · invite link.",
-            theme.dim(),
-        )]),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(lan_label, lan_style),
+            Span::styled("    ", theme.dim()),
+            Span::styled(relay_label, relay_style),
+        ]),
         Line::raw(""),
         Line::from(vec![
             Span::styled("  m  ", theme.warn_style()),
-            Span::styled("start a DM with someone you know", theme.text_style()),
+            Span::styled("start a DM with a contact", theme.text_style()),
         ]),
         Line::from(vec![
             Span::styled("  g  ", theme.warn_style()),
             Span::styled("start a group room", theme.text_style()),
+        ]),
+        Line::from(vec![
+            Span::styled("  a  ", theme.warn_style()),
+            Span::styled("add a contact by HD-ID (works over the internet)", theme.text_style()),
         ]),
     ];
     f.render_widget(Paragraph::new(intro_lines), vparts[1]);
 
     let more_lines = vec![
         Line::from(vec![
-            Span::styled("  d  ", theme.warn_style()),
-            Span::styled("dial a peer by HD-ID + address (cross-network)", theme.text_style()),
+            Span::styled("  p  ", theme.warn_style()),
+            Span::styled("contacts + requests", theme.text_style()),
+            Span::raw("    "),
+            Span::styled("  v  ", theme.warn_style()),
+            Span::styled("paste invite", theme.text_style()),
         ]),
         Line::from(vec![
             Span::styled("  ,  ", theme.warn_style()),
             Span::styled("settings", theme.text_style()),
-            Span::raw("       "),
+            Span::raw("    "),
             Span::styled("  i  ", theme.warn_style()),
             Span::styled("QR / HD-ID", theme.text_style()),
-            Span::raw("       "),
+            Span::raw("    "),
             Span::styled("  Ctrl+P  ", theme.warn_style()),
             Span::styled("palette", theme.text_style()),
         ]),

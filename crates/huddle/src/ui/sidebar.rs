@@ -224,14 +224,17 @@ fn render_item<'a>(
             // sections retain the single-number form.
             if let SidebarSection::People = s {
                 let known = app.known_peers.len();
-                let pending = app.pending_requests.len();
-                if known > 0 || pending > 0 {
+                // huddle 1.0: fold relay contact requests + libp2p friend
+                // requests into one "N requests" badge so an incoming request
+                // is visible from the sidebar.
+                let requests = app.pending_requests.len() + app.pending_contact_requests.len();
+                if known > 0 || requests > 0 {
                     spans.push(Span::raw("  "));
                     spans.push(Span::styled(format!("({})", known), theme.dim()));
-                    if pending > 0 {
+                    if requests > 0 {
                         spans.push(Span::raw(" "));
                         spans.push(Span::styled(
-                            format!("{} pending", pending),
+                            format!("{} request{}", requests, if requests == 1 { "" } else { "s" }),
                             theme.unread(),
                         ));
                     }
@@ -459,7 +462,7 @@ fn section_label(s: SidebarSection) -> &'static str {
         SidebarSection::Profile => "Profile",
         SidebarSection::Direct => "Direct messages",
         SidebarSection::Group => "Group rooms",
-        SidebarSection::People => "People",
+        SidebarSection::People => "Contacts",
         SidebarSection::Activity => "Activity",
         SidebarSection::Settings => "Settings",
     }

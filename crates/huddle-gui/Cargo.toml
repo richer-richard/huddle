@@ -1,6 +1,6 @@
 [package]
 name = "huddle-gui"
-version = "0.9.2"
+version = "1.0.0"
 edition = "2021"
 description = "Native desktop GUI (egui/eframe) for huddle — end-to-end-encrypted chat over a Tor onion relay."
 license = "MIT OR Apache-2.0"
@@ -14,7 +14,7 @@ name = "huddle-gui"
 path = "src/main.rs"
 
 [dependencies]
-huddle-core = { path = "../huddle-core", version = "0.9.2" }
+huddle-core = { path = "../huddle-core", version = "1.0.0" }
 # libp2p must match huddle-core's 0.56 exactly — Multiaddr / PeerId cross
 # the AppHandle API (accept_inbound, dial_invite, AppEvent::InboundDial).
 libp2p = { version = "0.56", features = ["ed25519"] }

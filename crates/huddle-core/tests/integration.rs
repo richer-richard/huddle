@@ -215,8 +215,8 @@ async fn spawn_direct_node() -> (AppHandle, broadcast::Receiver<AppEvent>, Strin
         0,
         [0u8; 32],
         Vec::new(),
-        None, // integration tests run without the centralized server
-        None, // default Tor SOCKS (unused without a server URL)
+        // integration tests run without any relay door (libp2p only)
+        huddle_core::app::TransportConfig::default(),
     )
     .await
     .unwrap();

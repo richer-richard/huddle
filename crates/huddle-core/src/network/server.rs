@@ -79,17 +79,19 @@ impl ServerClient {
     /// Open a connection, send the initial `hello`, and return the client
     /// plus a stream of [`ServerEvent`]s.
     ///
-    /// - `url`: `ws://<onion>:80/ws` in production, or `ws://127.0.0.1:8787/ws` in tests.
-    /// - `socks`: `Some("127.0.0.1:9050")` to route through Tor (**required** for `.onion`);
-    ///   `None` to dial directly.
+    /// - `url`: `ws://<onion>:80/ws` (onion), `wss://relay/ws` (clearnet TLS),
+    ///   or `ws://host:port/ws` (clearnet plain / tests).
+    /// - `dial`: how to physically reach it — one of the transport "doors"
+    ///   (`Socks5` for onion via Tor, `Tls` for `wss://`, `Direct` for `ws://`).
     pub async fn connect(
         url: &str,
-        socks: Option<&str>,
+        dial: &crate::network::transport::DialMode,
         fingerprint: String,
         rooms: Vec<String>,
     ) -> Result<(Self, mpsc::UnboundedReceiver<ServerEvent>)> {
-        match socks {
-            Some(proxy) => {
+        use crate::network::transport::DialMode;
+        match dial {
+            DialMode::Socks5 { proxy } => {
                 let proxy: std::net::SocketAddr = proxy
                     .parse()
                     .map_err(|e| HuddleError::Network(format!("bad socks address: {e}")))?;
@@ -102,10 +104,45 @@ impl ServerClient {
                     .map_err(|e| HuddleError::Network(format!("ws handshake: {e}")))?;
                 Ok(Self::spawn(ws, fingerprint, rooms))
             }
-            None => {
+            // Plain `ws://` and `wss://` with the system trust store both go
+            // through `connect_async`, which negotiates TLS from the URL
+            // scheme (tokio-tungstenite's rustls-tls-native-roots feature).
+            DialMode::Direct | DialMode::Tls { pinned_cert_der: None } => {
                 let (ws, _resp) = tokio_tungstenite::connect_async(url)
                     .await
                     .map_err(|e| HuddleError::Network(format!("ws connect: {e}")))?;
+                Ok(Self::spawn(ws, fingerprint, rooms))
+            }
+            // Self-signed cert pinning is structured but not wired in this
+            // build — the recommended clearnet-TLS path uses a real cert
+            // (Caddy / Let's Encrypt / Cloudflare), which the arm above
+            // handles. Onion doors remain available for stronger privacy.
+            DialMode::Tls {
+                pinned_cert_der: Some(_),
+            } => Err(HuddleError::Network(
+                "pinned-certificate wss is not supported in this build — use a real cert (Caddy/Let's Encrypt) or an onion door".into(),
+            )),
+            // huddle 1.0: in-process Tor via Arti. Bootstraps (once) an
+            // embedded Tor client and opens the stream to the onion through
+            // it, then speaks WebSocket over that stream — `spawn` is reused.
+            #[cfg(feature = "arti")]
+            DialMode::Arti { bridge } => {
+                let client =
+                    crate::network::transport::arti_client(bridge.as_deref()).await?;
+                let hp = host_port_from_ws_url(url)?;
+                let (host, port_s) = hp.rsplit_once(':').ok_or_else(|| {
+                    HuddleError::Network(format!("bad host:port from {url}"))
+                })?;
+                let port: u16 = port_s
+                    .parse()
+                    .map_err(|_| HuddleError::Network(format!("bad port in {url}")))?;
+                let stream = client
+                    .connect((host, port))
+                    .await
+                    .map_err(|e| HuddleError::Network(format!("arti connect: {e}")))?;
+                let (ws, _resp) = tokio_tungstenite::client_async(url, stream)
+                    .await
+                    .map_err(|e| HuddleError::Network(format!("ws handshake: {e}")))?;
                 Ok(Self::spawn(ws, fingerprint, rooms))
             }
         }
@@ -223,14 +260,17 @@ impl ServerClient {
     }
 }
 
-/// Extract `host:port` from a `ws://`/`wss://` URL for the SOCKS target,
-/// defaulting to port 80 when none is given (matches the onion's
-/// `HiddenServicePort 80`).
+/// Extract `host:port` from a `ws://`/`wss://` URL for the SOCKS target.
+/// Defaults to port 80 for `ws://` (matches the onion's `HiddenServicePort
+/// 80`) and 443 for `wss://` when no explicit port is given.
 fn host_port_from_ws_url(url: &str) -> Result<String> {
-    let rest = url
-        .strip_prefix("ws://")
-        .or_else(|| url.strip_prefix("wss://"))
-        .ok_or_else(|| HuddleError::Network(format!("expected ws:// url, got {url}")))?;
+    let (rest, default_port) = if let Some(r) = url.strip_prefix("wss://") {
+        (r, 443)
+    } else if let Some(r) = url.strip_prefix("ws://") {
+        (r, 80)
+    } else {
+        return Err(HuddleError::Network(format!("expected ws:// url, got {url}")));
+    };
     let authority = rest.split('/').next().unwrap_or(rest);
     if authority.is_empty() {
         return Err(HuddleError::Network(format!("no host in url: {url}")));
@@ -238,7 +278,7 @@ fn host_port_from_ws_url(url: &str) -> Result<String> {
     if authority.contains(':') {
         Ok(authority.to_string())
     } else {
-        Ok(format!("{authority}:80"))
+        Ok(format!("{authority}:{default_port}"))
     }
 }
 
@@ -254,6 +294,8 @@ mod tests {
             "127.0.0.1:8787"
         );
         assert_eq!(host_port_from_ws_url("wss://h:443").unwrap(), "h:443");
+        // huddle 1.0: bare wss:// defaults to 443, not 80.
+        assert_eq!(host_port_from_ws_url("wss://relay.example/ws").unwrap(), "relay.example:443");
         assert!(host_port_from_ws_url("http://x").is_err());
     }
 }

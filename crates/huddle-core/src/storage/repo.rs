@@ -745,6 +745,117 @@ pub fn is_fingerprint_trusted(db: &Db, fingerprint: &str) -> Result<bool> {
 }
 
 // =========================================================================
+// huddle 1.0: Contacts — the durable, fingerprint-keyed address book
+// =========================================================================
+
+#[derive(Debug, Clone)]
+pub struct Contact {
+    pub fingerprint: String,
+    pub alias: Option<String>,
+    pub ed25519_pubkey: Option<String>,
+    pub dm_room_id: Option<String>,
+    pub source: String,
+    pub note: Option<String>,
+    pub added_at: i64,
+    pub last_seen: Option<i64>,
+}
+
+fn row_to_contact(row: &rusqlite::Row) -> rusqlite::Result<Contact> {
+    Ok(Contact {
+        fingerprint: row.get(0)?,
+        alias: row.get(1)?,
+        ed25519_pubkey: row.get(2)?,
+        dm_room_id: row.get(3)?,
+        source: row.get(4)?,
+        note: row.get(5)?,
+        added_at: row.get(6)?,
+        last_seen: row.get(7)?,
+    })
+}
+
+/// Insert or fill-in a contact. Existing non-NULL fields are preserved
+/// (COALESCE) so a later, sparser upsert never erases an alias / pubkey we
+/// already learned; `last_seen` advances when provided and `source` is set
+/// only on first insert. Use `set_contact_alias` to deliberately change an
+/// alias.
+pub fn upsert_contact(db: &Db, c: &Contact) -> Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "INSERT INTO contacts (fingerprint, alias, ed25519_pubkey, dm_room_id, source, note, added_at, last_seen)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(fingerprint) DO UPDATE SET
+           alias = COALESCE(excluded.alias, contacts.alias),
+           ed25519_pubkey = COALESCE(excluded.ed25519_pubkey, contacts.ed25519_pubkey),
+           dm_room_id = COALESCE(excluded.dm_room_id, contacts.dm_room_id),
+           note = COALESCE(excluded.note, contacts.note),
+           last_seen = COALESCE(excluded.last_seen, contacts.last_seen)",
+        params![
+            c.fingerprint,
+            c.alias,
+            c.ed25519_pubkey,
+            c.dm_room_id,
+            c.source,
+            c.note,
+            c.added_at,
+            c.last_seen,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn get_contact(db: &Db, fingerprint: &str) -> Result<Option<Contact>> {
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare(
+        "SELECT fingerprint, alias, ed25519_pubkey, dm_room_id, source, note, added_at, last_seen
+         FROM contacts WHERE fingerprint = ?1",
+    )?;
+    let mut rows = stmt.query_map(params![fingerprint], row_to_contact)?;
+    match rows.next() {
+        Some(r) => Ok(Some(r?)),
+        None => Ok(None),
+    }
+}
+
+pub fn list_contacts(db: &Db) -> Result<Vec<Contact>> {
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare(
+        "SELECT fingerprint, alias, ed25519_pubkey, dm_room_id, source, note, added_at, last_seen
+         FROM contacts ORDER BY COALESCE(last_seen, added_at) DESC",
+    )?;
+    let rows = stmt.query_map([], row_to_contact)?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+pub fn delete_contact(db: &Db, fingerprint: &str) -> Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute("DELETE FROM contacts WHERE fingerprint = ?1", params![fingerprint])?;
+    Ok(())
+}
+
+pub fn is_contact(db: &Db, fingerprint: &str) -> Result<bool> {
+    let conn = db.lock().unwrap();
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM contacts WHERE fingerprint = ?1",
+            params![fingerprint],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    Ok(count > 0)
+}
+
+/// Deliberately set (or clear, with None) a contact's user-chosen alias.
+/// Unlike `upsert_contact`, this overwrites — it's the explicit edit path.
+pub fn set_contact_alias(db: &Db, fingerprint: &str, alias: Option<&str>) -> Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "UPDATE contacts SET alias = ?2 WHERE fingerprint = ?1",
+        params![fingerprint, alias],
+    )?;
+    Ok(())
+}
+
+// =========================================================================
 // huddle 0.7.7: pending friend requests
 // =========================================================================
 
@@ -820,6 +931,72 @@ pub fn cleanup_expired_pending_friend_requests(db: &Db, now: i64) -> Result<usiz
     let conn = db.lock().unwrap();
     let removed = conn.execute(
         "DELETE FROM pending_friend_requests WHERE received_at < ?1",
+        params![cutoff],
+    )?;
+    Ok(removed)
+}
+
+// =========================================================================
+// huddle 1.0: pending contact requests (relay inbox — Phase 1)
+// =========================================================================
+
+/// An inbound contact/DM request that arrived over the relay inbox but
+/// hasn't been accepted/declined yet. Keyed by fingerprint (relay requests
+/// carry no dialable address — just the requester's signed identity). Shares
+/// the 3-day [`PENDING_FRIEND_REQUEST_TTL_SECS`] sweep.
+#[derive(Debug, Clone)]
+pub struct PendingContactRequest {
+    pub fingerprint: String,
+    pub display_name: Option<String>,
+    pub note: Option<String>,
+    pub received_at: i64,
+}
+
+pub fn upsert_pending_contact_request(db: &Db, req: &PendingContactRequest) -> Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "INSERT INTO pending_contact_requests (fingerprint, display_name, note, received_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(fingerprint) DO UPDATE SET
+           display_name = COALESCE(excluded.display_name, pending_contact_requests.display_name),
+           note = COALESCE(excluded.note, pending_contact_requests.note),
+           received_at = excluded.received_at",
+        params![req.fingerprint, req.display_name, req.note, req.received_at],
+    )?;
+    Ok(())
+}
+
+pub fn list_pending_contact_requests(db: &Db) -> Result<Vec<PendingContactRequest>> {
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare(
+        "SELECT fingerprint, display_name, note, received_at
+         FROM pending_contact_requests ORDER BY received_at DESC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(PendingContactRequest {
+            fingerprint: row.get(0)?,
+            display_name: row.get(1)?,
+            note: row.get(2)?,
+            received_at: row.get(3)?,
+        })
+    })?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+pub fn delete_pending_contact_request(db: &Db, fingerprint: &str) -> Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "DELETE FROM pending_contact_requests WHERE fingerprint = ?1",
+        params![fingerprint],
+    )?;
+    Ok(())
+}
+
+pub fn cleanup_expired_pending_contact_requests(db: &Db, now: i64) -> Result<usize> {
+    let cutoff = now.saturating_sub(PENDING_FRIEND_REQUEST_TTL_SECS);
+    let conn = db.lock().unwrap();
+    let removed = conn.execute(
+        "DELETE FROM pending_contact_requests WHERE received_at < ?1",
         params![cutoff],
     )?;
     Ok(removed)

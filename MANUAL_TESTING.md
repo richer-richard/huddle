@@ -356,6 +356,57 @@ move `~/Library/Application Support/huddle` (macOS) / `~/.local/share/huddle`
       "username `X` is ambiguous (2 peers share it) — use their
       HD- ID instead".
 
+## 23. huddle 1.0 — LAN + relay both on by default
+
+- [ ] Launch with NO flags. The Welcome pane shows a status line with
+      both `LAN ● on` and `relay ● <door>` (once Tor connects). The
+      sidebar's bottom-left shows the relay door; the Profile row shows a
+      NAT badge too (libp2p is running).
+- [ ] Stop Tor (`systemctl stop tor`), relaunch. `relay ○ connecting…`
+      but two machines on the same Wi-Fi still discover each other and
+      chat over LAN — the app is useful with no Tor at all.
+
+## 24. huddle 1.0 — add a contact by HD-ID over the internet
+
+- [ ] A and B on **different** networks (no shared LAN), both on the
+      default relay. On A press `a`, paste B's full `HD-…` ID, Enter.
+      Status: "contact request sent to HD-… — opens a DM when they accept".
+- [ ] On B (even if B was offline and just launched), open the Contacts
+      pane (`p`). The **Contact requests** tab shows A. Press `a` to accept.
+- [ ] A DM opens on both sides; messages flow over the relay. Confirm the
+      DM header shows `via relay`.
+- [ ] Decline path: repeat, press `r` on B — the request disappears and no
+      DM opens.
+
+## 25. huddle 1.0 — DM persists across restart
+
+- [ ] With the DM from scenario 24 established, quit A (`q`, `y`) and
+      relaunch. The DM is still in the sidebar's Direct messages section
+      without reopening it.
+- [ ] From B, send a message. A receives it immediately on the restarted
+      client (pre-1.0 this was silently dropped until manual reopen).
+
+## 26. huddle 1.0 — transport doors + clearnet relay
+
+- [ ] `huddle transports` prints all five doors with AVAILABLE/unavailable
+      + each one's privacy tradeoff, in the order they'd be tried.
+- [ ] Self-host a clearnet relay: on the VPS, `HUDDLE_SERVER_BIND=0.0.0.0:8787
+      huddle-server` and open the port. On a client:
+      `huddle --clearnet-server ws://<vps-ip>:8787/ws --transport clearnet-ws`.
+      Settings → Network shows `Relay ● connected · Clearnet plain (ws)`,
+      and chat works without Tor.
+- [ ] Pin/fallback: `--transport onion-tor` forces the onion door; with Tor
+      down and a clearnet URL set, the default order falls through to the
+      clearnet door automatically (watch `huddle.log`).
+
+## 27. huddle 1.0 — per-chat transport indicator
+
+- [ ] Open a DM with a peer on the same LAN — the header shows `via lan`.
+- [ ] Move that peer off the LAN (different network) while keeping the relay
+      up — the same DM's header flips to `via relay`, and chat keeps working.
+- [ ] With neither a direct connection nor the relay, the header shows
+      `offline` (messages still save locally).
+
 ## Troubleshooting
 
 - **Peers don't discover** — same-subnet? Some Wi-Fi networks have AP

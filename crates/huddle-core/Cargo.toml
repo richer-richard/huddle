@@ -1,6 +1,6 @@
 [package]
 name = "huddle-core"
-version = "0.9.2"
+version = "1.0.0"
 edition = "2021"
 description = "Protocol, networking, crypto, and storage layer for huddle — a decentralized terminal chat app."
 license = "MIT OR Apache-2.0"
@@ -9,6 +9,13 @@ homepage = "https://github.com/richer-richard/huddle"
 readme = "README.md"
 keywords = ["chat", "p2p", "libp2p", "mdns", "encryption"]
 categories = ["network-programming", "cryptography"]
+
+[features]
+default = []
+# huddle 1.0: in-process Tor via Arti — the `onion-arti` transport door.
+# Heavy (~150 transitive crates, minutes of cold build, ~10-15 MB binary),
+# so it's strictly opt-in. The default build never pulls arti.
+arti = ["dep:arti-client", "dep:tor-rtcompat"]
 
 [dependencies]
 libp2p = { version = "0.56", features = [
@@ -26,7 +33,10 @@ libp2p = { version = "0.56", features = [
 # server is reachable only as a Tor v3 onion, so we dial it through Tor's
 # local SOCKS5 proxy (tokio-socks) and speak WebSocket over that stream
 # (tokio-tungstenite, version-matched to the server crate).
-tokio-tungstenite = "0.24"
+# huddle 1.0: `rustls-tls-native-roots` enables `wss://` to a clearnet
+# relay using the system trust store (real certs via Caddy / Let's Encrypt /
+# Cloudflare) — the TLS "door" alongside the onion ones.
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
 tokio-socks = "0.5"
 vodozemac = "0.10"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
@@ -52,6 +62,19 @@ x25519-dalek = { version = "2", features = ["static_secrets"] }
 # secret, and the master-passphrase-derived DB key — anywhere a secret
 # byte slice would otherwise linger on the heap until the next alloc.
 zeroize = { version = "1", features = ["derive"] }
+# huddle 1.0: in-process Tor (Arti) for the `onion-arti` door. Optional;
+# only compiled under `--features arti`. rustls matches our existing TLS
+# stack; onion-service-client lets the client dial `.onion` services.
+arti-client = { version = "0.42", optional = true, default-features = false, features = [
+    "tokio",
+    "rustls",
+    "onion-service-client",
+    "compression",
+] }
+tor-rtcompat = { version = "0.42", optional = true, default-features = false, features = [
+    "tokio",
+    "rustls",
+] }
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

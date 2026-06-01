@@ -141,6 +141,31 @@ pub fn tor_socks() -> Option<String> {
     parse_scalar(&std::fs::read_to_string(config_path()).ok()?, "tor_socks")
 }
 
+/// huddle 1.0: optional clearnet relay URL — a `ws://<ip>:<port>/ws` or
+/// `wss://host/ws` door onto the SAME relay backend as the onion. Lets users
+/// behind a VPN (or where Tor is blocked) reach the relay directly and fast.
+/// The scheme decides which clearnet door (plain / TLS) is used.
+///
+/// ```toml
+/// clearnet_url = "ws://203.0.113.7:8787/ws"
+/// ```
+/// `--clearnet-server` overrides this. `None` if absent.
+pub fn clearnet_url() -> Option<String> {
+    parse_scalar(&std::fs::read_to_string(config_path()).ok()?, "clearnet_url")
+}
+
+/// huddle 1.0: optional Tor bridge line for the bridge door (to reach Tor
+/// where it's blocked). With the `arti` build this is passed to the embedded
+/// Tor; otherwise it documents that your system Tor should carry this bridge.
+///
+/// ```toml
+/// tor_bridge = "obfs4 1.2.3.4:443 <FINGERPRINT> cert=... iat-mode=0"
+/// ```
+/// `--tor-bridge` overrides this. `None` if absent.
+pub fn tor_bridge() -> Option<String> {
+    parse_scalar(&std::fs::read_to_string(config_path()).ok()?, "tor_bridge")
+}
+
 /// Extract a top-level `key = "value"` string from a config body. Honors
 /// the same header-less, inline-comment-stripping conventions as
 /// `parse_relays`. Section headers and unrelated keys fall through.

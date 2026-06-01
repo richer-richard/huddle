@@ -135,13 +135,20 @@ async fn build_inner(ctx: egui::Context, params: BuildParams) -> Result<ReadyPar
         }
     };
 
+    // huddle 1.0: the relay is reached through transport "doors". The GUI
+    // keeps its onion + SOCKS config; clearnet / bridge / Arti doors fall back
+    // to config.toml + defaults (a future GUI pass can surface them).
+    let transports = huddle_core::app::TransportConfig {
+        onion_url: params.server_url,
+        tor_socks: params.tor_socks,
+        ..Default::default()
+    };
     let handle = AppHandle::start_with_options(
         mode,
         params.port,
         key.as_ref(),
         params.relays,
-        params.server_url,
-        params.tor_socks,
+        transports,
     )
     .await
     .map_err(|e| e.to_string())?;

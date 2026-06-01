@@ -84,6 +84,15 @@ fn render_header(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme, room_id
     } else {
         spans.push(Span::styled("public", theme.ok()));
     }
+    // huddle 1.0: per-chat transport indicator (status only — the app picks
+    // the path automatically).
+    spans.push(Span::raw("  ·  "));
+    let (tlabel, tstyle) = match app.handle.room_transport(room_id) {
+        huddle_core::app::RoomTransport::LanDirect => ("via lan", theme.ok()),
+        huddle_core::app::RoomTransport::Relay => ("via relay", theme.warn_style()),
+        huddle_core::app::RoomTransport::Offline => ("offline", theme.dim()),
+    };
+    spans.push(Span::styled(tlabel, tstyle));
     if muted {
         spans.push(Span::raw("  "));
         spans.push(Span::styled("(muted)", theme.dim()));

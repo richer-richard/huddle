@@ -47,6 +47,11 @@ pub enum Action {
     PendingRequestDown,
     PendingRequestAccept,
     PendingRequestReject,
+    /// huddle 1.0: relay-inbox contact-request row navigation + accept/decline.
+    ContactRequestUp,
+    ContactRequestDown,
+    ContactRequestAccept,
+    ContactRequestReject,
     /// huddle 0.7.7: InvitePicker actions.
     OpenInvitePicker,
     InvitePickerCursorUp,
@@ -775,6 +780,18 @@ fn map_sidebar(key: KeyEvent, app: &TuiApp) -> Action {
             KeyCode::Char('r') => return Action::PendingRequestReject,
             KeyCode::Char('j') | KeyCode::Down => return Action::PendingRequestDown,
             KeyCode::Char('k') | KeyCode::Up => return Action::PendingRequestUp,
+            _ => {}
+        }
+    }
+    // huddle 1.0: relay-inbox contact-request sublist bindings. `a` Accept
+    // (opens the DM), `r` Decline. Same shape as Pending; the focus tab
+    // disambiguates the overlapping `a`/`r` letters.
+    if matches!(app.pane, Pane::People) && app.people_focus == PeopleFocus::ContactRequests {
+        match key.code {
+            KeyCode::Char('a') | KeyCode::Enter => return Action::ContactRequestAccept,
+            KeyCode::Char('r') => return Action::ContactRequestReject,
+            KeyCode::Char('j') | KeyCode::Down => return Action::ContactRequestDown,
+            KeyCode::Char('k') | KeyCode::Up => return Action::ContactRequestUp,
             _ => {}
         }
     }

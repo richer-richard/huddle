@@ -192,4 +192,38 @@ pub const MIGRATIONS: &[&str] = &[
     );",
     "CREATE INDEX IF NOT EXISTS idx_pending_friend_requests_received
        ON pending_friend_requests(received_at);",
+    // huddle 1.0: a unified, fingerprint-keyed address book. Unlike
+    // `known_peers` (keyed by an ephemeral libp2p multiaddr, useless once a
+    // peer leaves the LAN), a contact is keyed by the stable cryptographic
+    // identity, so it survives network changes — the durable link that lets
+    // two people keep chatting over the relay after the LAN is gone.
+    // `username`/`verified`/`trusted` are NOT denormalized here — they're
+    // derived at read time from `peer_profiles` / `verified_peers` /
+    // `known_peers` so they can't go stale. `ed25519_pubkey` is cached so a
+    // DM key can be re-derived offline. `dm_room_id` is the canonical DM
+    // room. `source` records how the contact entered the book
+    // (dm/request/dial/lan/invite).
+    "CREATE TABLE IF NOT EXISTS contacts (
+        fingerprint     TEXT PRIMARY KEY,
+        alias           TEXT,
+        ed25519_pubkey  TEXT,
+        dm_room_id      TEXT,
+        source          TEXT NOT NULL DEFAULT 'unknown',
+        note            TEXT,
+        added_at        INTEGER NOT NULL,
+        last_seen       INTEGER
+    );",
+    // huddle 1.0: inbound contact/DM requests that arrived over the relay
+    // inbox (Phase 1) but haven't been accepted/declined yet. Mirrors the
+    // `pending_friend_requests` shape (a 3-day TTL sweep keeps it bounded)
+    // but is keyed purely by fingerprint — relay requests carry no dialable
+    // address, just the requester's signed identity.
+    "CREATE TABLE IF NOT EXISTS pending_contact_requests (
+        fingerprint   TEXT PRIMARY KEY,
+        display_name  TEXT,
+        note          TEXT,
+        received_at   INTEGER NOT NULL
+    );",
+    "CREATE INDEX IF NOT EXISTS idx_pending_contact_requests_received
+       ON pending_contact_requests(received_at);",
 ];
