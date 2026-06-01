@@ -2,3 +2,9 @@
 
 # local planning notes (kept out of git)
 plan.md
+
+# local SQLite database (runtime state, not for git)
+huddle-server.db
+huddle-server.db-wal
+huddle-server.db-shm
+huddle-server.db-journal
