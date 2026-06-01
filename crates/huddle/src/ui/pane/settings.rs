@@ -135,7 +135,7 @@ fn render_network<'a>(app: &TuiApp, theme: &Theme) -> Vec<Line<'a>> {
         )
     } else {
         (
-            "off  ·  opt in with --mode mdns|direct".to_string(),
+            "off  ·  toggle LAN mDNS below, then restart".to_string(),
             theme.dim(),
         )
     };
@@ -154,21 +154,25 @@ fn render_network<'a>(app: &TuiApp, theme: &Theme) -> Vec<Line<'a>> {
         theme.dim(),
     )]));
 
+    // huddle 0.9.1: the mDNS toggle now drives the NEXT launch's transport
+    // (relay-only vs relay + LAN together), so show it whether or not a
+    // swarm is currently up — that's how you opt in from relay-only mode.
+    lines.push(Line::raw(""));
+    let mdns_on = app.handle.mdns_enabled();
+    lines.push(row(
+        theme,
+        "M",
+        "LAN discovery (mDNS)",
+        if mdns_on {
+            "on  ·  relay + LAN   (restart to apply)"
+        } else {
+            "off ·  relay only    (restart to apply)"
+        }
+        .into(),
+    ));
+
     // The rest is libp2p-specific; only meaningful when a swarm is up.
     if libp2p {
-        lines.push(Line::raw(""));
-        let mdns_on = app.handle.mdns_enabled();
-        lines.push(row(
-            theme,
-            "M",
-            "LAN discovery (mDNS)",
-            if mdns_on {
-                "on  ·  restart to apply changes"
-            } else {
-                "off · restart to apply changes"
-            }
-            .into(),
-        ));
         lines.push(Line::raw(""));
         let nat = match app.nat_status.as_deref() {
             Some("reachable") => "reachable",

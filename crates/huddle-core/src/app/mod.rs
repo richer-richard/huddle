@@ -263,18 +263,23 @@ impl AppHandle {
     }
 
     /// huddle 0.7.8: peek the persisted `mdns_enabled` setting without
-    /// starting the full AppHandle. Called by `main.rs` before
-    /// `start_with_options` so the initial `NetworkMode` reflects the
-    /// user's saved preference (the CLI `--mode` flag, when present,
-    /// still wins — `main.rs` only calls this if `--mode` is absent).
-    /// Returns `true` if the key is missing (default ON, preserving
-    /// pre-0.7.8 behavior).
+    /// starting the full AppHandle. Called by the client (`main.rs` /
+    /// huddle-gui) before `start_with_options` so the initial
+    /// `NetworkMode` reflects the user's saved preference — the in-app
+    /// "run LAN mDNS alongside the relay" toggle. The CLI `--mode` flag,
+    /// when present, still wins; clients only consult this when `--mode`
+    /// is absent.
+    ///
+    /// huddle 0.9.1: defaults **OFF** when unset. Since 0.8 the relay-only
+    /// `Server` mode is the default and libp2p is strictly opt-in, so an
+    /// unset preference must mean "no LAN swarm". (Pre-0.7.8 this defaulted
+    /// ON; that default predated the onion relay becoming the baseline.)
     pub fn peek_mdns_enabled(master_key: Option<&[u8; 32]>) -> Result<bool> {
         config::ensure_data_dir()?;
         let db = storage::open_db(&config::db_path(), master_key)?;
         let v = repo::get_setting(&db, "mdns_enabled")?
             .map(|s| s == "1")
-            .unwrap_or(true);
+            .unwrap_or(false);
         Ok(v)
     }
 
@@ -3786,20 +3791,21 @@ impl AppHandle {
         repo::set_setting(&self.db, "verified_only_inbound", if on { "1" } else { "0" })
     }
 
-    /// huddle 0.7.8: persisted LAN-discovery toggle. When true, the
-    /// next launch starts in `NetworkMode::Mdns` so the device joins
-    /// LAN mDNS announcements. When false, the next launch starts in
-    /// `NetworkMode::Direct` — invisible to LAN broadcast; only direct
-    /// dial / invite link / configured relays can establish a peer.
-    /// Default ON so existing users see no behavior change. Restart
-    /// required to apply (libp2p's `Toggle<Mdns>` flip would require a
-    /// behaviour rebuild; not worth the complexity for a rarely-touched
-    /// setting).
+    /// huddle 0.7.8: persisted LAN-discovery toggle. When true, the next
+    /// launch starts in `NetworkMode::Mdns` so the device joins LAN mDNS
+    /// announcements **alongside** the onion relay (both transports run
+    /// together). When false, the next launch starts relay-only
+    /// (`NetworkMode::Server`).
+    ///
+    /// huddle 0.9.1: default **OFF** (was ON pre-onion-relay) — the
+    /// relay-only `Server` mode is the 0.8+ baseline, so the toggle is a
+    /// true opt-in. Restart required to apply (a live `Toggle<Mdns>` flip
+    /// would require rebuilding the libp2p behaviour).
     pub fn mdns_enabled(&self) -> bool {
         repo::get_setting(&self.db, "mdns_enabled")
             .unwrap_or(None)
             .map(|v| v == "1")
-            .unwrap_or(true)
+            .unwrap_or(false)
     }
 
     pub fn set_mdns_enabled(&self, on: bool) -> Result<()> {

@@ -121,10 +121,10 @@ async fn main() -> Result<()> {
     app::install_panic_hook();
 
     let cli_mode_explicit = cli.mode.is_some();
-    // huddle 0.8: default to `Server` — the Tor-onion relay is the sole
-    // transport and no libp2p swarm starts. `--mode mdns|direct` opts back
-    // into libp2p (running alongside the relay) for LAN / direct dial.
-    let mode = cli.mode.unwrap_or(NetworkMode::Server);
+    // huddle 0.9.1: the startup mode is resolved AFTER the master key is
+    // available (below), so we can honor the persisted in-app mDNS toggle
+    // without the user hand-editing config.toml. `--mode`, when given, still
+    // wins; the welcome card is skipped for explicit-mode launches.
 
     // Skip the welcome card if a mode was given explicitly — power users
     // who script `--mode direct` don't want a prompt in the way.
@@ -172,6 +172,21 @@ async fn main() -> Result<()> {
         (Some(key), prompt.username)
     };
 
+    // huddle 0.9.1: resolve the startup network mode. An explicit `--mode`
+    // wins; otherwise honor the persisted in-app "run LAN mDNS alongside the
+    // relay" toggle (Settings → Network). `Mdns` runs libp2p AND the onion
+    // relay together; `Server` (the default when the toggle is off) is
+    // relay-only.
+    let mode = if let Some(m) = cli.mode {
+        m
+    } else if huddle_core::app::AppHandle::peek_mdns_enabled(master_key.as_ref())
+        .unwrap_or(false)
+    {
+        NetworkMode::Mdns
+    } else {
+        NetworkMode::Server
+    };
+
     // Phase D: assemble the relay multiaddr list. CLI flags override
     // config.toml. `--no-relay` wins over everything else.
     let relays: Vec<Multiaddr> = if cli.no_relay {
@@ -192,10 +207,9 @@ async fn main() -> Result<()> {
         parsed
     };
 
-    // huddle 0.8: libp2p is now strictly opt-in via `--mode mdns|direct`.
-    // The persisted `mdns_enabled` toggle no longer auto-starts a libp2p
-    // swarm (it only matters once you've opted in), so the startup mode is
-    // exactly what the CLI resolved above — `Server` by default.
+    // huddle 0.9.1: libp2p is opt-in either via `--mode mdns|direct` OR the
+    // persisted in-app mDNS toggle (resolved into `mode` above). When on,
+    // the libp2p swarm runs alongside the onion relay; otherwise relay-only.
 
     // huddle 0.8: resolve the centralized-server URL. `--no-server` wins;
     // otherwise precedence is `--server` flag → config.toml `server_url` →
