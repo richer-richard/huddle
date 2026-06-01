@@ -121,7 +121,7 @@ async fn main() -> Result<()> {
     app::install_panic_hook();
 
     let cli_mode_explicit = cli.mode.is_some();
-    // huddle 0.9.1: the startup mode is resolved AFTER the master key is
+    // huddle 0.9.2: the startup mode is resolved AFTER the master key is
     // available (below), so we can honor the persisted in-app mDNS toggle
     // without the user hand-editing config.toml. `--mode`, when given, still
     // wins; the welcome card is skipped for explicit-mode launches.
@@ -172,7 +172,7 @@ async fn main() -> Result<()> {
         (Some(key), prompt.username)
     };
 
-    // huddle 0.9.1: resolve the startup network mode. An explicit `--mode`
+    // huddle 0.9.2: resolve the startup network mode. An explicit `--mode`
     // wins; otherwise honor the persisted in-app "run LAN mDNS alongside the
     // relay" toggle (Settings → Network). `Mdns` runs libp2p AND the onion
     // relay together; `Server` (the default when the toggle is off) is
@@ -207,7 +207,7 @@ async fn main() -> Result<()> {
         parsed
     };
 
-    // huddle 0.9.1: libp2p is opt-in either via `--mode mdns|direct` OR the
+    // huddle 0.9.2: libp2p is opt-in either via `--mode mdns|direct` OR the
     // persisted in-app mDNS toggle (resolved into `mode` above). When on,
     // the libp2p swarm runs alongside the onion relay; otherwise relay-only.
 

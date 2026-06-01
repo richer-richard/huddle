@@ -154,7 +154,7 @@ fn render_network<'a>(app: &TuiApp, theme: &Theme) -> Vec<Line<'a>> {
         theme.dim(),
     )]));
 
-    // huddle 0.9.1: the mDNS toggle now drives the NEXT launch's transport
+    // huddle 0.9.2: the mDNS toggle now drives the NEXT launch's transport
     // (relay-only vs relay + LAN together), so show it whether or not a
     // swarm is currently up — that's how you opt in from relay-only mode.
     lines.push(Line::raw(""));

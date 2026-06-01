@@ -270,7 +270,7 @@ impl AppHandle {
     /// when present, still wins; clients only consult this when `--mode`
     /// is absent.
     ///
-    /// huddle 0.9.1: defaults **OFF** when unset. Since 0.8 the relay-only
+    /// huddle 0.9.2: defaults **OFF** when unset. Since 0.8 the relay-only
     /// `Server` mode is the default and libp2p is strictly opt-in, so an
     /// unset preference must mean "no LAN swarm". (Pre-0.7.8 this defaulted
     /// ON; that default predated the onion relay becoming the baseline.)
@@ -3797,7 +3797,7 @@ impl AppHandle {
     /// together). When false, the next launch starts relay-only
     /// (`NetworkMode::Server`).
     ///
-    /// huddle 0.9.1: default **OFF** (was ON pre-onion-relay) — the
+    /// huddle 0.9.2: default **OFF** (was ON pre-onion-relay) — the
     /// relay-only `Server` mode is the 0.8+ baseline, so the toggle is a
     /// true opt-in. Restart required to apply (a live `Toggle<Mdns>` flip
     /// would require rebuilding the libp2p behaviour).
