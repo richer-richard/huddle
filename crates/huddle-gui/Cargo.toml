@@ -1,0 +1,37 @@
+[package]
+name = "huddle-gui"
+version = "0.9.0"
+edition = "2021"
+description = "Native desktop GUI (egui/eframe) for huddle — end-to-end-encrypted chat over a Tor onion relay."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/richer-richard/huddle"
+homepage = "https://github.com/richer-richard/huddle"
+keywords = ["chat", "gui", "egui", "tor", "encryption"]
+categories = ["gui", "network-programming"]
+
+[[bin]]
+name = "huddle-gui"
+path = "src/main.rs"
+
+[dependencies]
+huddle-core = { path = "../huddle-core", version = "0.9.0" }
+# libp2p must match huddle-core's 0.56 exactly — Multiaddr / PeerId cross
+# the AppHandle API (accept_inbound, dial_invite, AppEvent::InboundDial).
+libp2p = { version = "0.56", features = ["ed25519"] }
+tokio = { version = "1", features = ["full"] }
+# Cross-thread UI inbox: crossbeam's Receiver is Send + Sync (std::mpsc's
+# Receiver is !Sync, awkward to stash on the eframe App).
+crossbeam-channel = "0.5"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+dirs = "6"
+base64 = "0.22"
+# Identity QR (same crate the TUI uses).
+qrcode = "0.14"
+eframe = "0.34.3"
+egui = "0.34.3"
+egui_extras = "0.34.3"
+rfd = "0.17.2"

@@ -4,4 +4,5 @@ members = [
     "crates/huddle-core",
     "crates/huddle",
     "crates/huddle-server",
+    "crates/huddle-gui",
 ]
