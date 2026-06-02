@@ -6,6 +6,7 @@ description = "Native desktop GUI (egui/eframe) for huddle — end-to-end-encryp
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/richer-richard/huddle"
 homepage = "https://github.com/richer-richard/huddle"
+readme = "README.md"
 keywords = ["chat", "gui", "egui", "tor", "encryption"]
 categories = ["gui", "network-programming"]
 

@@ -92,7 +92,7 @@ cargo build --release
 
 ```
 +----------------------------------------------------------------------+
-| huddle 0.9.0  ·  745e-fe8a-…  ·  relay ●               12:34 UTC     |
+| huddle 1.0.0  ·  745e-fe8a-…  ·  relay ●               12:34 UTC     |
 +------------------------+---------------------------------------------+
 | ▾ Profile              | # general                                   |
 |   alice  HD-AAAA-…  ●  |   4 members · encrypted                     |
@@ -471,7 +471,7 @@ your platform's Downloads folder. Phase 2 cap is 1 MiB per file.
   doesn't). Per-DM ephemeral ratchets (Double Ratchet-style) are a
   candidate follow-up.
 
-## What's new in 0.10 — one app, every network, every door
+## What's new in 1.0.0 — one app, every network, every door
 
 A big one. huddle stops being "relay-only OR libp2p-only" and becomes a
 single E2EE core with both carriers on by default, a durable contact book,
@@ -499,7 +499,7 @@ and a menu of anti-censorship transports onto the relay.
   both sides converge over the relay. **No `huddle-server` change** — it's
   a pure client convention over the existing protocol.
 
-- **DMs persist across restarts.** Pre-0.10, DMs (always encrypted) were
+- **DMs persist across restarts.** Pre-1.0, DMs (always encrypted) were
   parked as "restorable" on restart and silently dropped relay-delivered
   messages until reopened. Now DMs re-activate automatically at startup
   (their key derives from your identity + the partner's stored pubkey, no

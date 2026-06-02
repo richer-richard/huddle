@@ -5,6 +5,10 @@ edition = "2021"
 description = "Centralized E2E relay + offline mailbox for huddle, designed to run behind a Tor v3 onion service. Treats huddle's wire bytes as opaque ciphertext — it never decrypts."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/richer-richard/huddle"
+homepage = "https://github.com/richer-richard/huddle"
+readme = "README.md"
+keywords = ["chat", "relay", "tor", "onion", "encryption"]
+categories = ["network-programming", "command-line-utilities"]
 
 [[bin]]
 name = "huddle-server"
@@ -31,4 +35,4 @@ serde_json = "1"
 tempfile = "3"
 # Exercise the real client connector (huddle_core::network::server) against
 # the server binary, end to end.
-huddle-core = { path = "../huddle-core" }
+huddle-core = { path = "../huddle-core", version = "1.0.0" }
