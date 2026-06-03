@@ -455,7 +455,20 @@ impl AppHandle {
             .clone()
             .or_else(config::tor_socks)
             .unwrap_or_else(|| DEFAULT_TOR_SOCKS.to_string());
-        let clearnet_url = transports.clearnet_url.clone().or_else(config::clearnet_url);
+        // huddle 1.0: clearnet relay precedence is CLI/TransportConfig →
+        // config.toml → the persisted `clearnet_url` setting (what the GUI's
+        // "Set relay" writes). The DB value is filtered for empty so clearing
+        // the relay from the GUI (which writes "") resets to no clearnet door.
+        let clearnet_url = transports
+            .clearnet_url
+            .clone()
+            .or_else(config::clearnet_url)
+            .or_else(|| {
+                repo::get_setting(&db, "clearnet_url")
+                    .ok()
+                    .flatten()
+                    .filter(|s| !s.trim().is_empty())
+            });
         let tor_bridge = transports.tor_bridge.clone().or_else(config::tor_bridge);
         let transport_profiles = transport::builtin_profiles(
             transports.onion_url.as_deref(),
@@ -4307,6 +4320,47 @@ impl AppHandle {
 
     pub fn set_mdns_enabled(&self, on: bool) -> Result<()> {
         repo::set_setting(&self.db, "mdns_enabled", if on { "1" } else { "0" })
+    }
+
+    /// huddle 1.0: the persisted clearnet relay URL (a `ws://<ip>:<port>/ws`
+    /// or `wss://host/ws` door onto the relay backend — e.g. a cloudflared
+    /// tunnel). `None` when unset/blank. This is what the GUI "Set relay" field
+    /// writes and what [`Self::set_clearnet_relay`] manages; the startup
+    /// resolution in `start_with_db_and_options` reads it as the lowest-
+    /// precedence source (CLI → config.toml → this).
+    pub fn clearnet_relay(&self) -> Option<String> {
+        repo::get_setting(&self.db, "clearnet_url")
+            .unwrap_or(None)
+            .filter(|s| !s.trim().is_empty())
+    }
+
+    /// huddle 1.0: persist (or clear) the clearnet relay URL and bias the
+    /// transport order so it's tried first.
+    ///
+    /// `Some(url)` saves the URL AND pins a clearnet-first door order so the
+    /// app connects straight to the clearnet relay without paying the onion
+    /// connect timeout each reconnect cycle (the point of "my VPS, no Tor").
+    /// `None` (or a blank url) clears both, restoring the default
+    /// most-private-first order. Takes effect on the next launch — mirrors the
+    /// mDNS toggle, since the door order is resolved once at startup.
+    pub fn set_clearnet_relay(&self, url: Option<&str>) -> Result<()> {
+        match url.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(u) => {
+                repo::set_setting(&self.db, "clearnet_url", u)?;
+                // Clearnet doors first so a no-Tor user connects immediately;
+                // onion doors stay in the list as fallback.
+                repo::set_setting(
+                    &self.db,
+                    "transport_order",
+                    "clearnet-wss,clearnet-ws,onion-tor,onion-bridge,onion-arti",
+                )
+            }
+            None => {
+                repo::set_setting(&self.db, "clearnet_url", "")?;
+                // Empty → resolution falls back to the default fallback order.
+                repo::set_setting(&self.db, "transport_order", "")
+            }
+        }
     }
 
     /// huddle 0.7.8: persisted desktop-notification opt-out. The

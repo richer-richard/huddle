@@ -589,3 +589,33 @@ async fn phase_f_code_join_round_trip() {
     handle_a.shutdown().await;
     handle_b.shutdown().await;
 }
+
+// huddle 1.0: the GUI/CLI "Set relay" path persists a clearnet relay URL and
+// biases the door order toward it. No networking — pure settings round-trip.
+#[tokio::test]
+async fn clearnet_relay_setting_round_trips() {
+    let db = storage::open_db_in_memory().unwrap();
+    let handle = AppHandle::start_with_db(db).await.unwrap();
+
+    // Unset by default.
+    assert_eq!(handle.clearnet_relay(), None);
+
+    // Setting a URL persists it and reads back.
+    handle
+        .set_clearnet_relay(Some("wss://abc.trycloudflare.com/ws"))
+        .unwrap();
+    assert_eq!(
+        handle.clearnet_relay().as_deref(),
+        Some("wss://abc.trycloudflare.com/ws")
+    );
+
+    // Clearing resets to None.
+    handle.set_clearnet_relay(None).unwrap();
+    assert_eq!(handle.clearnet_relay(), None);
+
+    // A blank/whitespace URL is treated as a clear, not a stored "".
+    handle.set_clearnet_relay(Some("   ")).unwrap();
+    assert_eq!(handle.clearnet_relay(), None);
+
+    handle.shutdown().await;
+}
