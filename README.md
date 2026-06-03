@@ -1,8 +1,10 @@
 # Huddle
 
-Terminal-native, end-to-end-encrypted chat rooms over Tor.
+End-to-end-encrypted chat rooms over Tor — as a native desktop app
+(`huddle-gui`, egui/eframe) or a terminal UI (`huddle`). Both drive the same
+core, identity, and relay.
 
-Open the TUI, start a room or paste an invite, and chat. Rooms can be
+Open either client, start a room or paste an invite, and chat. Rooms can be
 public (cleartext payloads) or encrypted (per-sender Megolm group
 sessions, session keys wrapped with an Argon2id-derived passphrase
 key). Either way the transport is end-to-end: the relay only ever sees
@@ -55,14 +57,82 @@ restarts and keep flowing over the relay.
 > work is ongoing. Don't rely on it for real secrets without a
 > careful review.
 
-## Build
+## Install
 
-Requires Rust 1.75+ (edition 2021).
+huddle ships three binaries — install whichever you need:
+
+- **`huddle-gui`** — the native desktop app (egui/eframe). Start here if you
+  want a windowed client.
+- **`huddle`** — the terminal UI (TUI).
+- **`huddle-server`** — the relay + offline mailbox (only if you're hosting
+  one; see [Run your own relay](#run-your-own-relay-cloudflared-no-domain)).
+
+### From crates.io
+
+With a stable [Rust toolchain](https://rustup.rs) (edition 2021, 1.75+):
 
 ```bash
-cargo build --release
-./target/release/huddle
+cargo install huddle-gui      # native desktop GUI
+cargo install huddle          # terminal client
+cargo install huddle-server   # relay (host-side only)
 ```
+
+The binaries land in `~/.cargo/bin/` (make sure it's on your `PATH`), then
+launch the GUI with `huddle-gui` or the terminal client with `huddle`.
+
+### System prerequisites
+
+You need the Rust toolchain and a C toolchain (the bundled SQLCipher compiles
+a vendored OpenSSL from source). Beyond that:
+
+- **macOS** — just the Xcode Command Line Tools: `xcode-select --install`.
+- **Windows** — the MSVC "C++ build tools" that `rustup` already prompts for.
+  No extra SDK; the GUI uses the native file dialogs.
+- **Linux** — a normal graphical desktop already has the runtime libraries the
+  GUI needs (X11/Wayland + OpenGL). On a **minimal or headless** box, install
+  the build/runtime deps:
+
+  ```bash
+  sudo apt-get install -y build-essential pkg-config perl \
+    libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
+  ```
+
+  > **No GTK required.** huddle-gui's file dialogs go through the XDG desktop
+  > portal (`rfd`'s default `xdg-portal` backend), so `libgtk-3-dev` is **not**
+  > needed — only a portal backend at runtime (standard on GNOME/KDE). Add
+  > `libclang-dev` only if a dependency's build complains about `libclang`.
+
+### Build from source
+
+```bash
+git clone https://github.com/richer-richard/huddle
+cd huddle
+cargo build --release
+./target/release/huddle-gui     # desktop GUI
+./target/release/huddle         # terminal client
+```
+
+### Running the desktop GUI
+
+Launch `huddle-gui`. On **first run** it walks you through a one-time signup:
+choose a **username** and a **master passphrase** (used to derive the at-rest
+encryption key for your local database — Argon2id, 64 MiB), then confirm it.
+Every later launch just asks for that passphrase to unlock. Pass
+`--no-master-passphrase` to run with an unencrypted database and skip the
+unlock screen.
+
+The GUI takes the **same transport flags as the TUI** — e.g.
+`huddle-gui --clearnet-server wss://host/ws` to pin a clearnet relay, plus
+`--server` / `--no-server`, `--tor-socks`, `--transport` / `--transport-order`,
+`--mode mdns` (also run LAN discovery), and `--name`. Run `huddle-gui doctor`
+to print version + paths for a bug report. Your config and data live in the
+per-OS app directory:
+
+| OS | Location |
+|----|----------|
+| **Linux** | `~/.local/share/huddle/` (config: `~/.config/huddle/config.toml`) |
+| **macOS** | `~/Library/Application Support/huddle/` |
+| **Windows** | `%APPDATA%\huddle\` |
 
 ## How it works (high level)
 
