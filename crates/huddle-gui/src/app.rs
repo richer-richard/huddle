@@ -20,7 +20,8 @@ use crate::cli::Cli;
 use crate::model::{
     reduce, AddContactState, ConfirmInviteState, EditAliasState, EditUsernameState, GoDarkState,
     JoinState, JoinWithCodeState, Modal, NewDmState, NewGroupState, Pane, PasteInviteState,
-    RotateState, SasStage, SasState, SearchState, Section, UiAction, VerifyState, ViewModel,
+    RotateState, SasStage, SasState, SearchState, Section, SetRelayState, UiAction, VerifyState,
+    ViewModel,
 };
 use crate::panes;
 use crate::theme::PALETTE;
@@ -103,6 +104,10 @@ impl HuddleApp {
             relays: self.cli.resolve_relays(),
             server_url: self.cli.resolve_server_url(),
             tor_socks: self.cli.resolve_tor_socks(),
+            clearnet_url: self.cli.clearnet_server.clone(),
+            tor_bridge: self.cli.tor_bridge.clone(),
+            transport_pin: self.cli.transport.clone(),
+            transport_order: self.cli.transport_order_vec(),
             auth,
             name,
         };
@@ -724,6 +729,29 @@ impl Ready {
                 let _ = self.handle.set_mdns_enabled(on);
                 self.vm.mdns_enabled = on;
             }
+            UiAction::OpenSetRelay => {
+                self.vm.modal = Modal::SetRelay(SetRelayState {
+                    url: self.vm.clearnet_relay.clone().unwrap_or_default(),
+                    error: None,
+                });
+            }
+            UiAction::SetClearnetRelay(url) => {
+                match self.handle.set_clearnet_relay(url.as_deref()) {
+                    Ok(()) => {
+                        self.vm.clearnet_relay = self.handle.clearnet_relay();
+                        self.vm.modal = Modal::None;
+                        self.vm.set_status(match &self.vm.clearnet_relay {
+                            Some(u) => format!("relay set to {u} — restart to connect through it"),
+                            None => "clearnet relay cleared — restart to apply".to_string(),
+                        });
+                    }
+                    Err(e) => {
+                        if let Modal::SetRelay(s) = &mut self.vm.modal {
+                            s.error = Some(format!("could not save: {e}"));
+                        }
+                    }
+                }
+            }
             UiAction::ToggleVerifiedOnlyInbound(on) => {
                 let _ = self.handle.set_verified_only_inbound(on);
                 self.vm.verified_only_inbound = on;
@@ -844,6 +872,9 @@ impl Ready {
             creator_pubkey_b64: None,
             signed_at_ms: 0,
             signature_b64: None,
+            // huddle 1.0: carry our configured clearnet relay so the joiner
+            // connects to it with zero config (v3 invite).
+            relay_url: self.handle.clearnet_relay(),
         };
         let invite = self.handle.sign_invite(unsigned.clone()).unwrap_or(unsigned);
         match huddle_core::invite::encode(&invite) {
@@ -859,6 +890,19 @@ impl Ready {
             _ => return,
         };
         self.vm.modal = Modal::None;
+        // huddle 1.0: adopt the inviter's clearnet relay from a v3 invite so
+        // we connect to it with zero config (applies on next launch). Best
+        // effort — never block the join on it.
+        if let Some(relay) = invite.relay_url.as_deref() {
+            match self.handle.set_clearnet_relay(Some(relay)) {
+                Ok(()) => {
+                    self.vm.clearnet_relay = Some(relay.to_string());
+                    self.vm
+                        .set_status(format!("saved invite relay {relay} — restart to connect through it"));
+                }
+                Err(e) => tracing::warn!(%e, "failed to save invite relay"),
+            }
+        }
         if !invite.host_multiaddr.trim().is_empty() {
             let addr = invite.host_multiaddr.clone();
             let fp = invite.fingerprint.clone();

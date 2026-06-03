@@ -72,6 +72,15 @@ pub struct InviteLink {
     /// for v >= 2.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature_b64: Option<String>,
+    /// huddle 1.0: optional clearnet relay URL the inviter is reachable on
+    /// (`wss://host/ws` or `ws://ip:port/ws` — e.g. a cloudflared tunnel).
+    /// When present, the joiner can connect to the inviter's relay with zero
+    /// config. Bumps the invite to `v=3` and is covered by the signature, so
+    /// it can't be swapped for an attacker's relay without breaking the sig.
+    /// `None` for relay-less invites (which stay `v=2`, readable by older
+    /// clients).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_url: Option<String>,
 }
 
 fn is_zero(n: &i64) -> bool {
@@ -129,6 +138,14 @@ impl InviteLink {
         } else {
             out.extend_from_slice(b"no-room");
         }
+        // huddle 1.0: append the relay only when present, so relay-less
+        // invites produce byte-identical input to pre-1.0 v2 signers and
+        // still verify across versions. Signer and verifier append it
+        // identically, so it's covered by the signature.
+        if let Some(relay) = &self.relay_url {
+            out.extend_from_slice(b"|relay|");
+            out.extend_from_slice(relay.as_bytes());
+        }
         out
     }
 }
@@ -137,7 +154,9 @@ impl InviteLink {
 /// `signed_at_ms`, and `signature_b64`. The input invite's `v` and
 /// signature fields are overwritten.
 pub fn sign_invite(identity: &Identity, mut invite: InviteLink) -> Result<InviteLink> {
-    invite.v = 2;
+    // huddle 1.0: v=3 when the invite carries a relay URL, else v=2 so
+    // relay-less invites stay readable by pre-1.0 clients.
+    invite.v = if invite.relay_url.is_some() { 3 } else { 2 };
     invite.creator_pubkey_b64 = Some(B64.encode(identity.public_bytes()));
     invite.signed_at_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -179,7 +198,9 @@ pub fn decode(url: &str) -> Result<InviteLink> {
         .map_err(|e| HuddleError::Other(format!("bad invite json: {e}")))?;
     match invite.v {
         1 => Ok(invite),
-        2 => {
+        // huddle 1.0: v3 adds the signed `relay_url`; it verifies identically
+        // to v2 because `signable_bytes` already folds the relay in when present.
+        2 | 3 => {
             verify_invite_signature(&invite)?;
             verify_invite_freshness(&invite)?;
             Ok(invite)
@@ -290,6 +311,7 @@ mod tests {
             creator_pubkey_b64: None,
             signed_at_ms: 0,
             signature_b64: None,
+            relay_url: None,
         }
     }
 
@@ -375,5 +397,45 @@ mod tests {
     #[test]
     fn decode_not_huddle_url_rejects() {
         assert!(decode("https://example.com/invite").is_err());
+    }
+
+    // huddle 1.0: v3 invites carry a signed clearnet relay URL.
+    #[test]
+    fn signed_v3_with_relay_round_trips() {
+        let id = Identity::generate().unwrap();
+        let mut inv = fixture();
+        inv.fingerprint = id.fingerprint().to_string();
+        inv.relay_url = Some("wss://abc.trycloudflare.com/ws".into());
+        let signed = sign_invite(&id, inv).unwrap();
+        assert_eq!(signed.v, 3, "an invite with a relay must be v3");
+        let url = encode(&signed).unwrap();
+        let back = decode(&url).unwrap();
+        assert_eq!(back, signed);
+        assert_eq!(back.relay_url.as_deref(), Some("wss://abc.trycloudflare.com/ws"));
+    }
+
+    #[test]
+    fn relay_less_invite_stays_v2() {
+        // A relay-less invite must remain v2 so older clients still accept it.
+        let id = Identity::generate().unwrap();
+        let mut inv = fixture();
+        inv.fingerprint = id.fingerprint().to_string();
+        assert!(inv.relay_url.is_none());
+        let signed = sign_invite(&id, inv).unwrap();
+        assert_eq!(signed.v, 2);
+    }
+
+    #[test]
+    fn tampered_relay_fails() {
+        let id = Identity::generate().unwrap();
+        let mut inv = fixture();
+        inv.fingerprint = id.fingerprint().to_string();
+        inv.relay_url = Some("wss://mine.example/ws".into());
+        let mut signed = sign_invite(&id, inv).unwrap();
+        // Swap in an attacker's relay; the signature must no longer verify.
+        signed.relay_url = Some("wss://attacker.example/ws".into());
+        let url = encode(&signed).unwrap();
+        let err = decode(&url).unwrap_err();
+        assert!(format!("{err}").contains("invite signature verify failed"));
     }
 }

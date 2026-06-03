@@ -73,6 +73,15 @@ pub struct BuildParams {
     pub relays: Vec<Multiaddr>,
     pub server_url: Option<String>,
     pub tor_socks: Option<String>,
+    /// huddle 1.0: clearnet relay door (`--clearnet-server`); `None` lets the
+    /// core fold in config.toml + the persisted in-app setting.
+    pub clearnet_url: Option<String>,
+    /// huddle 1.0: bridge line (`--tor-bridge`).
+    pub tor_bridge: Option<String>,
+    /// huddle 1.0: pin one door (`--transport`).
+    pub transport_pin: Option<String>,
+    /// huddle 1.0: explicit door order (`--transport-order`).
+    pub transport_order: Option<Vec<String>>,
     pub auth: AuthChoice,
     pub name: Option<String>,
 }
@@ -135,13 +144,17 @@ async fn build_inner(ctx: egui::Context, params: BuildParams) -> Result<ReadyPar
         }
     };
 
-    // huddle 1.0: the relay is reached through transport "doors". The GUI
-    // keeps its onion + SOCKS config; clearnet / bridge / Arti doors fall back
-    // to config.toml + defaults (a future GUI pass can surface them).
+    // huddle 1.0: the relay is reached through transport "doors". Pass the full
+    // set through so the GUI has parity with the TUI; the core folds in
+    // config.toml + the persisted in-app clearnet/order settings for any field
+    // left `None` (e.g. a relay set from Settings → Network or an invite).
     let transports = huddle_core::app::TransportConfig {
         onion_url: params.server_url,
+        clearnet_url: params.clearnet_url,
         tor_socks: params.tor_socks,
-        ..Default::default()
+        tor_bridge: params.tor_bridge,
+        pin: params.transport_pin,
+        order: params.transport_order,
     };
     let handle = AppHandle::start_with_options(
         mode,

@@ -9,8 +9,8 @@ use crate::fmt;
 use crate::model::{
     AcceptRotationState, AddContactState, ConfirmInviteState, EditAliasState, EditUsernameState,
     GoDarkState, InboundDialState, JoinState, JoinWithCodeState, Modal, NewDmState, NewGroupState,
-    PasteInviteState, RotateState, SasStage, SasState, SearchState, UiAction, VerifyState,
-    GO_DARK_CONFIRM_PHRASE, ONBOARDING_PAGES,
+    PasteInviteState, RotateState, SasStage, SasState, SearchState, SetRelayState, UiAction,
+    VerifyState, GO_DARK_CONFIRM_PHRASE, ONBOARDING_PAGES,
 };
 use crate::theme::PALETTE;
 
@@ -35,6 +35,7 @@ pub fn render(ctx: &egui::Context, modal: &mut Modal, our_id: &str, actions: &mu
         Modal::ShowInvite(url) => show_invite(ctx, url, actions),
         Modal::PasteInvite(s) => paste_invite(ctx, s, actions),
         Modal::ConfirmInvite(s) => confirm_invite(ctx, s, actions),
+        Modal::SetRelay(s) => set_relay(ctx, s, actions),
         Modal::JoinWithCode(s) => join_with_code(ctx, s, actions),
         Modal::EditUsername(s) => edit_username(ctx, s, actions),
         Modal::GoDark(s) => go_dark(ctx, s, actions),
@@ -378,6 +379,56 @@ fn paste_invite(ctx: &egui::Context, s: &mut PasteInviteState, actions: &mut Vec
     }
 }
 
+/// huddle 1.0: set (or clear) the clearnet relay URL — e.g. a cloudflared
+/// tunnel `wss://<rand>.trycloudflare.com/ws`. Applies on the next launch.
+fn set_relay(ctx: &egui::Context, s: &mut SetRelayState, actions: &mut Vec<UiAction>) {
+    let resp = egui::Modal::new(Id::new("modal-set-relay")).show(ctx, |ui| {
+        ui.set_width(460.0);
+        ui.heading("Clearnet relay");
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new(
+                "Connect through a clearnet relay you control instead of (or alongside) \
+                 Tor — e.g. a cloudflared tunnel. Paste the wss:// URL, or a ws://ip:port \
+                 URL. Leave empty and Save to clear. Applies on the next launch.",
+            )
+            .small()
+            .color(PALETTE.text_dim),
+        );
+        ui.add_space(8.0);
+        ui.add(
+            TextEdit::singleline(&mut s.url)
+                .desired_width(f32::INFINITY)
+                .hint_text("wss://abc123.trycloudflare.com/ws"),
+        );
+        if let Some(e) = &s.error {
+            ui.add_space(6.0);
+            ui.colored_label(PALETTE.error, e);
+        }
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            if ui.button("Save").clicked() {
+                let trimmed = s.url.trim();
+                let val = if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                };
+                actions.push(UiAction::SetClearnetRelay(val));
+            }
+            if ui.button("Clear").clicked() {
+                actions.push(UiAction::SetClearnetRelay(None));
+            }
+            if ui.button("Cancel").clicked() {
+                actions.push(UiAction::CloseModal);
+            }
+        });
+    });
+    if resp.should_close() {
+        actions.push(UiAction::CloseModal);
+    }
+}
+
 fn confirm_invite(ctx: &egui::Context, s: &ConfirmInviteState, actions: &mut Vec<UiAction>) {
     let resp = egui::Modal::new(Id::new("modal-confirm-invite")).show(ctx, |ui| {
         ui.set_width(440.0);
@@ -393,6 +444,15 @@ fn confirm_invite(ctx: &egui::Context, s: &ConfirmInviteState, actions: &mut Vec
         if s.invite.signature_b64.is_none() {
             ui.add_space(4.0);
             ui.colored_label(PALETTE.warn, "⚠ this invite is unsigned");
+        }
+        // huddle 1.0: a v3 invite adopts the inviter's clearnet relay.
+        if let Some(relay) = &s.invite.relay_url {
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new(format!("connects you through their relay: {relay}"))
+                    .small()
+                    .color(PALETTE.text_dim),
+            );
         }
         ui.add_space(12.0);
         ui.horizontal(|ui| {

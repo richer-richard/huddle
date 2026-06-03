@@ -50,6 +50,29 @@ pub struct Cli {
     #[arg(long = "tor-socks", value_name = "HOST:PORT")]
     pub tor_socks: Option<String>,
 
+    /// huddle 1.0: a clearnet relay URL onto the SAME backend as the onion —
+    /// `wss://host/ws` (TLS, e.g. a cloudflared tunnel) or `ws://<ip>:<port>/ws`
+    /// (plain). For when Tor is blocked/unavailable. Also settable in-app
+    /// (Settings → Network) and as `clearnet_url` in config.toml.
+    #[arg(long = "clearnet-server", value_name = "WS_URL")]
+    pub clearnet_server: Option<String>,
+
+    /// huddle 1.0: pin a single transport "door" by id: onion-tor,
+    /// onion-bridge, onion-arti, clearnet-wss, clearnet-ws. Default tries
+    /// them in order.
+    #[arg(long = "transport", value_name = "ID")]
+    pub transport: Option<String>,
+
+    /// huddle 1.0: explicit fallback order, comma-separated transport ids
+    /// (most-preferred first).
+    #[arg(long = "transport-order", value_name = "ID,ID,...")]
+    pub transport_order: Option<String>,
+
+    /// huddle 1.0: a Tor bridge line (obfs4/WebTunnel) for the bridge door.
+    /// Also `tor_bridge` in config.toml.
+    #[arg(long = "tor-bridge", value_name = "LINE")]
+    pub tor_bridge: Option<String>,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -107,6 +130,17 @@ impl Cli {
 
     pub fn resolve_tor_socks(&self) -> Option<String> {
         self.tor_socks.clone().or_else(huddle_core::config::tor_socks)
+    }
+
+    /// huddle 1.0: `--transport-order` as a token list (core folds in
+    /// config.toml + saved settings if this is `None`). Mirrors the TUI.
+    pub fn transport_order_vec(&self) -> Option<Vec<String>> {
+        self.transport_order.as_ref().map(|s| {
+            s.split(',')
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect()
+        })
     }
 }
 

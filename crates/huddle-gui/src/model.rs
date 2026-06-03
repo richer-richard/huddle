@@ -226,6 +226,11 @@ pub enum UiAction {
     OpenQr,
     ToggleNotifications(bool),
     ToggleMdns(bool),
+    /// huddle 1.0: open the "set clearnet relay" modal (prefilled with the
+    /// current value).
+    OpenSetRelay,
+    /// huddle 1.0: persist (Some) or clear (None) the clearnet relay URL.
+    SetClearnetRelay(Option<String>),
     ToggleVerifiedOnlyInbound(bool),
     ToggleUpdateCheck(bool),
     GoToBlocked,
@@ -257,6 +262,7 @@ pub enum Modal {
     ShowInvite(String),
     PasteInvite(PasteInviteState),
     ConfirmInvite(ConfirmInviteState),
+    SetRelay(SetRelayState),
     JoinWithCode(JoinWithCodeState),
     EditUsername(EditUsernameState),
     GoDark(GoDarkState),
@@ -307,6 +313,14 @@ pub const ONBOARDING_PAGES: &[(&str, &str)] = &[
 
 #[derive(Default)]
 pub struct PasteInviteState {
+    pub url: String,
+    pub error: Option<String>,
+}
+
+/// huddle 1.0: the "set clearnet relay" modal — paste a `wss://…/ws` (e.g. a
+/// cloudflared tunnel) or `ws://ip:port/ws` relay URL, or clear it.
+#[derive(Default)]
+pub struct SetRelayState {
     pub url: String,
     pub error: Option<String>,
 }
@@ -459,6 +473,9 @@ pub struct ViewModel {
     // settings snapshots
     pub notifications_enabled: bool,
     pub mdns_enabled: bool,
+    /// huddle 1.0: the persisted clearnet relay URL (e.g. a cloudflared
+    /// tunnel), or `None` when unset. Shown + editable in Settings → Network.
+    pub clearnet_relay: Option<String>,
     pub verified_only_inbound: bool,
     pub update_check: Option<bool>,
     pub has_master_passphrase: bool,
@@ -511,6 +528,7 @@ impl ViewModel {
             transport_profiles: Vec::new(),
             notifications_enabled: true,
             mdns_enabled: false,
+            clearnet_relay: None,
             verified_only_inbound: false,
             update_check: None,
             has_master_passphrase: h.has_master_passphrase(),
@@ -579,6 +597,7 @@ impl ViewModel {
         }
         self.notifications_enabled = h.notifications_enabled();
         self.mdns_enabled = h.mdns_enabled();
+        self.clearnet_relay = h.clearnet_relay();
         self.verified_only_inbound = h.verified_only_inbound();
         self.update_check = h.update_check_enabled();
 
@@ -988,6 +1007,7 @@ mod tests {
             transport_profiles: Vec::new(),
             notifications_enabled: true,
             mdns_enabled: false,
+            clearnet_relay: None,
             verified_only_inbound: false,
             update_check: None,
             has_master_passphrase: false,

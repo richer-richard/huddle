@@ -3957,6 +3957,9 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
                 creator_pubkey_b64: None,
                 signed_at_ms: 0,
                 signature_b64: None,
+                // huddle 1.0: carry our configured clearnet relay so the
+                // joiner connects to it with zero config (v3 invite).
+                relay_url: app.handle.clearnet_relay(),
             };
             // huddle 0.7.11: sign via AppHandle so the invite is bound
             // to the local Ed25519 identity. Falls back to v=1 only if
@@ -4011,6 +4014,18 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
                 _ => return Ok(false),
             };
             app.modal = Modal::None;
+            // huddle 1.0: a v3 invite carries the inviter's clearnet relay.
+            // Adopt it so we connect to their relay with zero config (takes
+            // effect on the next launch — same as the mDNS toggle). Best
+            // effort; a failure here must not block the join.
+            if let Some(relay) = invite.relay_url.as_deref() {
+                match app.handle.set_clearnet_relay(Some(relay)) {
+                    Ok(()) => app.set_status(format!(
+                        "saved invite relay {relay} — restart to connect through it"
+                    )),
+                    Err(e) => tracing::warn!(%e, "failed to save invite relay"),
+                }
+            }
             // huddle 0.8: the libp2p dial is now optional. Relay-only
             // invites carry an empty `host_multiaddr` — there's no swarm to
             // dial and the recipient reaches the room purely over the onion
@@ -5346,6 +5361,8 @@ pub fn build_room_invite_link(app: &TuiApp, room_id: &str) -> anyhow::Result<Str
         creator_pubkey_b64: None,
         signed_at_ms: 0,
         signature_b64: None,
+        // huddle 1.0: carry our configured clearnet relay (v3 invite).
+        relay_url: app.handle.clearnet_relay(),
     };
     let invite = app
         .handle

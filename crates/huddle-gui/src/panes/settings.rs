@@ -87,11 +87,36 @@ fn network(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
         } else {
             ui.label(RichText::new("○").color(PALETTE.text_dim));
             ui.label(
-                RichText::new("connecting… (Tor down? try a clearnet door)")
+                RichText::new("connecting… (Tor down? set a clearnet relay below)")
                     .color(PALETTE.text_dim),
             );
         }
     });
+
+    // huddle 1.0: clearnet relay (e.g. a cloudflared tunnel) — a no-Tor door
+    // onto the relay backend. Editable here; applies on next launch.
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Clearnet relay").strong());
+        match &vm.clearnet_relay {
+            Some(u) => {
+                ui.monospace(u);
+            }
+            None => {
+                ui.label(RichText::new("none (Tor onion default)").color(PALETTE.text_dim));
+            }
+        }
+        if ui.small_button("Set / edit").clicked() {
+            actions.push(UiAction::OpenSetRelay);
+        }
+    });
+    ui.label(
+        RichText::new(
+            "Paste a wss:// URL (e.g. a cloudflared tunnel) to connect without Tor. \
+             Tried first; the onion stays as fallback. Applies on next launch.",
+        )
+        .small()
+        .color(PALETTE.text_dim),
+    );
 
     // LAN status — runs alongside, never instead of, the relay.
     ui.horizontal(|ui| {
