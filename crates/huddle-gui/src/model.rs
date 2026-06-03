@@ -13,9 +13,12 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 
 use huddle_core::app::events::{AppEvent, DiscoveredRoom};
-use huddle_core::app::{AppHandle, KnownPeerStatus};
+use huddle_core::app::{AppHandle, ContactView, KnownPeerStatus};
+use huddle_core::network::transport::{TransportId, TransportProfile};
 use huddle_core::network::NetworkMode;
-use huddle_core::storage::repo::{PendingFriendRequest, RoomKind, StoredAttachment, StoredRoomMessage};
+use huddle_core::storage::repo::{
+    PendingContactRequest, PendingFriendRequest, RoomKind, StoredAttachment, StoredRoomMessage,
+};
 use libp2p::PeerId;
 
 use crate::bridge::Inbox;
@@ -44,10 +47,14 @@ pub enum Section {
 }
 
 /// Which sublist the People pane shows.
+/// Which sublist the Contacts pane shows. `Contacts` is the durable,
+/// fingerprint-keyed address book; `Requests` collects inbound contact
+/// requests (over the relay inbox) and legacy libp2p friend requests.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum PeopleTab {
-    Pending,
     #[default]
+    Contacts,
+    Requests,
     Known,
     Verified,
     Blocked,
@@ -56,7 +63,8 @@ pub enum PeopleTab {
 impl PeopleTab {
     pub fn label(self) -> &'static str {
         match self {
-            PeopleTab::Pending => "Requests",
+            PeopleTab::Contacts => "Contacts",
+            PeopleTab::Requests => "Requests",
             PeopleTab::Known => "Known",
             PeopleTab::Verified => "Verified",
             PeopleTab::Blocked => "Blocked",
@@ -118,6 +126,20 @@ pub enum UiAction {
     PersonUnblock(String),
     AcceptRequest(String),
     RejectRequest(String),
+    // Contacts address book + relay contact requests (huddle 1.0).
+    OpenAddContact,
+    SubmitAddContact {
+        target: String,
+        note: Option<String>,
+    },
+    AcceptContactRequest(String),
+    RejectContactRequest(String),
+    RemoveContact(String),
+    OpenEditAlias(String),
+    SubmitEditAlias {
+        fingerprint: String,
+        alias: Option<String>,
+    },
     InboundAccept {
         peer_id: PeerId,
         address: String,
@@ -223,6 +245,8 @@ pub enum Modal {
     None,
     NewGroup(NewGroupState),
     NewDm(NewDmState),
+    AddContact(AddContactState),
+    EditAlias(EditAliasState),
     Join(JoinState),
     InboundDial(InboundDialState),
     Verify(VerifyState),
@@ -364,6 +388,22 @@ pub struct NewDmState {
     pub error: Option<String>,
 }
 
+/// Add a contact by HD-ID. Sends a signed contact request over the relay inbox
+/// (works across the internet) and races a same-LAN dial for immediacy.
+#[derive(Default)]
+pub struct AddContactState {
+    pub target: String,
+    pub note: String,
+    pub error: Option<String>,
+}
+
+/// Rename a contact locally (sets the alias used everywhere in the UI).
+pub struct EditAliasState {
+    pub fingerprint: String,
+    pub current_label: String,
+    pub input: String,
+}
+
 pub struct JoinState {
     pub room_id: String,
     pub room_name: String,
@@ -410,6 +450,12 @@ pub struct ViewModel {
     pub pending_requests: Vec<PendingFriendRequest>,
     pub blocked: Vec<String>,
     pub verified_peers: Vec<String>,
+    // huddle 1.0: durable fingerprint-keyed address book + relay contact
+    // requests + the transport "doors" onto the relay.
+    pub contacts: Vec<ContactView>,
+    pub contact_requests: Vec<PendingContactRequest>,
+    pub active_transport: Option<TransportId>,
+    pub transport_profiles: Vec<TransportProfile>,
     // settings snapshots
     pub notifications_enabled: bool,
     pub mdns_enabled: bool,
@@ -459,6 +505,10 @@ impl ViewModel {
             pending_requests: Vec::new(),
             blocked: Vec::new(),
             verified_peers: Vec::new(),
+            contacts: Vec::new(),
+            contact_requests: Vec::new(),
+            active_transport: None,
+            transport_profiles: Vec::new(),
             notifications_enabled: true,
             mdns_enabled: false,
             verified_only_inbound: false,
@@ -513,6 +563,20 @@ impl ViewModel {
         self.pending_requests = h.list_pending_friend_requests();
         self.blocked = h.list_blocked_peers();
         self.verified_peers = h.list_verified_peers();
+        // huddle 1.0 snapshots: the address book, inbound relay contact
+        // requests, and the active transport door + the full door list.
+        self.contacts = h.list_contacts();
+        self.contact_requests = h.list_pending_contact_requests();
+        self.active_transport = h.active_transport();
+        self.transport_profiles = h.transport_profiles();
+        for c in &self.contacts {
+            let label = c
+                .alias
+                .clone()
+                .or_else(|| c.username.clone())
+                .unwrap_or_else(|| fmt::display_id(&c.fingerprint));
+            self.peer_labels.insert(c.fingerprint.clone(), label);
+        }
         self.notifications_enabled = h.notifications_enabled();
         self.mdns_enabled = h.mdns_enabled();
         self.verified_only_inbound = h.verified_only_inbound();
@@ -814,6 +878,13 @@ fn apply_event(vm: &mut ViewModel, h: &AppHandle, ev: AppEvent) {
         AppEvent::CodeJoinTimedOut { reason, .. } => {
             vm.replace_modal_if_idle(Modal::Error(format!("join code: {reason}")));
         }
+        AppEvent::ContactRequestReceived { fingerprint, display_name, .. } => {
+            // Pull the new request in immediately (don't wait for the 1s tick)
+            // so the Requests tab badge updates the moment it arrives.
+            vm.contact_requests = h.list_pending_contact_requests();
+            let who = display_name.unwrap_or_else(|| fmt::display_id(&fingerprint));
+            vm.set_status(format!("contact request from {who} — see Contacts"));
+        }
         // The remaining variants surface in later phases (files, SAS, rotation,
         // inbound dial, NAT, …). They're already in the activity log above.
         _ => {}
@@ -911,6 +982,10 @@ mod tests {
             pending_requests: Vec::new(),
             blocked: Vec::new(),
             verified_peers: Vec::new(),
+            contacts: Vec::new(),
+            contact_requests: Vec::new(),
+            active_transport: None,
+            transport_profiles: Vec::new(),
             notifications_enabled: true,
             mdns_enabled: false,
             verified_only_inbound: false,

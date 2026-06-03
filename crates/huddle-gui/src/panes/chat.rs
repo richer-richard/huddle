@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use egui::{Align, Id, Key, Label, Layout, RichText, TextEdit};
-use huddle_core::app::AppHandle;
+use huddle_core::app::{AppHandle, RoomTransport};
 use huddle_core::storage::repo::{AttachmentStatus, RoomKind};
 
 use crate::fmt;
@@ -37,6 +37,8 @@ pub fn render(
     let owners: HashSet<String> = handle.room_owners(room_id).into_iter().collect();
     let verified: HashSet<String> = handle.verified_fingerprints(room_id).into_iter().collect();
     let room_vonly = handle.room_verified_only(room_id);
+    // Which transport this conversation is currently riding (status only).
+    let transport = handle.room_transport(room_id);
 
     let Some(room) = vm.open_room_mut(room_id) else {
         ui.centered_and_justified(|ui| {
@@ -64,6 +66,14 @@ pub fn render(
                     .small()
                     .color(PALETTE.text_dim),
             );
+            // Per-chat transport badge (lan / relay / offline) — status only.
+            let (glyph, label, color) = match transport {
+                RoomTransport::LanDirect => ("●", "lan", PALETTE.success),
+                RoomTransport::Relay => ("◈", "relay", PALETTE.accent),
+                RoomTransport::Offline => ("○", "offline", PALETTE.text_dim),
+            };
+            ui.label(RichText::new(glyph).color(color));
+            ui.label(RichText::new(label).small().color(color));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.button("Leave").clicked() {
                     actions.push(UiAction::LeaveRoom(room_id.to_string()));

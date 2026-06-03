@@ -61,19 +61,90 @@ fn account(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
 
 fn network(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
     ui.add_space(6.0);
-    ui.label(format!("mode: {}", vm.mode.as_str()));
-    if vm.server_enabled {
-        let (dot, label, color) = if vm.server_connected {
-            ("●", "connected", PALETTE.success)
+    ui.label(
+        RichText::new(
+            "huddle runs LAN discovery and the relay together by default — messages \
+             ride whichever reaches the peer (always end-to-end encrypted).",
+        )
+        .small()
+        .color(PALETTE.text_dim),
+    );
+    ui.add_space(8.0);
+
+    // Relay status + the live transport door.
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Relay").strong());
+        if !vm.server_enabled {
+            ui.label(RichText::new("off (--no-server)").color(PALETTE.warn));
+        } else if vm.server_connected {
+            ui.label(RichText::new("●").color(PALETTE.success));
+            ui.label("connected");
+            if let Some(t) = vm.active_transport {
+                ui.label(
+                    RichText::new(format!("· via {}", t.label())).color(PALETTE.text_dim),
+                );
+            }
         } else {
-            ("○", "connecting…", PALETTE.text_dim)
+            ui.label(RichText::new("○").color(PALETTE.text_dim));
+            ui.label(
+                RichText::new("connecting… (Tor down? try a clearnet door)")
+                    .color(PALETTE.text_dim),
+            );
+        }
+    });
+
+    // LAN status — runs alongside, never instead of, the relay.
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("LAN").strong());
+        if vm.mode != NetworkMode::Server {
+            ui.label(RichText::new("●").color(PALETTE.success));
+            ui.label(format!("on · {}", vm.mode.as_str()));
+        } else {
+            ui.label(RichText::new("○").color(PALETTE.text_dim));
+            ui.label(RichText::new("off · enable below").color(PALETTE.text_dim));
+        }
+    });
+
+    // Transport "doors" onto the relay + their anti-censorship tradeoffs, so
+    // the effort of reaching the relay under censorship is legible.
+    ui.add_space(10.0);
+    ui.label(RichText::new("Transport doors").strong());
+    ui.label(
+        RichText::new("anti-censorship paths onto the relay — huddle picks the first that works:")
+            .small()
+            .color(PALETTE.text_dim),
+    );
+    ui.add_space(2.0);
+    for p in &vm.transport_profiles {
+        let (mark, mcolor) = if Some(p.id) == vm.active_transport {
+            ("● active", PALETTE.success)
+        } else if p.available() {
+            ("· ready", PALETTE.text_dim)
+        } else {
+            ("  off", PALETTE.text_dim)
         };
         ui.horizontal(|ui| {
-            ui.label(RichText::new(dot).color(color));
-            ui.label(format!("Tor onion relay — {label}"));
+            ui.label(RichText::new(mark).color(mcolor).monospace().small());
+            ui.label(RichText::new(p.id.label()).strong());
+            if !p.available() {
+                if let Some(r) = p.reason {
+                    ui.label(
+                        RichText::new(format!("({r})")).small().color(PALETTE.text_dim),
+                    );
+                }
+            }
         });
+        ui.label(
+            RichText::new(p.id.description())
+                .small()
+                .color(PALETTE.text_dim),
+        );
+        ui.add_space(4.0);
     }
-    ui.add_space(8.0);
+
+    // The mDNS toggle drives the NEXT launch's transport (relay-only vs relay +
+    // LAN together) — the only network "choice", and it's additive, not a mode.
+    ui.add_space(6.0);
     let mut mdns = vm.mdns_enabled;
     if ui
         .checkbox(&mut mdns, "Run LAN discovery (mDNS) alongside the relay")
@@ -83,7 +154,7 @@ fn network(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
     }
     ui.label(
         RichText::new(
-            "When on, huddle runs the onion relay AND LAN mDNS together — peers on \
+            "When on, huddle runs the relay AND LAN mDNS together — peers on \
              your network connect directly. Applies on the next launch.",
         )
         .small()

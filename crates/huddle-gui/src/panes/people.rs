@@ -1,5 +1,6 @@
-//! The People pane: Requests / Known / Verified / Blocked sublists with
-//! per-row actions (start DM, reconnect, forget, block/unblock, accept/reject).
+//! The Contacts pane: the durable, fingerprint-keyed address book plus
+//! Requests / Known / Verified / Blocked sublists with per-row actions
+//! (message, rename, block/unblock, remove, accept/decline).
 
 use egui::RichText;
 
@@ -10,17 +11,32 @@ use crate::widgets;
 
 pub fn render(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
     ui.add_space(6.0);
-    ui.heading("People");
+    ui.horizontal(|ui| {
+        ui.heading("Contacts");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .button(RichText::new("+ Add by HD-ID").color(PALETTE.accent))
+                .clicked()
+            {
+                actions.push(UiAction::OpenAddContact);
+            }
+        });
+    });
     ui.add_space(4.0);
+    // Requests folds both inbound relay contact requests and legacy libp2p
+    // friend requests into one badge.
+    let request_count = vm.contact_requests.len() + vm.pending_requests.len();
     ui.horizontal(|ui| {
         for tab in [
-            PeopleTab::Pending,
+            PeopleTab::Contacts,
+            PeopleTab::Requests,
             PeopleTab::Known,
             PeopleTab::Verified,
             PeopleTab::Blocked,
         ] {
             let count = match tab {
-                PeopleTab::Pending => vm.pending_requests.len(),
+                PeopleTab::Contacts => vm.contacts.len(),
+                PeopleTab::Requests => request_count,
                 PeopleTab::Known => vm.known_peers.len(),
                 PeopleTab::Verified => vm.verified_peers.len(),
                 PeopleTab::Blocked => vm.blocked.len(),
@@ -30,7 +46,13 @@ pub fn render(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
             } else {
                 tab.label().to_string()
             };
-            if ui.selectable_label(vm.people_tab == tab, label).clicked() {
+            // Draw an unread-style emphasis on Requests when any are waiting.
+            let rich = if tab == PeopleTab::Requests && request_count > 0 {
+                RichText::new(label).color(PALETTE.warn)
+            } else {
+                RichText::new(label)
+            };
+            if ui.selectable_label(vm.people_tab == tab, rich).clicked() {
                 actions.push(UiAction::SelectPeopleTab(tab));
             }
         }
@@ -39,7 +61,8 @@ pub fn render(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| match vm.people_tab {
-            PeopleTab::Pending => pending(ui, vm, actions),
+            PeopleTab::Contacts => contacts(ui, vm, actions),
+            PeopleTab::Requests => requests(ui, vm, actions),
             PeopleTab::Known => known(ui, vm, actions),
             PeopleTab::Verified => verified(ui, vm, actions),
             PeopleTab::Blocked => blocked(ui, vm, actions),
@@ -51,17 +74,126 @@ fn empty_hint(ui: &mut egui::Ui, text: &str) {
     ui.label(RichText::new(text).color(PALETTE.text_dim));
 }
 
-fn pending(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
-    if vm.pending_requests.is_empty() {
-        empty_hint(ui, "no pending friend requests");
+/// One reachability badge per contact: a live LAN connection, relay-reachable,
+/// or offline. Mirrors the per-chat transport language (lan / relay / offline).
+fn reachability(ui: &mut egui::Ui, lan_connected: bool, reachable: bool) {
+    let (glyph, label, color) = if lan_connected {
+        ("●", "lan", PALETTE.success)
+    } else if reachable {
+        ("◈", "relay", PALETTE.accent)
+    } else {
+        ("○", "offline", PALETTE.text_dim)
+    };
+    ui.label(RichText::new(glyph).color(color));
+    ui.label(RichText::new(label).small().color(color));
+}
+
+fn contacts(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
+    if vm.contacts.is_empty() {
+        empty_hint(
+            ui,
+            "no contacts yet — “+ Add by HD-ID” to send a contact request, \
+             or accept one from the Requests tab",
+        );
         return;
     }
+    for c in &vm.contacts {
+        let name = vm.peer_label(&c.fingerprint);
+        ui.horizontal(|ui| {
+            widgets::avatar::show(ui, 30.0, &c.fingerprint, &name);
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(&name).strong());
+                    if c.verified {
+                        widgets::verified_tick(ui);
+                    }
+                    reachability(ui, c.lan_connected, c.reachable);
+                });
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(fmt::display_id(&c.fingerprint))
+                            .monospace()
+                            .small()
+                            .color(PALETTE.text_dim),
+                    );
+                    ui.label(
+                        RichText::new(format!("· {}", c.source))
+                            .small()
+                            .color(PALETTE.text_dim),
+                    );
+                });
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Remove").clicked() {
+                    actions.push(UiAction::RemoveContact(c.fingerprint.clone()));
+                }
+                if ui.button("Block").clicked() {
+                    actions.push(UiAction::PersonBlock(c.fingerprint.clone()));
+                }
+                if ui.button("Rename").clicked() {
+                    actions.push(UiAction::OpenEditAlias(c.fingerprint.clone()));
+                }
+                if ui.button("Message").clicked() {
+                    actions.push(UiAction::PersonStartDm(c.fingerprint.clone()));
+                }
+            });
+        });
+        ui.separator();
+    }
+}
+
+fn requests(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
+    if vm.contact_requests.is_empty() && vm.pending_requests.is_empty() {
+        empty_hint(ui, "no pending requests");
+        return;
+    }
+    // Inbound contact requests over the relay inbox (the "add by HD-ID over the
+    // internet" path).
+    for req in &vm.contact_requests {
+        let name = req
+            .display_name
+            .clone()
+            .unwrap_or_else(|| vm.peer_label(&req.fingerprint));
+        ui.horizontal(|ui| {
+            widgets::avatar::show(ui, 28.0, &req.fingerprint, &name);
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(&name).strong());
+                    ui.label(RichText::new("via relay").small().color(PALETTE.accent));
+                });
+                ui.label(
+                    RichText::new(fmt::display_id(&req.fingerprint))
+                        .monospace()
+                        .small()
+                        .color(PALETTE.text_dim),
+                );
+                if let Some(note) = req.note.as_deref().filter(|n| !n.is_empty()) {
+                    ui.label(RichText::new(format!("“{note}”")).italics().small());
+                }
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Decline").clicked() {
+                    actions.push(UiAction::RejectContactRequest(req.fingerprint.clone()));
+                }
+                if ui.button("Accept").clicked() {
+                    actions.push(UiAction::AcceptContactRequest(req.fingerprint.clone()));
+                }
+            });
+        });
+        ui.separator();
+    }
+    // Legacy libp2p friend requests (same-LAN / direct dial).
     for req in &vm.pending_requests {
         ui.horizontal(|ui| {
             widgets::avatar::show(ui, 28.0, &req.fingerprint, &vm.peer_label(&req.fingerprint));
             ui.vertical(|ui| {
                 ui.label(RichText::new(vm.peer_label(&req.fingerprint)).strong());
-                ui.label(RichText::new(fmt::display_id(&req.fingerprint)).monospace().small().color(PALETTE.text_dim));
+                ui.label(
+                    RichText::new(fmt::display_id(&req.fingerprint))
+                        .monospace()
+                        .small()
+                        .color(PALETTE.text_dim),
+                );
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Reject").clicked() {

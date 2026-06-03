@@ -2,6 +2,7 @@
 //! and pane selectors (People / Activity / Settings).
 
 use egui::{Label, RichText, Sense};
+use huddle_core::network::NetworkMode;
 use huddle_core::storage::repo::RoomKind;
 
 use crate::model::{Pane, Section, UiAction, ViewModel};
@@ -89,7 +90,7 @@ pub fn render(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
 
             ui.add_space(10.0);
             ui.separator();
-            pane_row(ui, vm, actions, Pane::People, "People");
+            pane_row(ui, vm, actions, Pane::People, "Contacts");
             pane_row(ui, vm, actions, Pane::Activity, "Activity");
             pane_row(ui, vm, actions, Pane::Settings, "Settings");
         });
@@ -110,7 +111,10 @@ fn profile_header(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>
                 {
                     actions.push(UiAction::SelectPane(Pane::Profile));
                 }
-                widgets::status_dot(ui, vm.server_connected);
+                // Online when ANY path is live — the relay or a LAN swarm. The
+                // app doesn't separate Tor from LAN; both count as reachable.
+                let reachable = vm.server_connected || vm.mode != NetworkMode::Server;
+                widgets::status_dot(ui, reachable);
             });
             ui.label(
                 RichText::new(&vm.our_id)

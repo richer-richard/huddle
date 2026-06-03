@@ -18,9 +18,9 @@ use huddle_core::storage::repo::RoomKind;
 use crate::bridge::{self, Cmd, Inbox, ReadyParts, ReqOk, ReqTag};
 use crate::cli::Cli;
 use crate::model::{
-    reduce, ConfirmInviteState, EditUsernameState, GoDarkState, JoinState, JoinWithCodeState,
-    Modal, NewDmState, NewGroupState, Pane, PasteInviteState, RotateState, SasStage, SasState,
-    SearchState, Section, UiAction, VerifyState, ViewModel,
+    reduce, AddContactState, ConfirmInviteState, EditAliasState, EditUsernameState, GoDarkState,
+    JoinState, JoinWithCodeState, Modal, NewDmState, NewGroupState, Pane, PasteInviteState,
+    RotateState, SasStage, SasState, SearchState, Section, UiAction, VerifyState, ViewModel,
 };
 use crate::panes;
 use crate::theme::PALETTE;
@@ -265,12 +265,7 @@ impl Ready {
                 ui.separator();
                 ui.monospace(&self.vm.our_id);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    relay_indicator(ui, &self.vm);
-                    ui.label(
-                        RichText::new(self.vm.mode.as_str())
-                            .small()
-                            .color(PALETTE.text_dim),
-                    );
+                    network_indicator(ui, &self.vm);
                 });
             });
             ui.add_space(4.0);
@@ -426,6 +421,87 @@ impl Ready {
                 } else {
                     self.vm.refresh(&self.handle);
                 }
+            }
+
+            // ---- Contacts address book + relay contact requests (huddle 1.0) ----
+            UiAction::OpenAddContact => {
+                self.vm.modal = Modal::AddContact(AddContactState::default());
+            }
+            UiAction::SubmitAddContact { target, note } => {
+                let resolved =
+                    huddle_core::app::normalize_to_fingerprint(&target).or_else(|| {
+                        let m = self.handle.peers_with_username(&target);
+                        (m.len() == 1).then(|| m[0].clone())
+                    });
+                match resolved {
+                    Some(fp) if fp == self.vm.our_fp => {
+                        if let Modal::AddContact(s) = &mut self.vm.modal {
+                            s.error = Some("that's your own ID".into());
+                        }
+                    }
+                    Some(fp) => {
+                        // Signed request over the relay inbox (works across the
+                        // internet), then race a same-LAN dial for immediacy.
+                        let dial_target = target.clone();
+                        self.cmd.fire(move |h| async move {
+                            let r = h.send_contact_request(&fp, note.as_deref()).await;
+                            let _ = h.dial_by_id_or_username(&dial_target).await;
+                            r
+                        });
+                        self.vm.set_status("contact request sent (also trying LAN)…");
+                        self.vm.modal = Modal::None;
+                    }
+                    None => {
+                        if let Modal::AddContact(s) = &mut self.vm.modal {
+                            s.error =
+                                Some("not a valid HD-ID — paste their full HD-XXXX-… id".into());
+                        }
+                    }
+                }
+            }
+            UiAction::AcceptContactRequest(fp) => {
+                // accept_contact_request records the contact, opens the DM, and
+                // deletes the pending row; the DM surfaces via AutoOpenDm.
+                self.cmd
+                    .fire(move |h| async move { h.accept_contact_request(&fp).await });
+                self.vm.set_status("accepted — opening DM…");
+            }
+            UiAction::RejectContactRequest(fp) => {
+                if let Err(e) = self.handle.reject_contact_request(&fp, false) {
+                    self.vm.set_status(format!("decline failed: {e}"));
+                } else {
+                    self.vm.refresh(&self.handle);
+                }
+            }
+            UiAction::RemoveContact(fp) => {
+                if let Err(e) = self.handle.remove_contact(&fp) {
+                    self.vm.set_status(format!("remove failed: {e}"));
+                } else {
+                    self.vm.refresh(&self.handle);
+                }
+            }
+            UiAction::OpenEditAlias(fp) => {
+                let current_label = self.vm.peer_label(&fp);
+                let current_alias = self
+                    .vm
+                    .contacts
+                    .iter()
+                    .find(|c| c.fingerprint == fp)
+                    .and_then(|c| c.alias.clone())
+                    .unwrap_or_default();
+                self.vm.modal = Modal::EditAlias(EditAliasState {
+                    fingerprint: fp,
+                    current_label,
+                    input: current_alias,
+                });
+            }
+            UiAction::SubmitEditAlias { fingerprint, alias } => {
+                if let Err(e) = self.handle.set_contact_alias(&fingerprint, alias.as_deref()) {
+                    self.vm.set_status(format!("rename failed: {e}"));
+                } else {
+                    self.vm.refresh(&self.handle);
+                }
+                self.vm.modal = Modal::None;
             }
             UiAction::InboundAccept { peer_id, address } => {
                 self.cmd.fire(move |h| async move {
@@ -814,17 +890,42 @@ fn toggle_section(vm: &mut ViewModel, s: Section) {
     }
 }
 
-fn relay_indicator(ui: &mut egui::Ui, vm: &ViewModel) {
-    if !vm.server_enabled {
-        return;
-    }
-    let (glyph, color, label) = if vm.server_connected {
-        ("●", PALETTE.success, "relay")
-    } else {
-        ("○", PALETTE.text_dim, "connecting")
-    };
-    ui.label(RichText::new(label).small().color(PALETTE.text_dim));
-    ui.label(RichText::new(glyph).color(color));
+/// One unified network status: LAN and the relay (with its active transport
+/// door) shown side by side — never a Tor-vs-LAN mode toggle. Both run
+/// together by default; this just reports which paths are currently live.
+fn network_indicator(ui: &mut egui::Ui, vm: &ViewModel) {
+    // Right-aligned region lays out right-to-left; nest a normal left-to-right
+    // group so "LAN ●   relay ● via …" reads in the natural order.
+    ui.horizontal(|ui| {
+        let lan_on = vm.mode != NetworkMode::Server;
+        let (g, c) = if lan_on {
+            ("●", PALETTE.success)
+        } else {
+            ("○", PALETTE.text_dim)
+        };
+        ui.label(RichText::new("LAN").small().color(PALETTE.text_dim));
+        ui.label(RichText::new(g).color(c));
+
+        if vm.server_enabled {
+            ui.add_space(8.0);
+            let (g, c) = if vm.server_connected {
+                ("●", PALETTE.success)
+            } else {
+                ("○", PALETTE.text_dim)
+            };
+            ui.label(RichText::new("relay").small().color(PALETTE.text_dim));
+            ui.label(RichText::new(g).color(c));
+            if vm.server_connected {
+                if let Some(door) = vm.active_transport {
+                    ui.label(
+                        RichText::new(format!("via {}", door.as_str()))
+                            .small()
+                            .color(PALETTE.text_dim),
+                    );
+                }
+            }
+        }
+    });
 }
 
 fn welcome_pane(ui: &mut egui::Ui) {

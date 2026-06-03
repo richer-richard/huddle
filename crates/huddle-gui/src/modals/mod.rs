@@ -7,9 +7,10 @@ use egui::{Id, RichText, TextEdit};
 
 use crate::fmt;
 use crate::model::{
-    AcceptRotationState, ConfirmInviteState, EditUsernameState, GoDarkState, InboundDialState,
-    JoinState, JoinWithCodeState, Modal, NewDmState, NewGroupState, PasteInviteState, RotateState,
-    SasStage, SasState, SearchState, UiAction, VerifyState, GO_DARK_CONFIRM_PHRASE, ONBOARDING_PAGES,
+    AcceptRotationState, AddContactState, ConfirmInviteState, EditAliasState, EditUsernameState,
+    GoDarkState, InboundDialState, JoinState, JoinWithCodeState, Modal, NewDmState, NewGroupState,
+    PasteInviteState, RotateState, SasStage, SasState, SearchState, UiAction, VerifyState,
+    GO_DARK_CONFIRM_PHRASE, ONBOARDING_PAGES,
 };
 use crate::theme::PALETTE;
 
@@ -22,6 +23,8 @@ pub fn render(ctx: &egui::Context, modal: &mut Modal, our_id: &str, actions: &mu
         Modal::None => {}
         Modal::NewGroup(s) => new_group(ctx, s, actions),
         Modal::NewDm(s) => new_dm(ctx, s, actions),
+        Modal::AddContact(s) => add_contact(ctx, s, actions),
+        Modal::EditAlias(s) => edit_alias(ctx, s, actions),
         Modal::Join(s) => join(ctx, s, actions),
         Modal::InboundDial(s) => inbound_dial(ctx, s, actions),
         Modal::Verify(s) => verify(ctx, s, actions),
@@ -681,6 +684,103 @@ fn new_dm(ctx: &egui::Context, s: &mut NewDmState, actions: &mut Vec<UiAction>) 
                     target: s.target.trim().to_string(),
                 });
             }
+        }
+    });
+    if resp.should_close() {
+        actions.push(UiAction::CloseModal);
+    }
+}
+
+fn add_contact(ctx: &egui::Context, s: &mut AddContactState, actions: &mut Vec<UiAction>) {
+    let resp = egui::Modal::new(Id::new("modal-add-contact")).show(ctx, |ui| {
+        ui.set_width(380.0);
+        ui.heading("Add a contact");
+        ui.label(
+            RichText::new(
+                "enter their HD-ID. huddle sends a signed contact request over the relay \
+                 (works across the internet) and also tries a direct LAN connection.",
+            )
+            .small()
+            .color(PALETTE.text_dim),
+        );
+        ui.add_space(10.0);
+        ui.label("HD-ID");
+        let r = ui.add(
+            TextEdit::singleline(&mut s.target)
+                .desired_width(f32::INFINITY)
+                .hint_text("HD-XXXX-XXXX-…"),
+        );
+        let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        ui.add_space(6.0);
+        ui.label(RichText::new("note (optional)").small().color(PALETTE.text_dim));
+        ui.add(
+            TextEdit::singleline(&mut s.note)
+                .desired_width(f32::INFINITY)
+                .hint_text("\"hi, it's me from …\""),
+        );
+        if let Some(e) = &s.error {
+            ui.add_space(6.0);
+            ui.colored_label(PALETTE.error, e);
+        }
+        ui.add_space(12.0);
+        let mut go = enter;
+        ui.horizontal(|ui| {
+            if ui.button("Send request").clicked() {
+                go = true;
+            }
+            if ui.button("Cancel").clicked() {
+                actions.push(UiAction::CloseModal);
+            }
+        });
+        if go {
+            if s.target.trim().is_empty() {
+                s.error = Some("enter an HD-ID".into());
+            } else {
+                let note = s.note.trim();
+                actions.push(UiAction::SubmitAddContact {
+                    target: s.target.trim().to_string(),
+                    note: (!note.is_empty()).then(|| note.to_string()),
+                });
+            }
+        }
+    });
+    if resp.should_close() {
+        actions.push(UiAction::CloseModal);
+    }
+}
+
+fn edit_alias(ctx: &egui::Context, s: &mut EditAliasState, actions: &mut Vec<UiAction>) {
+    let resp = egui::Modal::new(Id::new("modal-edit-alias")).show(ctx, |ui| {
+        ui.set_width(360.0);
+        ui.heading("Rename contact");
+        ui.label(
+            RichText::new(format!("{} — a local nickname, only you see it.", s.current_label))
+                .small()
+                .color(PALETTE.text_dim),
+        );
+        ui.add_space(8.0);
+        let r = ui.add(
+            TextEdit::singleline(&mut s.input)
+                .desired_width(f32::INFINITY)
+                .hint_text("alias (empty clears it)"),
+        );
+        let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        ui.add_space(10.0);
+        let mut go = enter;
+        ui.horizontal(|ui| {
+            if ui.button("Save").clicked() {
+                go = true;
+            }
+            if ui.button("Cancel").clicked() {
+                actions.push(UiAction::CloseModal);
+            }
+        });
+        if go {
+            let v = s.input.trim();
+            actions.push(UiAction::SubmitEditAlias {
+                fingerprint: s.fingerprint.clone(),
+                alias: (!v.is_empty()).then(|| v.to_string()),
+            });
         }
     });
     if resp.should_close() {
