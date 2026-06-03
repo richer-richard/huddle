@@ -10,6 +10,7 @@ use huddle_core::storage::keychain;
 mod app;
 mod clipboard;
 mod input;
+mod install;
 mod keybindings;
 mod notifier;
 mod ui;
@@ -112,6 +113,11 @@ enum Commands {
     /// / Arti / clearnet), each with its privacy tradeoff and whether it's
     /// usable in this build + config. Runs without the TUI.
     Transports,
+    /// huddle 1.1.3: build the desktop GUI from source and install it where the
+    /// OS keeps apps (macOS `/Applications/Huddle.app`, Linux `.desktop` in the
+    /// app menu, Windows Start Menu), then launch it. Run from a source clone
+    /// (or set `HUDDLE_SRC`). The plain `huddle` command still opens the TUI.
+    App,
 }
 
 fn parse_mode(s: &str) -> std::result::Result<NetworkMode, String> {
@@ -128,6 +134,9 @@ async fn main() -> Result<()> {
     match &cli.command {
         Some(Commands::Doctor) => return run_doctor(),
         Some(Commands::Transports) => return run_transports(&cli),
+        // huddle 1.1.3: build + install + launch the desktop GUI. Runs without
+        // the TUI / log appender / network, like `doctor` and `transports`.
+        Some(Commands::App) => return install::run(),
         None => {}
     }
 

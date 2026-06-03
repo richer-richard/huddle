@@ -63,16 +63,22 @@ fn account(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
     ui.label(RichText::new("Appearance").strong());
     ui.horizontal(|ui| {
         ui.label(RichText::new("Theme:").color(palette().text_dim));
-        for t in [crate::theme::Theme::Dark, crate::theme::Theme::Light] {
+        for t in [
+            crate::theme::Theme::System,
+            crate::theme::Theme::Dark,
+            crate::theme::Theme::Light,
+        ] {
             if ui.selectable_label(vm.theme == t, t.label()).clicked() {
                 actions.push(UiAction::SetTheme(t));
             }
         }
     });
     ui.label(
-        RichText::new("Dark is the default. Switches instantly — no restart needed.")
-            .small()
-            .color(palette().text_dim),
+        RichText::new(
+            "System follows your OS appearance (default). Switches instantly — no restart needed.",
+        )
+        .small()
+        .color(palette().text_dim),
     );
 }
 

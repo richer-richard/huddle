@@ -437,6 +437,13 @@ impl AppHandle {
         relays: Vec<Multiaddr>,
         transports: TransportConfig,
     ) -> Result<Self> {
+        // Ensure rustls has a CryptoProvider before any transport door builds a
+        // TLS config (the `wss://` clearnet relay). This is the innermost start
+        // funnel — `start`, `start_with_options`, and `start_with_db` all route
+        // here — so every consumer (GUI, TUI, tests) is covered. Idempotent;
+        // see `crate::install_default_crypto_provider`.
+        crate::install_default_crypto_provider();
+
         let identity = Self::load_or_create_identity(&db)?;
         let identity = Arc::new(identity);
         info!(fingerprint = %identity.fingerprint(), peer_id = %identity.peer_id(), mode = %mode.as_str(), port, relay_count = relays.len(), "identity loaded");
@@ -4353,14 +4360,16 @@ impl AppHandle {
         repo::set_setting(&self.db, "mdns_enabled", if on { "1" } else { "0" })
     }
 
-    /// huddle 1.1.2: the persisted GUI theme — `"dark"` (default) or `"light"`.
-    /// The desktop GUI reads this to pick its egui visuals; the TUI ignores it.
+    /// huddle 1.1.3: the persisted GUI theme — `"system"` (default; follows the
+    /// OS light/dark setting), `"dark"`, or `"light"`. The desktop GUI reads this
+    /// to pick its egui visuals; the TUI ignores it. Unset resolves to
+    /// `"system"`; installs that already persisted `"dark"`/`"light"` keep them.
     pub fn theme(&self) -> String {
         repo::get_setting(&self.db, "theme")
             .ok()
             .flatten()
             .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| "dark".to_string())
+            .unwrap_or_else(|| "system".to_string())
     }
 
     pub fn set_theme(&self, theme: &str) -> Result<()> {

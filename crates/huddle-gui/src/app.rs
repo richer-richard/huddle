@@ -59,7 +59,11 @@ enum Transition {
 
 impl HuddleApp {
     pub fn new(cc: &eframe::CreationContext<'_>, rt: tokio::runtime::Runtime, cli: Cli) -> Self {
-        crate::theme::install(&cc.egui_ctx);
+        // Pre-unlock the persisted choice isn't known yet (the DB is locked), so
+        // start from the default (System) and resolve it against the OS theme —
+        // the lock screen already matches the user's appearance.
+        crate::theme::set_choice(crate::theme::Theme::default());
+        crate::theme::apply(&cc.egui_ctx);
         let ctx = cc.egui_ctx.clone();
         let rt_handle = rt.handle().clone();
         let mut me = Self {
@@ -124,10 +128,10 @@ impl HuddleApp {
                     self.ctx.clone(),
                 );
                 let mut vm = ViewModel::from_handle(&parts.handle);
-                // Apply the persisted theme now that the settings are readable;
-                // the pre-unlock screen used the Dark default.
-                crate::theme::set_theme(vm.theme);
-                crate::theme::install(&self.ctx);
+                // Apply the persisted choice now that the settings are readable;
+                // the pre-unlock screen used the System default.
+                crate::theme::set_choice(vm.theme);
+                crate::theme::apply(&self.ctx);
                 // First-launch onboarding, then the update-check opt-in.
                 if !parts.handle.onboarding_seen() {
                     vm.modal = Modal::Onboarding { cursor: 0 };
@@ -162,6 +166,13 @@ impl eframe::App for HuddleApp {
         let close_requested = ui.ctx().input(|i| i.viewport().close_requested());
         let mut transition: Option<Transition> = None;
         let mut do_close = false;
+        // Live-follow the OS appearance: when the effective theme (the user's
+        // choice resolved against the OS dark/light) changes, re-install the
+        // palette. egui repaints automatically on OS theme change, so a `System`
+        // user sees the switch instantly; this is a no-op when nothing changed.
+        if crate::theme::resolve(ui.ctx()) != crate::theme::current() {
+            crate::theme::apply(ui.ctx());
+        }
         match &mut self.state {
             AppState::Fatal(msg) => render_fatal(ui, msg),
             AppState::Locked(form) => {
@@ -732,12 +743,13 @@ impl Ready {
                 self.vm.mdns_enabled = on;
             }
             UiAction::SetTheme(t) => {
-                // Persist + apply live (no restart needed — egui repaints with
-                // the new visuals next frame).
+                // Persist the choice + apply live (no restart needed). `System`
+                // resolves against the OS theme; the per-frame check in `ui`
+                // keeps it in sync if the OS flips light/dark later.
                 let _ = self.handle.set_theme(t.as_str());
                 self.vm.theme = t;
-                crate::theme::set_theme(t);
-                crate::theme::install(&self.ctx);
+                crate::theme::set_choice(t);
+                crate::theme::apply(&self.ctx);
             }
             UiAction::OpenSetRelay => {
                 self.vm.modal = Modal::SetRelay(SetRelayState {

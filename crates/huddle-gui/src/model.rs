@@ -226,7 +226,8 @@ pub enum UiAction {
     OpenQr,
     ToggleNotifications(bool),
     ToggleMdns(bool),
-    /// huddle 1.1.2: switch the GUI theme (Dark/Light) — applied live + persisted.
+    /// huddle 1.1.3: switch the GUI theme (System/Dark/Light) — applied live +
+    /// persisted. `System` follows the OS appearance.
     SetTheme(crate::theme::Theme),
     /// huddle 1.0: open the "set clearnet relay" modal (prefilled with the
     /// current value).
@@ -475,7 +476,9 @@ pub struct ViewModel {
     // settings snapshots
     pub notifications_enabled: bool,
     pub mdns_enabled: bool,
-    /// huddle 1.1.2: the active GUI theme (Dark default). Persisted as `theme`.
+    /// huddle 1.1.3: the user's GUI theme CHOICE (System/Dark/Light; `System`
+    /// default, follows the OS). Persisted as `theme`; resolved to an effective
+    /// Dark/Light at render time. Drives the Settings selector highlight.
     pub theme: crate::theme::Theme,
     /// huddle 1.0: the persisted clearnet relay URL (e.g. a cloudflared
     /// tunnel), or `None` when unset. Shown + editable in Settings → Network.
@@ -1013,7 +1016,7 @@ mod tests {
             transport_profiles: Vec::new(),
             notifications_enabled: true,
             mdns_enabled: false,
-            theme: crate::theme::Theme::Dark,
+            theme: crate::theme::Theme::System,
             clearnet_relay: None,
             verified_only_inbound: false,
             update_check: None,

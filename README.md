@@ -112,6 +112,29 @@ cargo build --release
 ./target/release/huddle         # terminal client
 ```
 
+### `huddle app` — build, install & launch the GUI in one step
+
+From a source clone, the terminal client doubles as an installer for the
+desktop app:
+
+```bash
+huddle app
+```
+
+This builds `huddle-gui` in release mode and installs it where your OS keeps
+desktop apps, then launches it:
+
+- **macOS** — assembles `Huddle.app` in `/Applications` (falling back to
+  `~/Applications` if that isn't writable).
+- **Linux** (Ubuntu / Debian / Kali / …) — copies the binary to `~/.local/bin`
+  and adds a `huddle.desktop` launcher to your app menu.
+- **Windows** — installs to `%LOCALAPPDATA%\Programs\Huddle` with a Start-Menu
+  shortcut.
+
+Plain `huddle` (no subcommand) still opens the terminal UI. Run `huddle app`
+from inside the repo, or point it at a clone with
+`HUDDLE_SRC=/path/to/huddle huddle app`.
+
 ### Running the desktop GUI
 
 Launch `huddle-gui`. On **first run** it walks you through a one-time signup:
