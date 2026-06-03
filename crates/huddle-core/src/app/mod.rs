@@ -4353,6 +4353,20 @@ impl AppHandle {
         repo::set_setting(&self.db, "mdns_enabled", if on { "1" } else { "0" })
     }
 
+    /// huddle 1.1.2: the persisted GUI theme — `"dark"` (default) or `"light"`.
+    /// The desktop GUI reads this to pick its egui visuals; the TUI ignores it.
+    pub fn theme(&self) -> String {
+        repo::get_setting(&self.db, "theme")
+            .ok()
+            .flatten()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "dark".to_string())
+    }
+
+    pub fn set_theme(&self, theme: &str) -> Result<()> {
+        repo::set_setting(&self.db, "theme", theme)
+    }
+
     /// huddle 1.0: the persisted clearnet relay URL (a `ws://<ip>:<port>/ws`
     /// or `wss://host/ws` door onto the relay backend — e.g. a cloudflared
     /// tunnel). `None` when unset/blank. This is what the GUI "Set relay" field

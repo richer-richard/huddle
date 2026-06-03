@@ -6,7 +6,7 @@ use egui::RichText;
 
 use crate::fmt;
 use crate::model::{PeopleTab, UiAction, ViewModel};
-use crate::theme::PALETTE;
+use crate::theme::palette;
 use crate::widgets;
 
 pub fn render(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
@@ -15,7 +15,7 @@ pub fn render(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
         ui.heading("Contacts");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui
-                .button(RichText::new("+ Add by HD-ID").color(PALETTE.accent))
+                .button(RichText::new("+ Add by HD-ID").color(palette().accent))
                 .clicked()
             {
                 actions.push(UiAction::OpenAddContact);
@@ -48,7 +48,7 @@ pub fn render(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
             };
             // Draw an unread-style emphasis on Requests when any are waiting.
             let rich = if tab == PeopleTab::Requests && request_count > 0 {
-                RichText::new(label).color(PALETTE.warn)
+                RichText::new(label).color(palette().warn)
             } else {
                 RichText::new(label)
             };
@@ -71,18 +71,18 @@ pub fn render(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
 
 fn empty_hint(ui: &mut egui::Ui, text: &str) {
     ui.add_space(8.0);
-    ui.label(RichText::new(text).color(PALETTE.text_dim));
+    ui.label(RichText::new(text).color(palette().text_dim));
 }
 
 /// One reachability badge per contact: a live LAN connection, relay-reachable,
 /// or offline. Mirrors the per-chat transport language (lan / relay / offline).
 fn reachability(ui: &mut egui::Ui, lan_connected: bool, reachable: bool) {
     let (glyph, label, color) = if lan_connected {
-        ("●", "lan", PALETTE.success)
+        ("●", "lan", palette().success)
     } else if reachable {
-        ("◈", "relay", PALETTE.accent)
+        ("◈", "relay", palette().accent)
     } else {
-        ("○", "offline", PALETTE.text_dim)
+        ("○", "offline", palette().text_dim)
     };
     ui.label(RichText::new(glyph).color(color));
     ui.label(RichText::new(label).small().color(color));
@@ -114,12 +114,12 @@ fn contacts(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
                         RichText::new(fmt::display_id(&c.fingerprint))
                             .monospace()
                             .small()
-                            .color(PALETTE.text_dim),
+                            .color(palette().text_dim),
                     );
                     ui.label(
                         RichText::new(format!("· {}", c.source))
                             .small()
-                            .color(PALETTE.text_dim),
+                            .color(palette().text_dim),
                     );
                 });
             });
@@ -159,13 +159,13 @@ fn requests(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(&name).strong());
-                    ui.label(RichText::new("via relay").small().color(PALETTE.accent));
+                    ui.label(RichText::new("via relay").small().color(palette().accent));
                 });
                 ui.label(
                     RichText::new(fmt::display_id(&req.fingerprint))
                         .monospace()
                         .small()
-                        .color(PALETTE.text_dim),
+                        .color(palette().text_dim),
                 );
                 if let Some(note) = req.note.as_deref().filter(|n| !n.is_empty()) {
                     ui.label(RichText::new(format!("“{note}”")).italics().small());
@@ -192,7 +192,7 @@ fn requests(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
                     RichText::new(fmt::display_id(&req.fingerprint))
                         .monospace()
                         .small()
-                        .color(PALETTE.text_dim),
+                        .color(palette().text_dim),
                 );
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -223,7 +223,7 @@ fn known(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
             widgets::status_dot(ui, online);
             ui.vertical(|ui| {
                 ui.label(RichText::new(label).strong());
-                ui.label(RichText::new(&p.address).monospace().small().color(PALETTE.text_dim));
+                ui.label(RichText::new(&p.address).monospace().small().color(palette().text_dim));
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Forget").clicked() {
@@ -261,7 +261,7 @@ fn verified(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
                     ui.label(RichText::new(vm.peer_label(fp)).strong());
                     widgets::verified_tick(ui);
                 });
-                ui.label(RichText::new(fmt::display_id(fp)).monospace().small().color(PALETTE.text_dim));
+                ui.label(RichText::new(fmt::display_id(fp)).monospace().small().color(palette().text_dim));
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Message").clicked() {
@@ -280,7 +280,7 @@ fn blocked(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
     }
     for fp in &vm.blocked {
         ui.horizontal(|ui| {
-            ui.label(RichText::new(fmt::display_id(fp)).monospace().color(PALETTE.text_dim));
+            ui.label(RichText::new(fmt::display_id(fp)).monospace().color(palette().text_dim));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Unblock").clicked() {
                     actions.push(UiAction::PersonUnblock(fp.clone()));

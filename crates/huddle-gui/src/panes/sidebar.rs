@@ -6,7 +6,7 @@ use huddle_core::network::NetworkMode;
 use huddle_core::storage::repo::RoomKind;
 
 use crate::model::{Pane, Section, UiAction, ViewModel};
-use crate::theme::PALETTE;
+use crate::theme::palette;
 use crate::widgets;
 
 pub fn render(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
@@ -21,13 +21,13 @@ pub fn render(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
             section_header(ui, vm, actions, Section::Direct, "DIRECT MESSAGES");
             if vm.expanded.contains(&Section::Direct) {
                 if ui
-                    .selectable_label(false, RichText::new("  + New message").color(PALETTE.accent))
+                    .selectable_label(false, RichText::new("  + New message").color(palette().accent))
                     .clicked()
                 {
                     actions.push(UiAction::OpenNewDm);
                 }
                 if ui
-                    .selectable_label(false, RichText::new("  + Paste invite").color(PALETTE.accent))
+                    .selectable_label(false, RichText::new("  + Paste invite").color(palette().accent))
                     .clicked()
                 {
                     actions.push(UiAction::OpenPasteInvite);
@@ -41,7 +41,7 @@ pub fn render(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
                     ui.label(
                         RichText::new("  no direct messages yet")
                             .small()
-                            .color(PALETTE.text_dim),
+                            .color(palette().text_dim),
                     );
                 }
                 for d in dms {
@@ -54,7 +54,7 @@ pub fn render(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
             section_header(ui, vm, actions, Section::Group, "GROUP ROOMS");
             if vm.expanded.contains(&Section::Group) {
                 if ui
-                    .selectable_label(false, RichText::new("  + New room").color(PALETTE.accent))
+                    .selectable_label(false, RichText::new("  + New room").color(palette().accent))
                     .clicked()
                 {
                     actions.push(UiAction::OpenNewGroup);
@@ -72,7 +72,7 @@ pub fn render(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
                     .filter(|d| d.kind != RoomKind::Direct && !vm.active_ids.contains(&d.room_id))
                     .collect();
                 if !discover.is_empty() {
-                    ui.label(RichText::new("  Discover").small().color(PALETTE.text_dim));
+                    ui.label(RichText::new("  Discover").small().color(palette().text_dim));
                     for d in discover {
                         ui.horizontal(|ui| {
                             let enc = if d.encrypted { "  E" } else { "" };
@@ -120,7 +120,7 @@ fn profile_header(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>
                 RichText::new(&vm.our_id)
                     .monospace()
                     .small()
-                    .color(PALETTE.text_dim),
+                    .color(palette().text_dim),
             );
         });
     });
@@ -141,7 +141,7 @@ fn section_header(
     let text = RichText::new(format!("{arrow} {title}"))
         .strong()
         .small()
-        .color(PALETTE.text_dim);
+        .color(palette().text_dim);
     if ui.add(Label::new(text).sense(Sense::click())).clicked() {
         actions.push(UiAction::ToggleSection(section));
     }
@@ -165,7 +165,7 @@ fn room_row(
     };
     let text = format!("{prefix}{label}{badge}");
     let rich = if unread > 0 {
-        RichText::new(text).color(PALETTE.warn)
+        RichText::new(text).color(palette().warn)
     } else {
         RichText::new(text)
     };

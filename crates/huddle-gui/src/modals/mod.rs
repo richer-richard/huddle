@@ -12,7 +12,7 @@ use crate::model::{
     PasteInviteState, RotateState, SasStage, SasState, SearchState, SetRelayState, UiAction,
     VerifyState, GO_DARK_CONFIRM_PHRASE, ONBOARDING_PAGES,
 };
-use crate::theme::PALETTE;
+use crate::theme::palette;
 
 fn right<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) {
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), add);
@@ -43,8 +43,8 @@ pub fn render(ctx: &egui::Context, modal: &mut Modal, our_id: &str, actions: &mu
         Modal::Onboarding { cursor } => onboarding(ctx, *cursor, actions),
         Modal::UpdateOptIn => update_opt_in(ctx, actions),
         Modal::QuitConfirm => quit_confirm(ctx, actions),
-        Modal::Error(m) => message(ctx, "error", m, PALETTE.error, actions),
-        Modal::Info(m) => message(ctx, "huddle", m, PALETTE.text, actions),
+        Modal::Error(m) => message(ctx, "error", m, palette().error, actions),
+        Modal::Info(m) => message(ctx, "huddle", m, palette().text, actions),
     }
 }
 
@@ -55,7 +55,7 @@ fn edit_username(ctx: &egui::Context, s: &mut EditUsernameState, actions: &mut V
         ui.label(
             RichText::new("broadcast to peers you share rooms with. Empty clears it (you show as [anonymous]).")
                 .small()
-                .color(PALETTE.text_dim),
+                .color(palette().text_dim),
         );
         ui.add_space(8.0);
         ui.add(TextEdit::singleline(&mut s.input).desired_width(f32::INFINITY).hint_text("display name"));
@@ -82,7 +82,7 @@ fn edit_username(ctx: &egui::Context, s: &mut EditUsernameState, actions: &mut V
 fn go_dark(ctx: &egui::Context, s: &mut GoDarkState, actions: &mut Vec<UiAction>) {
     let resp = egui::Modal::new(Id::new("modal-go-dark")).show(ctx, |ui| {
         ui.set_width(420.0);
-        ui.heading(RichText::new("Go dark").color(PALETTE.error));
+        ui.heading(RichText::new("Go dark").color(palette().error));
         ui.label("This permanently deletes your account and wipes all local data. There is no undo.");
         ui.add_space(10.0);
         if s.requires_passphrase {
@@ -94,12 +94,12 @@ fn go_dark(ctx: &egui::Context, s: &mut GoDarkState, actions: &mut Vec<UiAction>
         }
         if let Some(e) = &s.error {
             ui.add_space(6.0);
-            ui.colored_label(PALETTE.error, e);
+            ui.colored_label(palette().error, e);
         }
         ui.add_space(12.0);
         ui.horizontal(|ui| {
             if ui
-                .button(RichText::new("Delete everything").color(PALETTE.error))
+                .button(RichText::new("Delete everything").color(palette().error))
                 .clicked()
             {
                 actions.push(UiAction::SubmitGoDark(s.input.clone()));
@@ -183,7 +183,7 @@ fn onboarding(ctx: &egui::Context, cursor: usize, actions: &mut Vec<UiAction>) {
             ui.label(
                 RichText::new(format!("{}/{}", cursor + 1, ONBOARDING_PAGES.len()))
                     .small()
-                    .color(PALETTE.text_dim),
+                    .color(palette().text_dim),
             );
         });
     });
@@ -237,7 +237,7 @@ fn verify(ctx: &egui::Context, s: &mut VerifyState, actions: &mut Vec<UiAction>)
         ui.label(
             RichText::new("check a peer after confirming their HD-ID out of band, or run an interactive SAS exchange.")
                 .small()
-                .color(PALETTE.text_dim),
+                .color(palette().text_dim),
         );
         ui.add_space(8.0);
         egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
@@ -279,7 +279,7 @@ fn sas(ctx: &egui::Context, s: &mut SasState, actions: &mut Vec<UiAction>) {
     let resp = egui::Modal::new(Id::new("modal-sas")).show(ctx, |ui| {
         ui.set_width(400.0);
         ui.heading("SAS verification");
-        ui.label(RichText::new(format!("with {}", fmt::display_id(&partner))).color(PALETTE.text_dim));
+        ui.label(RichText::new(format!("with {}", fmt::display_id(&partner))).color(palette().text_dim));
         ui.add_space(12.0);
         match &mut s.stage {
             SasStage::Waiting => {
@@ -291,11 +291,11 @@ fn sas(ctx: &egui::Context, s: &mut SasState, actions: &mut Vec<UiAction>) {
             SasStage::Comparing { words, decimal, our_matched } => {
                 ui.label("compare these with your partner out of band:");
                 ui.add_space(8.0);
-                ui.label(RichText::new(decimal.clone()).heading().monospace().color(PALETTE.accent));
-                ui.label(RichText::new(words.clone()).color(PALETTE.text));
+                ui.label(RichText::new(decimal.clone()).heading().monospace().color(palette().accent));
+                ui.label(RichText::new(words.clone()).color(palette().text));
                 ui.add_space(12.0);
                 if *our_matched {
-                    ui.label(RichText::new("waiting for your partner to confirm…").color(PALETTE.text_dim));
+                    ui.label(RichText::new("waiting for your partner to confirm…").color(palette().text_dim));
                 } else {
                     ui.horizontal(|ui| {
                         if ui.button("They match").clicked() {
@@ -325,7 +325,7 @@ fn show_invite(ctx: &egui::Context, url: &str, actions: &mut Vec<UiAction>) {
         ui.label(
             RichText::new("share this out of band. For encrypted rooms, share the passphrase separately.")
                 .small()
-                .color(PALETTE.text_dim),
+                .color(palette().text_dim),
         );
         ui.add_space(8.0);
         egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
@@ -358,7 +358,7 @@ fn paste_invite(ctx: &egui::Context, s: &mut PasteInviteState, actions: &mut Vec
         );
         if let Some(e) = &s.error {
             ui.add_space(6.0);
-            ui.colored_label(PALETTE.error, e);
+            ui.colored_label(palette().error, e);
         }
         ui.add_space(10.0);
         ui.horizontal(|ui| {
@@ -393,7 +393,7 @@ fn set_relay(ctx: &egui::Context, s: &mut SetRelayState, actions: &mut Vec<UiAct
                  URL. Leave empty and Save to clear. Applies on the next launch.",
             )
             .small()
-            .color(PALETTE.text_dim),
+            .color(palette().text_dim),
         );
         ui.add_space(8.0);
         ui.add(
@@ -403,7 +403,7 @@ fn set_relay(ctx: &egui::Context, s: &mut SetRelayState, actions: &mut Vec<UiAct
         );
         if let Some(e) = &s.error {
             ui.add_space(6.0);
-            ui.colored_label(PALETTE.error, e);
+            ui.colored_label(palette().error, e);
         }
         ui.add_space(10.0);
         ui.horizontal(|ui| {
@@ -439,11 +439,11 @@ fn confirm_invite(ctx: &egui::Context, s: &ConfirmInviteState, actions: &mut Vec
         ui.label(
             RichText::new(format!("from {}", fmt::display_id(&s.invite.fingerprint)))
                 .small()
-                .color(PALETTE.text_dim),
+                .color(palette().text_dim),
         );
         if s.invite.signature_b64.is_none() {
             ui.add_space(4.0);
-            ui.colored_label(PALETTE.warn, "⚠ this invite is unsigned");
+            ui.colored_label(palette().warn, "⚠ this invite is unsigned");
         }
         // huddle 1.0: a v3 invite adopts the inviter's clearnet relay.
         if let Some(relay) = &s.invite.relay_url {
@@ -451,7 +451,7 @@ fn confirm_invite(ctx: &egui::Context, s: &ConfirmInviteState, actions: &mut Vec
             ui.label(
                 RichText::new(format!("connects you through their relay: {relay}"))
                     .small()
-                    .color(PALETTE.text_dim),
+                    .color(palette().text_dim),
             );
         }
         ui.add_space(12.0);
@@ -515,7 +515,7 @@ fn search(ctx: &egui::Context, s: &mut SearchState, actions: &mut Vec<UiAction>)
         ui.separator();
         egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
             if s.searched && s.results.is_empty() {
-                ui.label(RichText::new("no matches").color(PALETTE.text_dim));
+                ui.label(RichText::new("no matches").color(palette().text_dim));
             }
             for m in &s.results {
                 ui.horizontal(|ui| {
@@ -523,7 +523,7 @@ fn search(ctx: &egui::Context, s: &mut SearchState, actions: &mut Vec<UiAction>)
                         RichText::new(fmt::hhmm(m.sent_at))
                             .small()
                             .monospace()
-                            .color(PALETTE.text_dim),
+                            .color(palette().text_dim),
                     );
                     ui.add(egui::Label::new(&m.body).wrap());
                 });
@@ -546,14 +546,14 @@ fn rotate(ctx: &egui::Context, s: &mut RotateState, actions: &mut Vec<UiAction>)
         ui.label(
             RichText::new("everyone re-derives the key from a new passphrase — share it out of band.")
                 .small()
-                .color(PALETTE.text_dim),
+                .color(palette().text_dim),
         );
         ui.add_space(8.0);
         ui.label("new passphrase");
         ui.add(TextEdit::singleline(&mut s.passphrase).password(true).desired_width(f32::INFINITY));
         if let Some(e) = &s.error {
             ui.add_space(6.0);
-            ui.colored_label(PALETTE.error, e);
+            ui.colored_label(palette().error, e);
         }
         ui.add_space(10.0);
         ui.horizontal(|ui| {
@@ -587,14 +587,14 @@ fn accept_rotation(ctx: &egui::Context, s: &mut AcceptRotationState, actions: &m
                 fmt::display_id(&s.rotator_fingerprint)
             ))
             .small()
-            .color(PALETTE.text_dim),
+            .color(palette().text_dim),
         );
         ui.add_space(8.0);
         ui.label("new passphrase");
         ui.add(TextEdit::singleline(&mut s.passphrase).password(true).desired_width(f32::INFINITY));
         if let Some(e) = &s.error {
             ui.add_space(6.0);
-            ui.colored_label(PALETTE.error, e);
+            ui.colored_label(palette().error, e);
         }
         ui.add_space(10.0);
         ui.horizontal(|ui| {
@@ -626,7 +626,7 @@ fn inbound_dial(ctx: &egui::Context, s: &InboundDialState, actions: &mut Vec<UiA
         ui.add_space(8.0);
         ui.label("an unknown peer is dialing you:");
         ui.monospace(fmt::display_id(&s.fingerprint));
-        ui.label(RichText::new(&s.address).small().color(PALETTE.text_dim));
+        ui.label(RichText::new(&s.address).small().color(palette().text_dim));
         ui.add_space(12.0);
         ui.horizontal(|ui| {
             if ui.button("Accept once").clicked() {
@@ -683,7 +683,7 @@ fn new_group(ctx: &egui::Context, s: &mut NewGroupState, actions: &mut Vec<UiAct
         }
         if let Some(e) = &s.error {
             ui.add_space(6.0);
-            ui.colored_label(PALETTE.error, e);
+            ui.colored_label(palette().error, e);
         }
         ui.add_space(12.0);
         ui.horizontal(|ui| {
@@ -724,7 +724,7 @@ fn new_dm(ctx: &egui::Context, s: &mut NewDmState, actions: &mut Vec<UiAction>) 
         let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
         if let Some(e) = &s.error {
             ui.add_space(6.0);
-            ui.colored_label(PALETTE.error, e);
+            ui.colored_label(palette().error, e);
         }
         ui.add_space(12.0);
         let mut go = enter;
@@ -761,7 +761,7 @@ fn add_contact(ctx: &egui::Context, s: &mut AddContactState, actions: &mut Vec<U
                  (works across the internet) and also tries a direct LAN connection.",
             )
             .small()
-            .color(PALETTE.text_dim),
+            .color(palette().text_dim),
         );
         ui.add_space(10.0);
         ui.label("HD-ID");
@@ -772,7 +772,7 @@ fn add_contact(ctx: &egui::Context, s: &mut AddContactState, actions: &mut Vec<U
         );
         let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
         ui.add_space(6.0);
-        ui.label(RichText::new("note (optional)").small().color(PALETTE.text_dim));
+        ui.label(RichText::new("note (optional)").small().color(palette().text_dim));
         ui.add(
             TextEdit::singleline(&mut s.note)
                 .desired_width(f32::INFINITY)
@@ -780,7 +780,7 @@ fn add_contact(ctx: &egui::Context, s: &mut AddContactState, actions: &mut Vec<U
         );
         if let Some(e) = &s.error {
             ui.add_space(6.0);
-            ui.colored_label(PALETTE.error, e);
+            ui.colored_label(palette().error, e);
         }
         ui.add_space(12.0);
         let mut go = enter;
@@ -816,7 +816,7 @@ fn edit_alias(ctx: &egui::Context, s: &mut EditAliasState, actions: &mut Vec<UiA
         ui.label(
             RichText::new(format!("{} — a local nickname, only you see it.", s.current_label))
                 .small()
-                .color(PALETTE.text_dim),
+                .color(palette().text_dim),
         );
         ui.add_space(8.0);
         let r = ui.add(
@@ -861,11 +861,11 @@ fn join(ctx: &egui::Context, s: &mut JoinState, actions: &mut Vec<UiAction>) {
                     .desired_width(f32::INFINITY),
             );
         } else {
-            ui.label(RichText::new("this room is public (no passphrase)").color(PALETTE.text_dim));
+            ui.label(RichText::new("this room is public (no passphrase)").color(palette().text_dim));
         }
         if let Some(e) = &s.error {
             ui.add_space(6.0);
-            ui.colored_label(PALETTE.error, e);
+            ui.colored_label(palette().error, e);
         }
         ui.add_space(12.0);
         ui.horizontal(|ui| {

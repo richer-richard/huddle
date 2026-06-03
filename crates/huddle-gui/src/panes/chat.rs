@@ -11,7 +11,7 @@ use huddle_core::storage::repo::{AttachmentStatus, RoomKind};
 
 use crate::fmt;
 use crate::model::{UiAction, ViewModel};
-use crate::theme::PALETTE;
+use crate::theme::palette;
 use crate::widgets;
 
 const TYPING_DEBOUNCE: Duration = Duration::from_millis(800);
@@ -59,18 +59,18 @@ pub fn render(
             };
             ui.heading(title);
             if room.encrypted {
-                ui.label(RichText::new("encrypted").color(PALETTE.encrypted).small());
+                ui.label(RichText::new("encrypted").color(palette().encrypted).small());
             }
             ui.label(
                 RichText::new(format!("· {} members", room.members.len()))
                     .small()
-                    .color(PALETTE.text_dim),
+                    .color(palette().text_dim),
             );
             // Per-chat transport badge (lan / relay / offline) — status only.
             let (glyph, label, color) = match transport {
-                RoomTransport::LanDirect => ("●", "lan", PALETTE.success),
-                RoomTransport::Relay => ("◈", "relay", PALETTE.accent),
-                RoomTransport::Offline => ("○", "offline", PALETTE.text_dim),
+                RoomTransport::LanDirect => ("●", "lan", palette().success),
+                RoomTransport::Relay => ("◈", "relay", palette().accent),
+                RoomTransport::Offline => ("○", "offline", palette().text_dim),
             };
             ui.label(RichText::new(glyph).color(color));
             ui.label(RichText::new(label).small().color(color));
@@ -116,7 +116,7 @@ pub fn render(
                 RichText::new(format!("{} typing…", typers.join(", ")))
                     .italics()
                     .small()
-                    .color(PALETTE.text_dim),
+                    .color(palette().text_dim),
             );
         }
         ui.horizontal(|ui| {
@@ -157,7 +157,7 @@ pub fn render(
             .default_size(230.0)
             .show_inside(ui, |ui| {
                 ui.add_space(6.0);
-                ui.label(RichText::new("MEMBERS").strong().small().color(PALETTE.text_dim));
+                ui.label(RichText::new("MEMBERS").strong().small().color(palette().text_dim));
                 let mut vonly = room_vonly;
                 if ui.checkbox(&mut vonly, "verified-only").changed() {
                     actions.push(UiAction::ToggleRoomVerifiedOnly {
@@ -186,7 +186,7 @@ pub fn render(
                                     widgets::verified_tick(ui);
                                 }
                                 if owners.contains(m) {
-                                    ui.label(RichText::new("owner").small().color(PALETTE.accent));
+                                    ui.label(RichText::new("owner").small().color(palette().accent));
                                 }
                             });
                             if !me {
@@ -228,7 +228,7 @@ pub fn render(
         .show(ui, |ui| {
             if room.messages.is_empty() && room.attachments.is_empty() {
                 ui.add_space(12.0);
-                ui.label(RichText::new("no messages yet — say hello").color(PALETTE.text_dim));
+                ui.label(RichText::new("no messages yet — say hello").color(palette().text_dim));
             }
             let mut last_sender: Option<String> = None;
             let mut last_day: Option<i64> = None;
@@ -241,7 +241,7 @@ pub fn render(
                         ui.label(
                             RichText::new(fmt::ymd_string(m.sent_at))
                                 .small()
-                                .color(PALETTE.text_dim),
+                                .color(palette().text_dim),
                         );
                     });
                 }
@@ -264,12 +264,12 @@ pub fn render(
                         ui.label(
                             RichText::new(&sender_label)
                                 .strong()
-                                .color(if is_me { PALETTE.accent } else { PALETTE.text }),
+                                .color(if is_me { palette().accent } else { palette().text }),
                         );
                         ui.label(
                             RichText::new(fmt::hhmm(m.sent_at))
                                 .small()
-                                .color(PALETTE.text_dim),
+                                .color(palette().text_dim),
                         );
                     });
                 }
@@ -295,12 +295,12 @@ fn attachment_card(
 ) {
     egui::Frame::group(ui.style()).show(ui, |ui| {
         ui.horizontal(|ui| {
-            ui.label(RichText::new("file").small().color(PALETTE.text_dim));
+            ui.label(RichText::new("file").small().color(palette().text_dim));
             ui.label(RichText::new(&a.name).strong());
             ui.label(
                 RichText::new(format!("{} KB", (a.size_bytes / 1024).max(1)))
                     .small()
-                    .color(PALETTE.text_dim),
+                    .color(palette().text_dim),
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| match a.status {
                 AttachmentStatus::Offered | AttachmentStatus::Downloading => {
@@ -310,7 +310,7 @@ fn attachment_card(
                             file_id: a.file_id.clone(),
                         });
                     }
-                    ui.label(RichText::new("downloading…").small().color(PALETTE.warn));
+                    ui.label(RichText::new("downloading…").small().color(palette().warn));
                 }
                 AttachmentStatus::Ready => {
                     if ui.button("Save").clicked() {
@@ -327,13 +327,13 @@ fn attachment_card(
                             file_id: a.file_id.clone(),
                         });
                     }
-                    ui.label(RichText::new("saved").small().color(PALETTE.success));
+                    ui.label(RichText::new("saved").small().color(palette().success));
                 }
                 AttachmentStatus::Failed => {
-                    ui.label(RichText::new("failed").small().color(PALETTE.error));
+                    ui.label(RichText::new("failed").small().color(palette().error));
                 }
                 AttachmentStatus::Cancelled => {
-                    ui.label(RichText::new("cancelled").small().color(PALETTE.text_dim));
+                    ui.label(RichText::new("cancelled").small().color(palette().text_dim));
                 }
             });
         });

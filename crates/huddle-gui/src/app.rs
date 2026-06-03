@@ -24,9 +24,7 @@ use crate::model::{
     ViewModel,
 };
 use crate::panes;
-use crate::theme::PALETTE;
-
-const ERR_RED: egui::Color32 = egui::Color32::from_rgb(0xff, 0x6b, 0x6b);
+use crate::theme::palette;
 
 pub struct HuddleApp {
     #[allow(dead_code)] // owned to keep the runtime + its tasks alive for the process
@@ -126,6 +124,10 @@ impl HuddleApp {
                     self.ctx.clone(),
                 );
                 let mut vm = ViewModel::from_handle(&parts.handle);
+                // Apply the persisted theme now that the settings are readable;
+                // the pre-unlock screen used the Dark default.
+                crate::theme::set_theme(vm.theme);
+                crate::theme::install(&self.ctx);
                 // First-launch onboarding, then the update-check opt-in.
                 if !parts.handle.onboarding_seen() {
                     vm.modal = Modal::Onboarding { cursor: 0 };
@@ -287,7 +289,7 @@ impl Ready {
         egui::Panel::bottom("status").show_inside(ui, |ui| {
             ui.add_space(2.0);
             match self.vm.current_status() {
-                Some(s) => ui.label(RichText::new(s).color(PALETTE.text_dim)),
+                Some(s) => ui.label(RichText::new(s).color(palette().text_dim)),
                 None => ui.label(RichText::new(" ").small()),
             };
             ui.add_space(2.0);
@@ -729,6 +731,14 @@ impl Ready {
                 let _ = self.handle.set_mdns_enabled(on);
                 self.vm.mdns_enabled = on;
             }
+            UiAction::SetTheme(t) => {
+                // Persist + apply live (no restart needed — egui repaints with
+                // the new visuals next frame).
+                let _ = self.handle.set_theme(t.as_str());
+                self.vm.theme = t;
+                crate::theme::set_theme(t);
+                crate::theme::install(&self.ctx);
+            }
             UiAction::OpenSetRelay => {
                 self.vm.modal = Modal::SetRelay(SetRelayState {
                     url: self.vm.clearnet_relay.clone().unwrap_or_default(),
@@ -943,28 +953,28 @@ fn network_indicator(ui: &mut egui::Ui, vm: &ViewModel) {
     ui.horizontal(|ui| {
         let lan_on = vm.mode != NetworkMode::Server;
         let (g, c) = if lan_on {
-            ("●", PALETTE.success)
+            ("●", palette().success)
         } else {
-            ("○", PALETTE.text_dim)
+            ("○", palette().text_dim)
         };
-        ui.label(RichText::new("LAN").small().color(PALETTE.text_dim));
+        ui.label(RichText::new("LAN").small().color(palette().text_dim));
         ui.label(RichText::new(g).color(c));
 
         if vm.server_enabled {
             ui.add_space(8.0);
             let (g, c) = if vm.server_connected {
-                ("●", PALETTE.success)
+                ("●", palette().success)
             } else {
-                ("○", PALETTE.text_dim)
+                ("○", palette().text_dim)
             };
-            ui.label(RichText::new("relay").small().color(PALETTE.text_dim));
+            ui.label(RichText::new("relay").small().color(palette().text_dim));
             ui.label(RichText::new(g).color(c));
             if vm.server_connected {
                 if let Some(door) = vm.active_transport {
                     ui.label(
                         RichText::new(format!("via {}", door.as_str()))
                             .small()
-                            .color(PALETTE.text_dim),
+                            .color(palette().text_dim),
                     );
                 }
             }
@@ -979,7 +989,7 @@ fn welcome_pane(ui: &mut egui::Ui) {
         ui.add_space(8.0);
         ui.label(
             RichText::new("pick a conversation on the left, or start a new one.")
-                .color(PALETTE.text_dim),
+                .color(palette().text_dim),
         );
     });
 }
@@ -1008,7 +1018,7 @@ fn profile_pane(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) 
         crate::widgets::avatar::show(ui, 48.0, &vm.our_fp, &name);
         ui.vertical(|ui| {
             ui.heading(&name);
-            ui.label(RichText::new(&vm.our_id).monospace().color(PALETTE.text_dim));
+            ui.label(RichText::new(&vm.our_id).monospace().color(palette().text_dim));
         });
     });
     ui.separator();
@@ -1026,7 +1036,7 @@ fn profile_pane(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) 
 
 fn copy_row(ui: &mut egui::Ui, actions: &mut Vec<UiAction>, label: &str, value: &str) {
     ui.horizontal(|ui| {
-        ui.label(RichText::new(format!("{label}:")).color(PALETTE.text_dim));
+        ui.label(RichText::new(format!("{label}:")).color(palette().text_dim));
         ui.monospace(value);
         if ui.small_button("copy").clicked() {
             actions.push(UiAction::Copy(value.to_string()));
@@ -1102,7 +1112,7 @@ fn render_locked(ui: &mut egui::Ui, form: &mut LockedForm) -> Option<(String, Op
 
             if let Some(err) = &form.error {
                 ui.add_space(10.0);
-                ui.colored_label(ERR_RED, err);
+                ui.colored_label(palette().error, err);
             }
         });
     });
@@ -1149,7 +1159,7 @@ fn render_fatal(ui: &mut egui::Ui, msg: &str) {
         ui.vertical_centered(|ui| {
             ui.heading("cannot start");
             ui.add_space(10.0);
-            ui.colored_label(ERR_RED, msg);
+            ui.colored_label(palette().error, msg);
         });
     });
 }

@@ -4,7 +4,7 @@ use egui::RichText;
 use huddle_core::network::NetworkMode;
 
 use crate::model::{SettingsTab, UiAction, ViewModel};
-use crate::theme::PALETTE;
+use crate::theme::palette;
 
 pub fn render(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
     ui.add_space(6.0);
@@ -29,7 +29,7 @@ pub fn render(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
 
 fn copy_row(ui: &mut egui::Ui, actions: &mut Vec<UiAction>, label: &str, value: &str) {
     ui.horizontal(|ui| {
-        ui.label(RichText::new(format!("{label}:")).color(PALETTE.text_dim));
+        ui.label(RichText::new(format!("{label}:")).color(palette().text_dim));
         ui.monospace(value);
         if ui.small_button("copy").clicked() {
             actions.push(UiAction::Copy(value.to_string()));
@@ -44,7 +44,7 @@ fn account(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
         .unwrap_or_else(|| "[anonymous]".into());
     ui.add_space(6.0);
     ui.horizontal(|ui| {
-        ui.label(RichText::new("username:").color(PALETTE.text_dim));
+        ui.label(RichText::new("username:").color(palette().text_dim));
         ui.strong(&name);
         if ui.button("Edit").clicked() {
             actions.push(UiAction::OpenEditUsername);
@@ -57,6 +57,23 @@ fn account(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
     if ui.button("Show QR code").clicked() {
         actions.push(UiAction::OpenQr);
     }
+
+    ui.add_space(14.0);
+    ui.separator();
+    ui.label(RichText::new("Appearance").strong());
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Theme:").color(palette().text_dim));
+        for t in [crate::theme::Theme::Dark, crate::theme::Theme::Light] {
+            if ui.selectable_label(vm.theme == t, t.label()).clicked() {
+                actions.push(UiAction::SetTheme(t));
+            }
+        }
+    });
+    ui.label(
+        RichText::new("Dark is the default. Switches instantly — no restart needed.")
+            .small()
+            .color(palette().text_dim),
+    );
 }
 
 fn network(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
@@ -67,7 +84,7 @@ fn network(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
              ride whichever reaches the peer (always end-to-end encrypted).",
         )
         .small()
-        .color(PALETTE.text_dim),
+        .color(palette().text_dim),
     );
     ui.add_space(8.0);
 
@@ -75,20 +92,20 @@ fn network(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
     ui.horizontal(|ui| {
         ui.label(RichText::new("Relay").strong());
         if !vm.server_enabled {
-            ui.label(RichText::new("off (--no-server)").color(PALETTE.warn));
+            ui.label(RichText::new("off (--no-server)").color(palette().warn));
         } else if vm.server_connected {
-            ui.label(RichText::new("●").color(PALETTE.success));
+            ui.label(RichText::new("●").color(palette().success));
             ui.label("connected");
             if let Some(t) = vm.active_transport {
                 ui.label(
-                    RichText::new(format!("· via {}", t.label())).color(PALETTE.text_dim),
+                    RichText::new(format!("· via {}", t.label())).color(palette().text_dim),
                 );
             }
         } else {
-            ui.label(RichText::new("○").color(PALETTE.text_dim));
+            ui.label(RichText::new("○").color(palette().text_dim));
             ui.label(
                 RichText::new("connecting… (Tor down? set a clearnet relay below)")
-                    .color(PALETTE.text_dim),
+                    .color(palette().text_dim),
             );
         }
     });
@@ -102,7 +119,7 @@ fn network(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
                 ui.monospace(u);
             }
             None => {
-                ui.label(RichText::new("none (Tor onion default)").color(PALETTE.text_dim));
+                ui.label(RichText::new("none (Tor onion default)").color(palette().text_dim));
             }
         }
         if ui.small_button("Set / edit").clicked() {
@@ -115,18 +132,18 @@ fn network(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
              Tried first; the onion stays as fallback. Applies on next launch.",
         )
         .small()
-        .color(PALETTE.text_dim),
+        .color(palette().text_dim),
     );
 
     // LAN status — runs alongside, never instead of, the relay.
     ui.horizontal(|ui| {
         ui.label(RichText::new("LAN").strong());
         if vm.mode != NetworkMode::Server {
-            ui.label(RichText::new("●").color(PALETTE.success));
+            ui.label(RichText::new("●").color(palette().success));
             ui.label(format!("on · {}", vm.mode.as_str()));
         } else {
-            ui.label(RichText::new("○").color(PALETTE.text_dim));
-            ui.label(RichText::new("off · enable below").color(PALETTE.text_dim));
+            ui.label(RichText::new("○").color(palette().text_dim));
+            ui.label(RichText::new("off · enable below").color(palette().text_dim));
         }
     });
 
@@ -137,16 +154,16 @@ fn network(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
     ui.label(
         RichText::new("anti-censorship paths onto the relay — huddle picks the first that works:")
             .small()
-            .color(PALETTE.text_dim),
+            .color(palette().text_dim),
     );
     ui.add_space(2.0);
     for p in &vm.transport_profiles {
         let (mark, mcolor) = if Some(p.id) == vm.active_transport {
-            ("● active", PALETTE.success)
+            ("● active", palette().success)
         } else if p.available() {
-            ("· ready", PALETTE.text_dim)
+            ("· ready", palette().text_dim)
         } else {
-            ("  off", PALETTE.text_dim)
+            ("  off", palette().text_dim)
         };
         ui.horizontal(|ui| {
             ui.label(RichText::new(mark).color(mcolor).monospace().small());
@@ -154,7 +171,7 @@ fn network(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
             if !p.available() {
                 if let Some(r) = p.reason {
                     ui.label(
-                        RichText::new(format!("({r})")).small().color(PALETTE.text_dim),
+                        RichText::new(format!("({r})")).small().color(palette().text_dim),
                     );
                 }
             }
@@ -162,7 +179,7 @@ fn network(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
         ui.label(
             RichText::new(p.id.description())
                 .small()
-                .color(PALETTE.text_dim),
+                .color(palette().text_dim),
         );
         ui.add_space(4.0);
     }
@@ -183,14 +200,14 @@ fn network(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
              your network connect directly. Applies on the next launch.",
         )
         .small()
-        .color(PALETTE.text_dim),
+        .color(palette().text_dim),
     );
     // Pending-change hint + one-click restart (skip for explicit `--mode direct`).
     let running_mdns = vm.mode == NetworkMode::Mdns;
     if vm.mdns_enabled != running_mdns && vm.mode != NetworkMode::Direct {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            ui.label(RichText::new("change pending — restart to apply").color(PALETTE.warn));
+            ui.label(RichText::new("change pending — restart to apply").color(palette().warn));
             if ui.button("Restart now").clicked() {
                 actions.push(UiAction::RestartApp);
             }
@@ -238,15 +255,15 @@ fn privacy(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
 
     ui.add_space(20.0);
     ui.separator();
-    ui.label(RichText::new("Danger zone").color(PALETTE.error).strong());
+    ui.label(RichText::new("Danger zone").color(palette().error).strong());
     ui.label(
         RichText::new("Going dark deletes your account and wipes all local data. There is no undo.")
             .small()
-            .color(PALETTE.text_dim),
+            .color(palette().text_dim),
     );
     ui.add_space(4.0);
     if ui
-        .button(RichText::new("Go dark — delete everything").color(PALETTE.error))
+        .button(RichText::new("Go dark — delete everything").color(palette().error))
         .clicked()
     {
         actions.push(UiAction::OpenGoDark);

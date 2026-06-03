@@ -226,6 +226,8 @@ pub enum UiAction {
     OpenQr,
     ToggleNotifications(bool),
     ToggleMdns(bool),
+    /// huddle 1.1.2: switch the GUI theme (Dark/Light) — applied live + persisted.
+    SetTheme(crate::theme::Theme),
     /// huddle 1.0: open the "set clearnet relay" modal (prefilled with the
     /// current value).
     OpenSetRelay,
@@ -473,6 +475,8 @@ pub struct ViewModel {
     // settings snapshots
     pub notifications_enabled: bool,
     pub mdns_enabled: bool,
+    /// huddle 1.1.2: the active GUI theme (Dark default). Persisted as `theme`.
+    pub theme: crate::theme::Theme,
     /// huddle 1.0: the persisted clearnet relay URL (e.g. a cloudflared
     /// tunnel), or `None` when unset. Shown + editable in Settings → Network.
     pub clearnet_relay: Option<String>,
@@ -528,6 +532,7 @@ impl ViewModel {
             transport_profiles: Vec::new(),
             notifications_enabled: true,
             mdns_enabled: false,
+            theme: crate::theme::Theme::from_str(&h.theme()),
             clearnet_relay: None,
             verified_only_inbound: false,
             update_check: None,
@@ -597,6 +602,7 @@ impl ViewModel {
         }
         self.notifications_enabled = h.notifications_enabled();
         self.mdns_enabled = h.mdns_enabled();
+        self.theme = crate::theme::Theme::from_str(&h.theme());
         self.clearnet_relay = h.clearnet_relay();
         self.verified_only_inbound = h.verified_only_inbound();
         self.update_check = h.update_check_enabled();
@@ -1007,6 +1013,7 @@ mod tests {
             transport_profiles: Vec::new(),
             notifications_enabled: true,
             mdns_enabled: false,
+            theme: crate::theme::Theme::Dark,
             clearnet_relay: None,
             verified_only_inbound: false,
             update_check: None,
