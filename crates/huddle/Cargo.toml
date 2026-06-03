@@ -1,6 +1,6 @@
 [package]
 name = "huddle"
-version = "1.1.3"
+version = "1.1.4"
 edition = "2021"
 description = "Terminal-native chat over a self-hosted Tor onion relay (opt-in LAN mDNS / direct dial), all Megolm end-to-end encrypted."
 license = "MIT OR Apache-2.0"
@@ -20,7 +20,7 @@ default = []
 arti = ["huddle-core/arti"]
 
 [dependencies]
-huddle-core = { path = "../huddle-core", version = "1.1.3" }
+huddle-core = { path = "../huddle-core", version = "1.1.4" }
 libp2p = { version = "0.56", features = ["ed25519"] }
 ratatui = "0.30"
 crossterm = "0.29"
@@ -37,4 +37,7 @@ base64 = "0.22"
 # rustls-based) — we call it from a tokio::spawn_blocking task once
 # per 24 h and parse the JSON response by substring (no serde_json
 # dep needed). The user opts in at first launch; default is off.
-ureq = { version = "2", default-features = false, features = ["tls"] }
+# huddle 1.1.4: `socks-proxy` lets the update check tunnel the crates.io
+# request through the local Tor SOCKS5 proxy, so an onion-default user never
+# leaks their clearnet IP to crates.io just to poll for a new version.
+ureq = { version = "2", default-features = false, features = ["tls", "socks-proxy"] }

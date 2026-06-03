@@ -20,7 +20,7 @@ third machine.
 - [ ] **First time only:** an onboarding card appears — press Enter
       to advance through the pages, then dismiss the last one
 - [ ] The Welcome pane appears with the sidebar on the left
-      (`huddle 0.7.x` banner up top)
+      (`huddle 1.1.4` banner up top)
 - [ ] In the sidebar's Profile section, your branded `HD-XXXX-XXXX-…`
       ID is visible. In the default (relay-only) mode the relay dot
       `●` shows next to your name once the onion link is up. With
@@ -308,10 +308,13 @@ move `~/Library/Application Support/huddle` (macOS) / `~/.local/share/huddle`
 - [ ] Start huddle, set a master passphrase at first launch, join
       one or two rooms with another peer.
 - [ ] On peer B, confirm A's fingerprint is in the member list.
-- [ ] On A, press `,` to jump to the Settings pane, then `!` to open
-      the go-dark modal. Try the wrong master passphrase first →
-      inline "incorrect master passphrase" appears; passphrase
-      field clears.
+- [ ] On A, open the go-dark modal with the deliberately-awkward
+      `Alt+Shift+1` chord (macOS: Option+Shift+1; the bare `!` was
+      removed in 0.7.4 as too easy to fat-finger). It fires from any
+      non-typing context and is also reachable from the command palette
+      (`Ctrl+P` / `:`) as "go dark (delete account)". Try the wrong
+      master passphrase first → inline "incorrect master passphrase"
+      appears; passphrase field clears.
 - [ ] Type the correct master passphrase. `Tab` to the second
       field. Type `DELETE EVERYTHING` (exact case). Enter.
 - [ ] On B, within ~2 s A leaves every shared room. A's
@@ -406,6 +409,29 @@ move `~/Library/Application Support/huddle` (macOS) / `~/.local/share/huddle`
       up — the same DM's header flips to `via relay`, and chat keeps working.
 - [ ] With neither a direct connection nor the relay, the header shows
       `offline` (messages still save locally).
+
+## 28. huddle 1.1.4 — enforced relay auth + live Dark/Light theme
+
+- [ ] **Relay client auth (old client rejected).** Run the 1.1.4
+      `huddle-server`. Connect a *pre-1.1.4* `huddle` build (one without the
+      challenge-response handshake): its relay door never reaches
+      `● connected` (Settings → Network shows it connecting/failed), and the
+      server log records a rejected handshake. A 1.1.4 client connects
+      normally and chat over the relay works — confirming the relay now
+      requires every client to prove its fingerprint via an Ed25519
+      signature over the challenge nonce.
+- [ ] **Theme toggle (live).** Go to Settings → Appearance. The active theme
+      (`Dark` by default) is highlighted; press `T`. The whole TUI repaints
+      instantly in the high-contrast Light palette — no restart — and the
+      status line shows `theme: Light`. Press `T` again to return to Dark.
+      Accents, sidebar, chat, and hint chips all re-skin together.
+- [ ] **Theme persists.** Quit and relaunch huddle — it comes back up in the
+      last-chosen theme (stored in the shared `theme` setting; the desktop
+      GUI honors the same value).
+- [ ] **Update check over Tor.** With the update check opted in (Settings →
+      Privacy) and Tor reachable, the daily crates.io poll succeeds through
+      the SOCKS proxy; with Tor down it silently skips rather than making a
+      direct clearnet request (no IP leak).
 
 ## Troubleshooting
 

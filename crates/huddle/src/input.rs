@@ -168,6 +168,8 @@ pub enum Action {
     SettingsTabSelect(SettingsTab),
     /// huddle 0.7.8: Settings → Network row toggle (restart-required).
     SettingsToggleMdns,
+    /// huddle 1.1.4: Settings → Appearance Dark ⇄ Light toggle (live + persisted).
+    SettingsToggleTheme,
     /// huddle 0.7.8: Settings → Privacy row toggle.
     SettingsToggleNotifications,
     /// huddle 0.7.8: Profile pane row navigation + yank-to-clipboard.
@@ -661,6 +663,9 @@ fn map_sidebar(key: KeyEvent, app: &TuiApp) -> Action {
             KeyCode::Char('W') => return Action::OpenWhatsNew,
             KeyCode::Char('M') => return Action::SettingsToggleMdns,
             KeyCode::Char('N') => return Action::SettingsToggleNotifications,
+            // huddle 1.1.4: Dark ⇄ Light. Fires from any Settings tab (like
+            // the other Settings chords) for consistent muscle memory.
+            KeyCode::Char('T') => return Action::SettingsToggleTheme,
             // huddle 0.7.8: lowercase `c` in Settings → Privacy clears
             // every blocked peer at once. Only fires from the Privacy
             // tab so a stray `c` on Account/Network/Appearance can't

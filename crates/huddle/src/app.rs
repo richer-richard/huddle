@@ -1174,6 +1174,10 @@ pub struct TuiApp {
     /// huddle 0.7: centralized color/style palette. All renderers take
     /// a `&Theme`. Default = dark.
     pub theme: crate::ui::theme::Theme,
+    /// huddle 1.1.4: which palette `theme` currently holds. Loaded from the
+    /// persisted `theme` setting at startup and flipped live from
+    /// Settings → Appearance (the `T` chord).
+    pub theme_kind: crate::ui::theme::ThemeKind,
     /// huddle 0.7: unread counts keyed by room_id. Increments on
     /// `MessageReceived` for rooms that aren't the current pane;
     /// clears when that room becomes the active pane.
@@ -1319,12 +1323,17 @@ impl TuiApp {
         if handle.update_check_enabled().is_none() && legacy_seen {
             pending_modals.push_back(Modal::UpdateCheckOptIn);
         }
+        // huddle 1.1.4: honor the persisted theme (shared with the GUI). A
+        // fresh DB returns "dark", and `from_str` falls back to Dark for any
+        // unknown value, so this is the dark default with no special-casing.
+        let theme_kind = crate::ui::theme::ThemeKind::from_str(&handle.theme());
         Self {
             handle,
             mode,
             pane: Pane::Welcome,
             sidebar: SidebarState::default(),
-            theme: crate::ui::theme::Theme::dark(),
+            theme: theme_kind.palette(),
+            theme_kind,
             unread: HashMap::new(),
             show_member_margin: true,
             people_focus: PeopleFocus::default(),
@@ -4158,6 +4167,22 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             app.settings_tab = tab;
             Ok(false)
         }
+        Action::SettingsToggleTheme => {
+            // huddle 1.1.4: flip Dark ⇄ Light, persist, and swap the live
+            // palette so the next frame renders it (ratatui redraws from
+            // `app.theme` every tick — no egui-style repaint plumbing needed).
+            let next = app.theme_kind.toggled();
+            if let Err(e) = app.handle.set_theme(next.as_str()) {
+                // Don't switch the on-screen palette if the write failed, so
+                // what's shown matches what's on disk.
+                app.modal = Modal::Error(format!("save failed: {e}"));
+                return Ok(false);
+            }
+            app.theme_kind = next;
+            app.theme = next.palette();
+            app.set_status(&format!("theme: {}", next.label()));
+            Ok(false)
+        }
         Action::SettingsToggleMdns => {
             let now_on = app.handle.mdns_enabled();
             if let Err(e) = app.handle.set_mdns_enabled(!now_on) {
@@ -5597,10 +5622,20 @@ fn run_update_check(handle: &huddle_core::app::AppHandle) -> Option<String> {
         // Fresh cache: just compare the stored value.
         return cached_version.filter(|v| is_version_newer(v, env!("CARGO_PKG_VERSION")));
     }
-    // Stale cache → fetch.
-    let body = ureq::get("https://crates.io/api/v1/crates/huddle")
+    // Stale cache → fetch. huddle 1.1.4: route the request through the local
+    // Tor SOCKS5 proxy so enabling the (opt-in) update check never leaks the
+    // client's clearnet IP to crates.io — consistent with huddle's
+    // onion-by-default posture. If Tor isn't reachable the request simply
+    // fails and we skip this cycle rather than fall back to a direct
+    // clearnet fetch (privacy over feature).
+    let proxy = ureq::Proxy::new(&format!("socks5://{}", handle.tor_socks())).ok()?;
+    let agent = ureq::AgentBuilder::new()
+        .proxy(proxy)
+        .timeout(std::time::Duration::from_secs(15))
+        .build();
+    let body = agent
+        .get("https://crates.io/api/v1/crates/huddle")
         .set("User-Agent", &format!("huddle/{}", env!("CARGO_PKG_VERSION")))
-        .timeout(std::time::Duration::from_secs(10))
         .call()
         .ok()?
         .into_string()

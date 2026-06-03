@@ -90,6 +90,25 @@ pub fn compute_fingerprint(public_key: &[u8; 32]) -> String {
         .join("-")
 }
 
+/// huddle 1.1.4: domain-separation prefix for the relay client-auth
+/// challenge-response. The client signs `RELAY_AUTH_DOMAIN || nonce` with
+/// its Ed25519 identity key; the relay verifies that signature against the
+/// presented pubkey and checks the pubkey hashes to the claimed fingerprint.
+/// The distinct domain tag keeps this signature from ever being mistaken for
+/// a `SignedRoomMessage` envelope (which commits a different tag).
+pub const RELAY_AUTH_DOMAIN: &[u8] = b"huddle-relay-auth-v1";
+
+/// Build the exact bytes a client signs to prove control of its identity key
+/// to the relay: the domain tag followed by the server's 32-byte challenge
+/// nonce. The relay (`huddle-server`) open-codes the identical construction,
+/// so the two must stay byte-for-byte in sync.
+pub fn relay_auth_msg(nonce: &[u8]) -> Vec<u8> {
+    let mut m = Vec::with_capacity(RELAY_AUTH_DOMAIN.len() + nonce.len());
+    m.extend_from_slice(RELAY_AUTH_DOMAIN);
+    m.extend_from_slice(nonce);
+    m
+}
+
 /// huddle 0.7.8: 12-hex Safety Code derived from the same SHA-256 of the
 /// Ed25519 pubkey that backs `compute_fingerprint`. Format
 /// `SAFE-XXXX-XXXX-XXXX` (uppercase, dash-separated). Display-only — a

@@ -42,7 +42,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme) {
     let lines = match app.settings_tab {
         SettingsTab::Account => render_account(app, theme),
         SettingsTab::Network => render_network(app, theme),
-        SettingsTab::Appearance => render_appearance(theme),
+        SettingsTab::Appearance => render_appearance(app, theme),
         SettingsTab::Privacy => render_privacy(app, theme),
     };
     f.render_widget(Paragraph::new(lines), body_inner);
@@ -245,21 +245,38 @@ fn render_network<'a>(app: &TuiApp, theme: &Theme) -> Vec<Line<'a>> {
     lines
 }
 
-fn render_appearance<'a>(theme: &Theme) -> Vec<Line<'a>> {
+fn render_appearance<'a>(app: &TuiApp, theme: &Theme) -> Vec<Line<'a>> {
+    // huddle 1.1.4: live Dark/Light toggle (the `T` chord). The active option
+    // is highlighted in the accent; press T to flip — applies instantly.
+    let dark_active = matches!(app.theme_kind, crate::ui::theme::ThemeKind::Dark);
+    let dark_style = if dark_active {
+        theme.accent_bold()
+    } else {
+        theme.dim()
+    };
+    let light_style = if dark_active {
+        theme.dim()
+    } else {
+        theme.accent_bold()
+    };
     vec![
+        row(theme, "T", "theme", String::new()),
         Line::from(vec![
-            Span::styled("  theme       ", theme.dim()),
-            Span::styled("dark", theme.text_style()),
-            Span::raw("    "),
-            Span::styled("(default; light + high-contrast in a future release)", theme.dim()),
+            Span::raw("        "),
+            Span::styled("Dark", dark_style),
+            Span::styled("   ·   ", theme.dim()),
+            Span::styled("Light", light_style),
+            Span::styled("     (press ", theme.dim()),
+            Span::styled("T", theme.warn_style()),
+            Span::styled(" to switch — applies instantly)", theme.dim()),
         ]),
         Line::raw(""),
         Line::from(vec![Span::styled(
-            "  Appearance is intentionally minimal in 0.7.8 — the theme",
+            "  High-contrast Dark + Light, persisted across restarts and",
             theme.dim(),
         )]),
         Line::from(vec![Span::styled(
-            "  module is scaffolded for v2 but only `dark` is wired up.",
+            "  shared with the desktop GUI (one theme setting drives both).",
             theme.dim(),
         )]),
     ]

@@ -519,8 +519,10 @@ fresh identity from scratch.
 
 ```
 huddle/
-  huddle-core    library: rooms, crypto, network, storage
-  huddle         terminal UI (the only frontend)
+  huddle-core    shared library: rooms, crypto, network, storage
+  huddle         terminal UI (ratatui TUI)
+  huddle-gui     native desktop app (egui/eframe)
+  huddle-server  WebSocket relay + offline mailbox (SQLite)
 ```
 
 **Networking** — libp2p 0.56 with TCP+Noise+Yamux transport, mDNS for
@@ -612,6 +614,90 @@ your platform's Downloads folder. Phase 2 cap is 1 MiB per file.
   two parties (Megolm message keys still ratchet, but the wrap key
   doesn't). Per-DM ephemeral ratchets (Double Ratchet-style) are a
   candidate follow-up.
+
+## What's new in 1.1.4 — security & robustness pass
+
+A hardening release across the relay client, the DM/SAS key exchange, the
+mailbox, and the updater — plus the TUI catching up to the GUI's live themes.
+No new features; the wire/relay protocol gets stricter and a few classes of
+abuse close.
+
+- **Relay client auth via Ed25519 challenge-response.** Connecting clients now
+  prove control of their identity key to the relay through a signed
+  challenge-response handshake before they can subscribe to an inbox or post
+  to a mailbox — so a peer can't squat another fingerprint's inbox.
+- **X25519 small-order / contributory checks on DM + SAS.** Both the DM wrap-key
+  ECDH and the SAS ephemeral exchange now reject small-order and non-contributory
+  public keys, closing key-substitution / forced-shared-secret attacks on the
+  handshakes.
+- **Safer relay mailbox delivery.** Queued ciphertext is now removed only
+  after it's handed to the recipient's socket, over a bounded outbound queue,
+  so a drop mid-drain no longer silently loses or double-delivers a message.
+- **Bounded retention GC.** The relay's SQLite mailbox enforces a bounded
+  retention window and garbage-collects expired ciphertext, so an offline
+  recipient can't let the queue grow without limit.
+- **Update check routed via Tor.** The opt-in crates.io update check now goes
+  through the Tor SOCKS proxy instead of a direct clearnet request, so enabling
+  it no longer leaks your IP to the index.
+- **TUI live Dark / Light themes.** The terminal client gains the live
+  Dark/Light theme toggle that shipped for the GUI in 1.1.2 — switchable from
+  the Settings pane at runtime, no restart.
+
+## What's new in 1.1.3 — rustls fix, system theme, `huddle app` installer
+
+A reliability + convenience release.
+
+- **rustls CryptoProvider fix.** The desktop GUI's `wss://` clearnet-relay
+  worker could panic at startup ("could not automatically determine the
+  process-level CryptoProvider"). huddle now links and installs the `ring`
+  provider explicitly, so the clearnet door works in every binary.
+- **System theme (GUI).** The desktop GUI gains a **System** option that
+  follows your OS light/dark setting — now the default; existing Dark/Light
+  choices are preserved.
+- **`huddle app` installer.** From a source clone the terminal binary doubles
+  as a one-step installer that builds, installs, and launches the GUI:
+  `huddle app`.
+
+## What's new in 1.1.2 — high-contrast Dark + Light GUI themes
+
+The desktop GUI gains a proper theming pass: hand-tuned, high-contrast **Dark**
+and **Light** palettes with a live toggle.
+
+- **Two high-contrast themes.** Both Dark and Light are tuned for legible
+  contrast across chat, sidebar, and modals rather than eframe's defaults.
+- **Live Settings toggle.** Switch themes from Settings at runtime — the whole
+  window re-skins immediately, no restart, and the choice persists.
+
+## What's new in 1.1.1 — GUI install guide on crates.io
+
+A docs-only release so the published crate carries the new install guide.
+
+- **GUI install + run guide.** The README's Install section (with the
+  `huddle-gui` install + first-run walkthrough) ships in the crate published to
+  crates.io. No code changes.
+
+## What's new in 1.1.0 — baked-in operator clearnet relay
+
+huddle now ships with the operator's clearnet relay built in, so a client that
+can't reach Tor connects with zero config — and the GUI reaches clearnet parity.
+
+- **Operator clearnet relay door baked in.** A cloudflared `wss://` tunnel onto
+  the very same rooms + mailboxes is compiled in as a default door. It's tried
+  only *after* the onion, so a Tor user never touches it; `--clearnet-server`,
+  `clearnet_url` in `config.toml`, or Settings → Network override it.
+- **GUI clearnet parity.** The desktop GUI gets the same clearnet-relay
+  controls as the TUI — set / edit a relay URL from Settings → Network, with
+  invites embedding the configured relay.
+
+## What's new in 1.0.1 — the GUI catches up to the unified network
+
+The native egui GUI gains the contacts book, transport doors, and unified
+LAN+relay network that landed for the TUI in 1.0.0.
+
+- **Contacts, doors & unified network in the GUI.** The egui desktop client
+  now wires up the fingerprint-keyed Contacts book, the add-by-HD-ID relay
+  inbox flow, the multi-transport doors, and the LAN+relay-by-default network —
+  reaching feature parity with the TUI's 1.0.0 release.
 
 ## What's new in 1.0.0 — one app, every network, every door
 

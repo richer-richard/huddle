@@ -27,6 +27,7 @@ use ed25519_dalek::VerifyingKey;
 use hkdf::Hkdf;
 use sha2::{Digest, Sha256, Sha512};
 use x25519_dalek::{PublicKey, StaticSecret};
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::crypto::passphrase::KEY_LEN;
 use crate::error::{HuddleError, Result};
@@ -44,6 +45,19 @@ pub fn derive_dm_key(
     let our_x = ed25519_seed_to_x25519_secret(our_ed25519_seed);
     let partner_x = ed25519_pubkey_to_x25519(partner_ed25519_pubkey)?;
     let shared = our_x.diffie_hellman(&partner_x);
+    // huddle 1.1.4: defense-in-depth small-order check. A non-contributory
+    // partner pubkey (one of the eight small-order Montgomery points, which
+    // an Ed25519 small-order point maps to) forces a predictable low-order
+    // shared secret regardless of our secret — so an attacker who injects
+    // such a "pubkey" could derive the room key. Two honest peers always
+    // produce a contributory secret, so this never rejects a real DM.
+    if !shared.was_contributory() {
+        return Err(HuddleError::Session(
+            "DM key agreement rejected: partner X25519 pubkey is non-contributory \
+             (small-order point)"
+                .into(),
+        ));
+    }
     // HKDF-SHA256: a fixed v1 salt (versioned for future rotation) and
     // the canonical room_id as `info` so two different DMs between the
     // same identities (impossible by construction, but defended in
@@ -61,10 +75,16 @@ fn ed25519_seed_to_x25519_secret(seed: &[u8; 32]) -> StaticSecret {
     // `StaticSecret::from` applies the required RFC 7748 clamping
     // (clear low 3 bits, set bit 254, clear bit 255) so we don't need
     // to do it manually.
-    let h = Sha512::digest(seed);
-    let mut bytes = [0u8; 32];
+    //
+    // huddle 1.1.4: the SHA-512 digest and the extracted scalar are both
+    // secret X25519 key material. The scalar lives in `Zeroizing`; the digest
+    // (whose first 32 bytes ARE the scalar) is explicitly zeroized before it
+    // drops so no un-wiped copy lingers. `StaticSecret` zeroizes on drop too.
+    let mut h = Sha512::digest(seed);
+    let mut bytes = Zeroizing::new([0u8; 32]);
     bytes.copy_from_slice(&h[..32]);
-    StaticSecret::from(bytes)
+    h.as_mut_slice().zeroize();
+    StaticSecret::from(*bytes)
 }
 
 fn ed25519_pubkey_to_x25519(pubkey_bytes: &[u8; 32]) -> Result<PublicKey> {
@@ -132,5 +152,18 @@ mod tests {
         // rejects truly malformed inputs. This particular test exercises
         // the error path on a non-canonical encoding.
         let _ = r; // success or err — both fine for sanity of the call path
+    }
+
+    #[test]
+    fn rejects_small_order_partner_pubkey() {
+        // The Ed25519 identity point (y = 1, encoded 0x01 0x00…) maps to a
+        // small-order Montgomery point, so the ECDH is non-contributory.
+        // The contributory check must reject it (either VerifyingKey decode
+        // fails or was_contributory() is false — both surface as Err).
+        let alice = Identity::generate().unwrap();
+        let mut id_point = [0u8; 32];
+        id_point[0] = 1;
+        let r = derive_dm_key(&alice.secret_bytes(), &id_point, "room");
+        assert!(r.is_err(), "small-order partner pubkey must be rejected");
     }
 }

@@ -25,15 +25,34 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Result};
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine;
+use ed25519_dalek::{Signature, VerifyingKey};
 use futures_util::{SinkExt, StreamExt};
+use rand::RngCore;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::WebSocketStream;
 use tracing::{debug, info};
+
+/// huddle 1.1.4: must match `huddle_core::identity::RELAY_AUTH_DOMAIN`.
+const RELAY_AUTH_DOMAIN: &[u8] = b"huddle-relay-auth-v1";
+/// huddle 1.1.4: drop queued mailbox ciphertext older than this so an offline
+/// recipient's queue can't grow without bound over time (count is already
+/// capped by `MAX_MAILBOX_PER_FP`; this adds an age bound).
+const MAILBOX_TTL_SECS: i64 = 30 * 24 * 60 * 60;
+/// huddle 1.1.4: bound each connection's outbound queue. A stalled reader can
+/// no longer make the server buffer unboundedly — fan-out past this is dropped
+/// to the recipient's mailbox instead (memory-amplification DoS defense).
+const OUTBOUND_CAP: usize = 256;
+/// huddle 1.1.4: drop a connection that connects but never completes the auth
+/// handshake within this many seconds (idle pre-auth DoS defense).
+const PRE_AUTH_TIMEOUT_SECS: u64 = 20;
 
 /// Reject base64 payloads larger than this (≈256 KiB encoded).
 const MAX_PAYLOAD_B64: usize = 256 * 1024;
@@ -49,9 +68,16 @@ const MAX_ROOMS_PER_HELLO: usize = 1000;
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ClientMsg {
     /// Announce identity and (re)assert room memberships, then drain the
-    /// mailbox. Must be the first message.
+    /// mailbox. Must be the first message. huddle 1.1.4: it now authenticates
+    /// — `pubkey_b64` is the client's Ed25519 pubkey and `signature_b64` is a
+    /// signature over `RELAY_AUTH_DOMAIN || nonce` for the nonce we sent in
+    /// the opening `Challenge`. The server verifies both before registering.
     Hello {
         fingerprint: String,
+        #[serde(default)]
+        pubkey_b64: String,
+        #[serde(default)]
+        signature_b64: String,
         #[serde(default)]
         rooms: Vec<String>,
     },
@@ -75,6 +101,9 @@ enum ClientMsg {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ServerMsg {
+    /// huddle 1.1.4: sent immediately on connect. The client signs the nonce
+    /// to prove control of its identity key before it can do anything.
+    Challenge { nonce_b64: String },
     Ready { fingerprint: String },
     Message { room: String, id: String, payload_b64: String },
     Sent { id: String, delivered: usize, queued: usize },
@@ -82,7 +111,7 @@ enum ServerMsg {
     Error { message: String },
 }
 
-type Tx = mpsc::UnboundedSender<ServerMsg>;
+type Tx = mpsc::Sender<ServerMsg>;
 
 struct Shared {
     db: Mutex<Connection>,
@@ -109,6 +138,29 @@ async fn main() -> Result<()> {
         db: Mutex::new(conn),
         conns: Mutex::new(HashMap::new()),
     });
+
+    // huddle 1.1.4: periodic mailbox GC. Every hour drop queued ciphertext
+    // older than MAILBOX_TTL_SECS so an offline recipient's queue is bounded
+    // in age as well as count (MAX_MAILBOX_PER_FP). The first tick fires
+    // immediately, so an expired backlog is also swept on startup.
+    {
+        let shared = shared.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
+            loop {
+                tick.tick().await;
+                let cutoff = now_unix() - MAILBOX_TTL_SECS;
+                let db = shared.db.lock().await;
+                match db.execute("DELETE FROM mailbox WHERE created_at < ?1", params![cutoff]) {
+                    Ok(n) if n > 0 => {
+                        debug!(removed = n, "mailbox GC: dropped expired ciphertext")
+                    }
+                    Ok(_) => {}
+                    Err(e) => debug!(error = %e, "mailbox GC failed"),
+                }
+            }
+        });
+    }
 
     let listener = TcpListener::bind(&bind).await?;
     info!(%bind, db = %db_path, "huddle-server listening (WebSocket + /health)");
@@ -198,7 +250,7 @@ async fn serve_landing(mut stream: TcpStream) -> Result<()> {
 
 async fn serve_ws(ws: WebSocketStream<TcpStream>, shared: Arc<Shared>) -> Result<()> {
     let (mut sink, mut stream) = ws.split();
-    let (tx, mut rx) = mpsc::unbounded_channel::<ServerMsg>();
+    let (tx, mut rx) = mpsc::channel::<ServerMsg>(OUTBOUND_CAP);
 
     // Pump outgoing messages from the channel to the socket. Other
     // connections push into `tx` to deliver fan-out messages here.
@@ -214,12 +266,45 @@ async fn serve_ws(ws: WebSocketStream<TcpStream>, shared: Arc<Shared>) -> Result
         }
     });
 
-    let mut fingerprint: Option<String> = None;
+    // huddle 1.1.4: enforced client auth. Greet with a random 32-byte nonce;
+    // the client must answer with a `Hello` carrying its pubkey + an Ed25519
+    // signature over `RELAY_AUTH_DOMAIN || nonce`. Until that verifies we
+    // accept nothing else and drop the connection on failure (a hard break —
+    // pre-1.1.3 clients that send no proof are rejected). The proven
+    // fingerprint is then PINNED to the connection: a later Hello may
+    // re-assert rooms but can never re-key the socket to an identity it
+    // didn't prove (which would otherwise let it steal that identity's
+    // mailbox / fan-out).
+    let mut nonce = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut nonce);
+    if tx
+        .send(ServerMsg::Challenge {
+            nonce_b64: B64.encode(nonce),
+        })
+        .await
+        .is_err()
+    {
+        writer.abort();
+        return Ok(());
+    }
 
-    while let Some(frame) = stream.next().await {
-        let frame = match frame {
-            Ok(f) => f,
-            Err(_) => break,
+    let mut fingerprint: Option<String> = None;
+    let mut authenticated = false;
+    // Drop a connection that never finishes the handshake within the deadline
+    // (idle pre-auth DoS defense). Disabled once authenticated.
+    let auth_deadline = tokio::time::sleep(std::time::Duration::from_secs(PRE_AUTH_TIMEOUT_SECS));
+    tokio::pin!(auth_deadline);
+
+    loop {
+        let frame = tokio::select! {
+            _ = &mut auth_deadline, if !authenticated => {
+                debug!("client did not authenticate within the timeout; dropping");
+                break;
+            }
+            f = stream.next() => match f {
+                Some(Ok(fr)) => fr,
+                Some(Err(_)) | None => break,
+            },
         };
         let text = match frame {
             WsMessage::Text(t) => t.as_str().to_string(),
@@ -230,16 +315,55 @@ async fn serve_ws(ws: WebSocketStream<TcpStream>, shared: Arc<Shared>) -> Result
         let msg: ClientMsg = match serde_json::from_str(&text) {
             Ok(m) => m,
             Err(e) => {
-                let _ = tx.send(ServerMsg::Error {
-                    message: format!("bad message: {e}"),
-                });
+                let _ = tx
+                    .send(ServerMsg::Error {
+                        message: format!("bad message: {e}"),
+                    })
+                    .await;
                 continue;
             }
         };
+        // Gate: nothing happens until the client proves its fingerprint. On
+        // success we BIND the server-derived fingerprint (from the verified
+        // pubkey) to this connection — never the client-claimed string.
+        if !authenticated {
+            match &msg {
+                ClientMsg::Hello {
+                    fingerprint: claimed,
+                    pubkey_b64,
+                    signature_b64,
+                    ..
+                } => match verify_client_auth(claimed, pubkey_b64, signature_b64, &nonce) {
+                    Ok(proven_fp) => {
+                        fingerprint = Some(proven_fp);
+                        authenticated = true;
+                    }
+                    Err(e) => {
+                        debug!(error = %e, "client auth failed; dropping connection");
+                        let _ = tx
+                            .send(ServerMsg::Error {
+                                message: format!("auth failed: {e}"),
+                            })
+                            .await;
+                        break;
+                    }
+                },
+                _ => {
+                    let _ = tx
+                        .send(ServerMsg::Error {
+                            message: "authenticate with hello first".into(),
+                        })
+                        .await;
+                    break;
+                }
+            }
+        }
         if let Err(e) = handle_client_msg(msg, &mut fingerprint, &tx, &shared).await {
-            let _ = tx.send(ServerMsg::Error {
-                message: e.to_string(),
-            });
+            let _ = tx
+                .send(ServerMsg::Error {
+                    message: e.to_string(),
+                })
+                .await;
         }
     }
 
@@ -264,16 +388,22 @@ async fn handle_client_msg(
     shared: &Arc<Shared>,
 ) -> Result<()> {
     match msg {
-        ClientMsg::Hello { fingerprint: fp, rooms } => {
-            let fp = clean_id(&fp).ok_or_else(|| anyhow!("invalid fingerprint"))?;
-            *fingerprint = Some(fp.clone());
-            shared
-                .conns
-                .lock()
-                .await
-                .entry(fp.clone())
-                .or_default()
-                .push(tx.clone());
+        ClientMsg::Hello { rooms, .. } => {
+            // huddle 1.1.4: the routing fingerprint is the one PROVEN during
+            // the auth handshake (bound by serve_ws from the verified pubkey),
+            // NOT the client-claimed `fingerprint` field — which we ignore here
+            // so a second Hello can't re-key this socket to an identity it never
+            // proved (and drain that identity's mailbox). A re-Hello may only
+            // re-assert room memberships.
+            let fp = require_fp(fingerprint)?;
+            {
+                let mut conns = shared.conns.lock().await;
+                let entry = conns.entry(fp.clone()).or_default();
+                // Don't register the same socket twice on a repeat Hello.
+                if !entry.iter().any(|s| s.same_channel(tx)) {
+                    entry.push(tx.clone());
+                }
+            }
             {
                 let db = shared.db.lock().await;
                 for room in rooms.iter().take(MAX_ROOMS_PER_HELLO) {
@@ -282,7 +412,7 @@ async fn handle_client_msg(
                     }
                 }
             }
-            let _ = tx.send(ServerMsg::Ready { fingerprint: fp.clone() });
+            let _ = tx.send(ServerMsg::Ready { fingerprint: fp.clone() }).await;
             flush_mailbox(&fp, tx, shared).await?;
         }
         ClientMsg::Subscribe { room } => {
@@ -330,7 +460,14 @@ async fn handle_client_msg(
                                 id: id.clone(),
                                 payload_b64: payload_b64.clone(),
                             };
-                            senders.iter().fold(false, |acc, s| acc | s.send(out.clone()).is_ok())
+                            // huddle 1.1.4: `try_send` on the bounded outbound
+                            // queue — a slow/stalled recipient (Full) or a gone
+                            // one (Closed) counts as not-live, so we mailbox it
+                            // instead of blocking the publisher or buffering
+                            // unboundedly.
+                            senders
+                                .iter()
+                                .fold(false, |acc, s| acc | s.try_send(out.clone()).is_ok())
                         }
                         None => false,
                     }
@@ -343,32 +480,110 @@ async fn handle_client_msg(
                     queued += 1;
                 }
             }
-            let _ = tx.send(ServerMsg::Sent { id, delivered, queued });
+            let _ = tx.send(ServerMsg::Sent { id, delivered, queued }).await;
         }
         ClientMsg::Fetch => {
             let fp = require_fp(fingerprint)?;
             flush_mailbox(&fp, tx, shared).await?;
         }
         ClientMsg::Ping => {
-            let _ = tx.send(ServerMsg::Pong);
+            let _ = tx.send(ServerMsg::Pong).await;
         }
     }
     Ok(())
 }
 
 async fn flush_mailbox(fp: &str, tx: &Tx, shared: &Arc<Shared>) -> Result<()> {
+    // huddle 1.1.4: peek (do NOT delete) the queue, deliver into the bounded
+    // outbound channel, and delete ONLY the rows that were accepted. If the
+    // socket is gone, `tx.send` errors and we stop — the rest stay in the DB
+    // with their original `created_at` for the next connection, so there's no
+    // silent loss and no TTL reset. Residual: a row accepted into the bounded
+    // buffer but not yet written when the socket dies can still be lost
+    // (bounded by OUTBOUND_CAP). True at-least-once needs per-message writer
+    // acks — tracked in docs/ROADMAP-forward-secrecy-and-rekey.md (§3).
     let items = {
         let db = shared.db.lock().await;
-        take_mailbox(&db, fp)?
+        peek_mailbox(&db, fp)?
     };
-    for (room, id, payload_b64) in items {
-        let _ = tx.send(ServerMsg::Message { room, id, payload_b64 });
+    let mut delivered_ids: Vec<i64> = Vec::new();
+    for (row_id, room, msg_id, payload_b64) in items {
+        if tx
+            .send(ServerMsg::Message {
+                room,
+                id: msg_id,
+                payload_b64,
+            })
+            .await
+            .is_err()
+        {
+            break; // socket gone — keep the remaining rows for next time
+        }
+        delivered_ids.push(row_id);
+    }
+    if !delivered_ids.is_empty() {
+        let db = shared.db.lock().await;
+        delete_mailbox_ids(&db, &delivered_ids)?;
     }
     Ok(())
 }
 
 fn require_fp(fp: &Option<String>) -> Result<String> {
     fp.clone().ok_or_else(|| anyhow!("send hello first"))
+}
+
+/// huddle 1.1.4: re-derive the 24-hex fingerprint from an Ed25519 pubkey.
+/// Mirrors `huddle_core::identity::compute_fingerprint` byte-for-byte (first
+/// 12 bytes of SHA-256(pubkey), hex, grouped in 4s with '-').
+fn compute_fingerprint(public_key: &[u8; 32]) -> String {
+    let hash = Sha256::digest(public_key);
+    let hex_str = hex::encode(&hash[..12]);
+    hex_str
+        .as_bytes()
+        .chunks(4)
+        .map(|c| std::str::from_utf8(c).unwrap())
+        .collect::<Vec<&str>>()
+        .join("-")
+}
+
+/// huddle 1.1.4: verify a client's auth proof. The claimed fingerprint must
+/// equal `compute_fingerprint(pubkey)`, and the signature must verify (strict,
+/// rejecting low/mixed-order keys) over `RELAY_AUTH_DOMAIN || nonce`. Any
+/// mismatch is an auth failure and the caller drops the connection.
+/// Returns the server-derived fingerprint (`compute_fingerprint(pubkey)`) on
+/// success — the caller PINS this to the connection so the client-claimed
+/// `fingerprint` string is never trusted for routing.
+fn verify_client_auth(
+    claimed_fp: &str,
+    pubkey_b64: &str,
+    signature_b64: &str,
+    nonce: &[u8; 32],
+) -> Result<String> {
+    let pk_bytes = B64
+        .decode(pubkey_b64)
+        .map_err(|e| anyhow!("bad pubkey base64: {e}"))?;
+    let pk: [u8; 32] = pk_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow!("pubkey must be 32 bytes"))?;
+    let sig_bytes = B64
+        .decode(signature_b64)
+        .map_err(|e| anyhow!("bad signature base64: {e}"))?;
+    let sig: [u8; 64] = sig_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow!("signature must be 64 bytes"))?;
+    let proven_fp = compute_fingerprint(&pk);
+    if proven_fp != claimed_fp {
+        bail!("fingerprint does not match pubkey");
+    }
+    let vk = VerifyingKey::from_bytes(&pk).map_err(|e| anyhow!("bad ed25519 pubkey: {e}"))?;
+    let mut signed = Vec::with_capacity(RELAY_AUTH_DOMAIN.len() + nonce.len());
+    signed.extend_from_slice(RELAY_AUTH_DOMAIN);
+    signed.extend_from_slice(nonce);
+    vk.verify_strict(&signed, &Signature::from_bytes(&sig))
+        .map_err(|e| anyhow!("signature verification failed: {e}"))?;
+    Ok(proven_fp)
 }
 
 /// Validate a fingerprint / room id used purely for routing. Length-capped
@@ -447,25 +662,36 @@ fn enqueue(c: &Connection, fp: &str, room: &str, id: &str, payload_b64: &str) ->
     Ok(())
 }
 
-fn take_mailbox(c: &Connection, fp: &str) -> Result<Vec<(String, String, String)>> {
+/// huddle 1.1.4: read a recipient's queued ciphertext WITHOUT deleting it, so
+/// the caller (`flush_mailbox`) can delete only what it actually delivered —
+/// closing the delete-then-lose window. Returns `(row_id, room, msg_id,
+/// payload_b64)` oldest-first. All DB access shares one `Mutex<Connection>`, so
+/// peek and the matching delete can't interleave with another drain.
+fn peek_mailbox(c: &Connection, fp: &str) -> Result<Vec<(i64, String, String, String)>> {
+    let mut stmt = c.prepare(
+        "SELECT id, room, msg_id, payload_b64 FROM mailbox WHERE fingerprint = ?1 ORDER BY id ASC",
+    )?;
+    let rows = stmt.query_map(params![fp], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+        ))
+    })?;
     let mut out = Vec::new();
-    {
-        let mut stmt = c.prepare(
-            "SELECT room, msg_id, payload_b64 FROM mailbox WHERE fingerprint = ?1 ORDER BY id ASC",
-        )?;
-        let rows = stmt.query_map(params![fp], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-            ))
-        })?;
-        for row in rows {
-            out.push(row?);
-        }
+    for row in rows {
+        out.push(row?);
     }
-    c.execute("DELETE FROM mailbox WHERE fingerprint = ?1", params![fp])?;
     Ok(out)
+}
+
+/// Delete the specific mailbox rows that were confirmed delivered.
+fn delete_mailbox_ids(c: &Connection, ids: &[i64]) -> Result<()> {
+    for id in ids {
+        c.execute("DELETE FROM mailbox WHERE id = ?1", params![id])?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

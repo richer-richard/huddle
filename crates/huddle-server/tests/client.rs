@@ -3,8 +3,10 @@
 //! `huddle-server` binary, over a direct (non-Tor) WebSocket.
 
 use std::process::{Child, Command};
+use std::sync::Arc;
 use std::time::Duration;
 
+use huddle_core::identity::Identity;
 use huddle_core::network::server::{ServerClient, ServerEvent};
 use huddle_core::network::transport::DialMode;
 use tokio::net::TcpStream;
@@ -81,11 +83,16 @@ async fn client_connector_fanout_and_mailbox() {
     wait_listening(port).await;
     let url = format!("ws://127.0.0.1:{port}/ws");
 
-    // A and B both members of ROOMX, both online (direct ws, no Tor).
-    let (a, mut a_rx) = ServerClient::connect(&url, &DialMode::Direct, "AAAA".into(), vec!["ROOMX".into()])
+    // A and B both members of ROOMX, both online (direct ws, no Tor). huddle
+    // 1.1.3: connect takes the identity and authenticates internally. B's
+    // identity is reused on reconnect below so its fingerprint (and mailbox)
+    // are stable.
+    let a_id = Arc::new(Identity::generate().unwrap());
+    let b_id = Arc::new(Identity::generate().unwrap());
+    let (a, mut a_rx) = ServerClient::connect(&url, &DialMode::Direct, a_id.clone(), vec!["ROOMX".into()])
         .await
         .unwrap();
-    let (b, mut b_rx) = ServerClient::connect(&url, &DialMode::Direct, "BBBB".into(), vec!["ROOMX".into()])
+    let (b, mut b_rx) = ServerClient::connect(&url, &DialMode::Direct, b_id.clone(), vec!["ROOMX".into()])
         .await
         .unwrap();
 
@@ -113,7 +120,7 @@ async fn client_connector_fanout_and_mailbox() {
     assert_eq!(sid2, "msg-2");
     assert_eq!((delivered2, queued2), (0, 1));
 
-    let (_b2, mut b2_rx) = ServerClient::connect(&url, &DialMode::Direct, "BBBB".into(), vec!["ROOMX".into()])
+    let (_b2, mut b2_rx) = ServerClient::connect(&url, &DialMode::Direct, b_id.clone(), vec!["ROOMX".into()])
         .await
         .unwrap();
     let (id2, payload2) = next_message(&mut b2_rx).await;

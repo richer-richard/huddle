@@ -303,6 +303,11 @@ pub struct AppHandle {
     /// huddle 1.0: the full set of transport doors resolved at startup (for
     /// the UI/CLI listing — includes unavailable ones with a reason).
     transport_profiles: Arc<Vec<TransportProfile>>,
+    /// huddle 1.1.4: the resolved Tor SOCKS5 proxy address (CLI/config →
+    /// `DEFAULT_TOR_SOCKS`). Stored so privacy-sensitive clearnet fetches
+    /// (the opt-in update check) can be routed through Tor instead of
+    /// leaking the client's IP onto the clearnet.
+    tor_socks: String,
 }
 
 /// huddle 1.0: how to reach the relay backend — the bundle of transport
@@ -449,7 +454,11 @@ impl AppHandle {
         info!(fingerprint = %identity.fingerprint(), peer_id = %identity.peer_id(), mode = %mode.as_str(), port, relay_count = relays.len(), "identity loaded");
 
         let (net_event_tx, net_event_rx) = tokio::sync::mpsc::channel::<NetworkEvent>(256);
-        let (app_event_tx, _) = broadcast::channel::<AppEvent>(256);
+        // huddle 1.1.4: 1024 (was 256) gives a slow UI subscriber more
+        // headroom before it lags and drops AppEvents. A lagging receiver
+        // still recovers via authoritative resync (TUI grace-summary / GUI
+        // ~1s refresh), so this is resilience, not correctness.
+        let (app_event_tx, _) = broadcast::channel::<AppEvent>(1024);
         // huddle 0.8: the default `Server` mode runs NO libp2p — the Tor
         // onion relay is the only transport. `--mode mdns|direct` opts back
         // into a libp2p swarm running alongside the relay. In `Server` mode
@@ -569,6 +578,7 @@ impl AppHandle {
             aux_subscriptions: Arc::new(Mutex::new(HashSet::new())),
             active_transport: Arc::new(Mutex::new(None)),
             transport_profiles: transport_profiles.clone(),
+            tor_socks,
         };
 
         handle.spawn_event_processor(net_event_rx);
@@ -1103,7 +1113,8 @@ impl AppHandle {
         }
         let mut pubkey = [0u8; 32];
         pubkey.copy_from_slice(&bytes);
-        let our_seed = self.identity.secret_bytes();
+        // huddle 1.1.4: wipe our copy of the identity secret on drop.
+        let our_seed = zeroize::Zeroizing::new(self.identity.secret_bytes());
         match crate::crypto::dm::derive_dm_key(&our_seed, &pubkey, room_id) {
             Ok(k) => Some(k),
             Err(e) => {
@@ -1131,7 +1142,8 @@ impl AppHandle {
         }
         let mut pubkey = [0u8; 32];
         pubkey.copy_from_slice(&bytes);
-        let our_seed = self.identity.secret_bytes();
+        // huddle 1.1.4: wipe our copy of the identity secret on drop.
+        let our_seed = zeroize::Zeroizing::new(self.identity.secret_bytes());
         match crate::crypto::dm::derive_dm_key(&our_seed, &pubkey, room_id) {
             Ok(k) => Some(k),
             Err(e) => {
@@ -1821,10 +1833,7 @@ impl AppHandle {
     /// already carries everything required — we just plumb it through.
     pub fn seed_invite_room(&self, room: &crate::invite::InviteRoom) {
         if let Some(salt) = room.salt_b64.as_deref().and_then(|b| B64.decode(b).ok()) {
-            ROOM_SALT_CACHE
-                .lock()
-                .unwrap()
-                .insert(room.id.clone(), salt);
+            remember_room_salt(&room.id, salt);
         }
         let discovered = DiscoveredRoom {
             room_id: room.id.clone(),
@@ -2344,7 +2353,6 @@ impl AppHandle {
         tokio::spawn(async move {
             let mut backoff = 1u64;
             loop {
-                let fp = handle.identity.fingerprint().to_string();
                 // huddle 1.0: the Hello room set is every active chat room
                 // PLUS our aux subscriptions (the contact inbox), so the relay
                 // re-registers inbox membership on every reconnect and flushes
@@ -2374,7 +2382,14 @@ impl AppHandle {
                         }
                         _ => continue,
                     };
-                    match ServerClient::connect(&url, &dial, fp.clone(), rooms.clone()).await {
+                    match ServerClient::connect(
+                        &url,
+                        &dial,
+                        handle.identity.clone(),
+                        rooms.clone(),
+                    )
+                    .await
+                    {
                         Ok((client, rx)) => {
                             info!(%url, transport = id.as_str(), "connected to relay");
                             connected = Some((client, rx, *id));
@@ -2509,10 +2524,7 @@ impl AppHandle {
             NetworkEvent::RoomAnnouncementReceived(ann) => {
                 // Cache the salt for join_room
                 if let Some(salt) = &ann.passphrase_salt {
-                    ROOM_SALT_CACHE
-                        .lock()
-                        .unwrap()
-                        .insert(ann.room_id.clone(), salt.clone());
+                    remember_room_salt(&ann.room_id, salt.clone());
                 }
                 // Phase D follow-up: opportunistically dial the
                 // announcer's first host_addr if we're not already
@@ -3010,6 +3022,13 @@ impl AppHandle {
     /// case the inner sender_fingerprint *must* match. `None` for
     /// `WireMessage::Plain`. Phase B's `OwnerGrant`/`BanMember` arms
     /// require it to be `Some` AND the signer to be a current owner.
+    ///
+    /// INVARIANT (huddle 1.1.4): never hold a `std::sync::Mutex` guard
+    /// (`active_rooms`, `sas_flows`, the DB) across an `.await`. Always
+    /// scope the guard in its own block or `drop()` it before awaiting —
+    /// see the DM-key path below. This is also enforced mechanically:
+    /// this fn runs inside a `Send` task, so a `!Send` `MutexGuard` held
+    /// across `.await` would fail to compile.
     async fn handle_room_message(
         &self,
         room_id: &str,
@@ -3594,8 +3613,17 @@ impl AppHandle {
                     }
                 };
                 let (_, our_secret, our_pub) = crate::crypto::sas::new_session();
-                let sas_code =
-                    crate::crypto::sas::derive_sas_code(&our_secret, &their_pub, &tx_id_bytes);
+                let sas_code = match crate::crypto::sas::derive_sas_code(
+                    &our_secret,
+                    &their_pub,
+                    &tx_id_bytes,
+                ) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        warn!(%e, "SasInit: rejecting non-contributory ephemeral; dropping");
+                        return;
+                    }
+                };
                 self.sas_flows.lock().unwrap().insert(
                     tx_id.clone(),
                     SasFlow {
@@ -3672,11 +3700,17 @@ impl AppHandle {
                         );
                         return;
                     }
-                    let code = crate::crypto::sas::derive_sas_code(
+                    let code = match crate::crypto::sas::derive_sas_code(
                         &flow.our_secret,
                         &their_pub,
                         &tx_id_bytes,
-                    );
+                    ) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            warn!(%e, "SasResponse: rejecting non-contributory ephemeral; dropping");
+                            return;
+                        }
+                    };
                     flow.sas_code = Some(code.clone());
                     code
                 };
@@ -4360,9 +4394,10 @@ impl AppHandle {
         repo::set_setting(&self.db, "mdns_enabled", if on { "1" } else { "0" })
     }
 
-    /// huddle 1.1.3: the persisted GUI theme — `"system"` (default; follows the
-    /// OS light/dark setting), `"dark"`, or `"light"`. The desktop GUI reads this
-    /// to pick its egui visuals; the TUI ignores it. Unset resolves to
+    /// huddle 1.1.3: the persisted theme — `"system"` (default; the GUI follows
+    /// the OS light/dark setting), `"dark"`, or `"light"`. The desktop GUI reads
+    /// this to pick its egui visuals. huddle 1.1.4: the TUI now honors it too
+    /// (`"dark"`/`"light"`; `"system"` resolves to Dark there). Unset resolves to
     /// `"system"`; installs that already persisted `"dark"`/`"light"` keep them.
     pub fn theme(&self) -> String {
         repo::get_setting(&self.db, "theme")
@@ -4370,6 +4405,13 @@ impl AppHandle {
             .flatten()
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| "system".to_string())
+    }
+
+    /// huddle 1.1.4: the resolved Tor SOCKS5 proxy address (e.g.
+    /// `127.0.0.1:9050`). Lets privacy-sensitive clearnet fetches (the
+    /// opt-in update check) tunnel through Tor rather than leak the IP.
+    pub fn tor_socks(&self) -> &str {
+        &self.tor_socks
     }
 
     pub fn set_theme(&self, theme: &str) -> Result<()> {
@@ -5569,6 +5611,22 @@ fn open_with_system(path: &str) -> Result<()> {
 // announcements; queried by join_room.
 static ROOM_SALT_CACHE: std::sync::LazyLock<Mutex<HashMap<String, Vec<u8>>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// huddle 1.1.4: keep `ROOM_SALT_CACHE` bounded. A long-lived client that
+/// observes many room announcements could otherwise grow it without limit.
+/// Salts are cheaply re-learned from the next announcement, so evicting an
+/// arbitrary entry once the cap is reached is harmless.
+const ROOM_SALT_CACHE_CAP: usize = 4096;
+
+fn remember_room_salt(room_id: &str, salt: Vec<u8>) {
+    let mut cache = ROOM_SALT_CACHE.lock().unwrap();
+    if !cache.contains_key(room_id) && cache.len() >= ROOM_SALT_CACHE_CAP {
+        if let Some(k) = cache.keys().next().cloned() {
+            cache.remove(&k);
+        }
+    }
+    cache.insert(room_id.to_string(), salt);
+}
 
 /// Public accessor for the Argon2id salt length used when deriving room
 /// passphrase keys. Exists so downstream tooling (status pages, debug

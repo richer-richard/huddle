@@ -14,6 +14,8 @@
 //! encryption/authentication stays in the layers above — this module
 //! never inspects the payload.
 
+use std::sync::Arc;
+
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use futures::{SinkExt, StreamExt};
@@ -24,12 +26,23 @@ use tokio_tungstenite::WebSocketStream;
 use tracing::warn;
 
 use crate::error::{HuddleError, Result};
+use crate::identity::{relay_auth_msg, Identity};
 
 /// Messages we send to the server. Mirrors `huddle-server`'s `ClientMsg`.
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ClientMsg {
-    Hello { fingerprint: String, rooms: Vec<String> },
+    /// huddle 1.1.4: `Hello` now authenticates. It carries our Ed25519
+    /// pubkey and a signature over `relay_auth_msg(nonce)` for the nonce the
+    /// server sent in its opening `Challenge`. The relay verifies the
+    /// signature and that the pubkey hashes to `fingerprint` before it lets
+    /// us touch any mailbox.
+    Hello {
+        fingerprint: String,
+        pubkey_b64: String,
+        signature_b64: String,
+        rooms: Vec<String>,
+    },
     Subscribe { room: String },
     Unsubscribe { room: String },
     Publish { room: String, id: String, payload_b64: String },
@@ -41,6 +54,9 @@ enum ClientMsg {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ServerMsg {
+    /// huddle 1.1.4: the relay opens the connection with a random challenge
+    /// nonce. We sign it and answer with an authenticated `Hello`.
+    Challenge { nonce_b64: String },
     // The server echoes our fingerprint on `ready`, but we already know
     // our own identity, so we keep only the tag and let serde ignore the
     // extra field.
@@ -83,10 +99,13 @@ impl ServerClient {
     ///   or `ws://host:port/ws` (clearnet plain / tests).
     /// - `dial`: how to physically reach it — one of the transport "doors"
     ///   (`Socks5` for onion via Tor, `Tls` for `wss://`, `Direct` for `ws://`).
+    /// - `identity`: our identity, used to answer the relay's auth `Challenge`
+    ///   (huddle 1.1.4). The connector signs the challenge nonce and sends the
+    ///   pubkey + signature in `Hello`; the relay rejects us otherwise.
     pub async fn connect(
         url: &str,
         dial: &crate::network::transport::DialMode,
-        fingerprint: String,
+        identity: Arc<Identity>,
         rooms: Vec<String>,
     ) -> Result<(Self, mpsc::UnboundedReceiver<ServerEvent>)> {
         use crate::network::transport::DialMode;
@@ -102,7 +121,7 @@ impl ServerClient {
                 let (ws, _resp) = tokio_tungstenite::client_async(url, stream)
                     .await
                     .map_err(|e| HuddleError::Network(format!("ws handshake: {e}")))?;
-                Ok(Self::spawn(ws, fingerprint, rooms))
+                Ok(Self::spawn(ws, identity, rooms))
             }
             // Plain `ws://` and `wss://` with the system trust store both go
             // through `connect_async`, which negotiates TLS from the URL
@@ -111,7 +130,7 @@ impl ServerClient {
                 let (ws, _resp) = tokio_tungstenite::connect_async(url)
                     .await
                     .map_err(|e| HuddleError::Network(format!("ws connect: {e}")))?;
-                Ok(Self::spawn(ws, fingerprint, rooms))
+                Ok(Self::spawn(ws, identity, rooms))
             }
             // Self-signed cert pinning is structured but not wired in this
             // build — the recommended clearnet-TLS path uses a real cert
@@ -143,7 +162,7 @@ impl ServerClient {
                 let (ws, _resp) = tokio_tungstenite::client_async(url, stream)
                     .await
                     .map_err(|e| HuddleError::Network(format!("ws handshake: {e}")))?;
-                Ok(Self::spawn(ws, fingerprint, rooms))
+                Ok(Self::spawn(ws, identity, rooms))
             }
         }
     }
@@ -153,7 +172,7 @@ impl ServerClient {
     /// stream types) share one implementation.
     fn spawn<S>(
         ws: WebSocketStream<S>,
-        fingerprint: String,
+        identity: Arc<Identity>,
         rooms: Vec<String>,
     ) -> (Self, mpsc::UnboundedReceiver<ServerEvent>)
     where
@@ -163,19 +182,21 @@ impl ServerClient {
         let (out_tx, mut out_rx) = mpsc::unbounded_channel::<ClientMsg>();
         let (ev_tx, ev_rx) = mpsc::unbounded_channel::<ServerEvent>();
 
-        // Announce ourselves first; the server replies `ready` and then
-        // flushes any queued mailbox messages.
-        let _ = out_tx.send(ClientMsg::Hello { fingerprint, rooms });
-
-        // Writer pump: serialize outgoing messages onto the socket. When
-        // `out_rx` ends (every `ServerClient` handle was dropped) we must
-        // actively close the socket — otherwise the reader task below keeps
-        // the connection alive and the server never sees us disconnect (so
-        // it never marks us offline / starts mailboxing). Closing here sends
-        // a WebSocket Close frame; the server then tears down and our reader
-        // observes the end of stream.
+        // huddle 1.1.4: we do NOT send `Hello` up front anymore. The relay
+        // opens with a `Challenge`; the reader pump (below) signs that nonce
+        // and queues the authenticated `Hello`. Because the relay rejects
+        // anything sent before a valid `Hello`, the writer pump holds back
+        // any other outgoing frame (a publish/subscribe the app issues during
+        // the handshake window) until the `Hello` has actually gone out.
         tokio::spawn(async move {
+            let mut hello_sent = false;
+            let mut pending: Vec<ClientMsg> = Vec::new();
             while let Some(msg) = out_rx.recv().await {
+                let is_hello = matches!(msg, ClientMsg::Hello { .. });
+                if !hello_sent && !is_hello {
+                    pending.push(msg);
+                    continue;
+                }
                 let json = match serde_json::to_string(&msg) {
                     Ok(j) => j,
                     Err(_) => continue,
@@ -183,11 +204,36 @@ impl ServerClient {
                 if sink.send(WsMessage::Text(json.into())).await.is_err() {
                     return;
                 }
+                if is_hello {
+                    hello_sent = true;
+                    // Flush anything the app queued while we waited for the
+                    // challenge, preserving its order after the Hello.
+                    for m in pending.drain(..) {
+                        let json = match serde_json::to_string(&m) {
+                            Ok(j) => j,
+                            Err(_) => continue,
+                        };
+                        if sink.send(WsMessage::Text(json.into())).await.is_err() {
+                            return;
+                        }
+                    }
+                }
             }
+            // When `out_rx` ends (every `ServerClient` handle dropped) close
+            // the socket so the server marks us offline and starts mailboxing.
             let _ = sink.close().await;
         });
 
-        // Reader pump: parse server messages into ServerEvents.
+        // Reader pump: parse server messages into ServerEvents. On the opening
+        // `Challenge`, prove our identity by signing the nonce and sending the
+        // authenticated `Hello` through the writer.
+        // Held only long enough to send the one `Hello` in response to the
+        // challenge, then dropped. Crucially it must NOT outlive that: if the
+        // reader kept a permanent `out_tx` clone, dropping every public
+        // `ServerClient` handle would no longer end the writer's `out_rx`, the
+        // socket would never close, and the server would never mark us offline
+        // (breaking offline mailboxing). `Option::take()` releases it after use.
+        let mut hello_tx = Some(out_tx.clone());
         tokio::spawn(async move {
             while let Some(frame) = stream.next().await {
                 let frame = match frame {
@@ -201,6 +247,29 @@ impl ServerClient {
                     _ => continue,
                 };
                 match serde_json::from_str::<ServerMsg>(&text) {
+                    Ok(ServerMsg::Challenge { nonce_b64 }) => {
+                        if let Some(tx) = hello_tx.take() {
+                            match B64.decode(nonce_b64.as_bytes()) {
+                                Ok(nonce) => {
+                                    let sig = identity.sign(&relay_auth_msg(&nonce));
+                                    let hello = ClientMsg::Hello {
+                                        fingerprint: identity.fingerprint().to_string(),
+                                        pubkey_b64: B64.encode(identity.public_bytes()),
+                                        signature_b64: B64.encode(sig),
+                                        rooms: rooms.clone(),
+                                    };
+                                    // If the writer is gone the connection is dead anyway.
+                                    let _ = tx.send(hello);
+                                }
+                                Err(e) => {
+                                    warn!(error = %e, "relay sent an undecodable challenge nonce");
+                                    break;
+                                }
+                            }
+                        }
+                        // `tx` dropped here — the reader no longer pins the
+                        // outgoing channel open.
+                    }
                     Ok(ServerMsg::Ready) => {
                         let _ = ev_tx.send(ServerEvent::Ready);
                     }

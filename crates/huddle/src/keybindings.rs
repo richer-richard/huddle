@@ -475,7 +475,9 @@ pub fn adaptive_hints(app: &TuiApp) -> Vec<(&'static str, &'static str)> {
                     crate::app::SettingsTab::Network => {
                         out.push(("M", "toggle mDNS"));
                     }
-                    crate::app::SettingsTab::Appearance => {}
+                    crate::app::SettingsTab::Appearance => {
+                        out.push(("T", "toggle theme"));
+                    }
                     crate::app::SettingsTab::Privacy => {
                         out.push(("V", "verified-only"));
                         out.push(("N", "notifications"));

@@ -106,8 +106,17 @@ pub fn derive_sas_code(
     our_secret: &StaticSecret,
     their_public: &PublicKey,
     tx_id: &[u8; TX_ID_LEN],
-) -> SasCode {
+) -> Result<SasCode> {
     let shared = our_secret.diffie_hellman(their_public);
+    // huddle 1.1.4: reject a non-contributory (small-order) peer ephemeral.
+    // Such a "pubkey" forces a predictable shared secret, which would let a
+    // MITM steer both sides to a derivable SAS code and defeat the OOB
+    // comparison. Honest peers always produce a contributory secret.
+    if !shared.was_contributory() {
+        return Err(HuddleError::Session(
+            "SAS rejected: peer X25519 ephemeral is non-contributory (small-order point)".into(),
+        ));
+    }
     // HKDF over the shared secret. tx_id as salt prevents replay
     // (two SAS flows between the same pair must produce different
     // codes); info domain-separates from any other HKDF use.
@@ -147,10 +156,10 @@ pub fn derive_sas_code(
     let chunk2 = ((u32::from(d[3] & 0x3f) << 7) | (u32::from(d[4]) >> 1)) & 0x1fff;
     let decimal = format!("{}-{}-{}", chunk0 + 1000, chunk1 + 1000, chunk2 + 1000);
 
-    SasCode {
+    Ok(SasCode {
         emoji_indices,
         decimal,
-    }
+    })
 }
 
 /// The canonical 49-emoji table from Matrix MSC 2241, English labels.
@@ -296,8 +305,8 @@ mod tests {
         let (tx_id, alice_secret, alice_pub) = new_session();
         let (_, bob_secret, bob_pub) = new_session();
 
-        let alice_code = derive_sas_code(&alice_secret, &bob_pub, &tx_id);
-        let bob_code = derive_sas_code(&bob_secret, &alice_pub, &tx_id);
+        let alice_code = derive_sas_code(&alice_secret, &bob_pub, &tx_id).unwrap();
+        let bob_code = derive_sas_code(&bob_secret, &alice_pub, &tx_id).unwrap();
         assert_eq!(alice_code, bob_code);
         // Decimal shape: three 4-digit groups joined by '-', each in
         // [1000, 9191].
@@ -318,11 +327,11 @@ mod tests {
     fn different_tx_id_yields_different_code() {
         let (tx_id_a, alice_secret, _) = new_session();
         let (_, bob_secret, bob_pub) = new_session();
-        let alice_code = derive_sas_code(&alice_secret, &bob_pub, &tx_id_a);
+        let alice_code = derive_sas_code(&alice_secret, &bob_pub, &tx_id_a).unwrap();
 
         let mut tx_id_b = tx_id_a;
         tx_id_b[0] ^= 0xff;
-        let alice_code_b = derive_sas_code(&alice_secret, &bob_pub, &tx_id_b);
+        let alice_code_b = derive_sas_code(&alice_secret, &bob_pub, &tx_id_b).unwrap();
         let _ = bob_secret;
         assert_ne!(alice_code, alice_code_b);
     }
@@ -339,14 +348,24 @@ mod tests {
         let (_, bob_secret, bob_pub) = new_session();
         let (_, _mallory_secret, mallory_pub) = new_session();
 
-        let alice_thinks_bob = derive_sas_code(&alice_secret, &mallory_pub, &tx_id);
-        let bob_thinks_alice = derive_sas_code(&bob_secret, &mallory_pub, &tx_id);
+        let alice_thinks_bob = derive_sas_code(&alice_secret, &mallory_pub, &tx_id).unwrap();
+        let bob_thinks_alice = derive_sas_code(&bob_secret, &mallory_pub, &tx_id).unwrap();
         assert_ne!(alice_thinks_bob, bob_thinks_alice);
 
         // Sanity: without MITM, both sides agree.
-        let alice_real = derive_sas_code(&alice_secret, &bob_pub, &tx_id);
-        let bob_real = derive_sas_code(&bob_secret, &alice_pub, &tx_id);
+        let alice_real = derive_sas_code(&alice_secret, &bob_pub, &tx_id).unwrap();
+        let bob_real = derive_sas_code(&bob_secret, &alice_pub, &tx_id).unwrap();
         assert_eq!(alice_real, bob_real);
+    }
+
+    #[test]
+    fn rejects_small_order_ephemeral() {
+        // The X25519 all-zero point is non-contributory (small-order):
+        // ECDH with it yields an all-zero shared secret regardless of our
+        // secret. derive_sas_code must reject it rather than emit a code.
+        let (tx_id, our_secret, _) = new_session();
+        let zero_pub = PublicKey::from([0u8; 32]);
+        assert!(derive_sas_code(&our_secret, &zero_pub, &tx_id).is_err());
     }
 
     #[test]
