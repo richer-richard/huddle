@@ -189,6 +189,21 @@ struct SasFlow {
 /// `--no-server`. Reached through the local Tor SOCKS5 proxy.
 pub const DEFAULT_SERVER_URL: &str =
     "ws://huddleg2647kbrmngflqai23f4rrc7l5dnszz5lij76uhqzmkebx2mid.onion:80/ws";
+/// huddle 1.1: the operator's **clearnet** door onto the SAME relay backend as
+/// [`DEFAULT_SERVER_URL`], fronted by a cloudflared tunnel (valid TLS, no
+/// domain of our own). Baked in so users who can't reach Tor still connect with
+/// zero config. It sits LAST in [`default_fallback_order`], so a working onion
+/// is always preferred and a Tor user never dials clearnet — this only lights
+/// up when the onion is unreachable.
+///
+/// NOTE: a free `*.trycloudflare.com` hostname **rotates** whenever the relay's
+/// `cloudflared` restarts, so this constant can go stale; a release pins
+/// whatever was live at build time. For a durable default, repoint it at a
+/// **named** cloudflared tunnel (stable hostname via a domain on Cloudflare).
+/// Override per-client with `--clearnet-server`, `clearnet_url` in config.toml,
+/// or Settings → Network; an explicit value always wins over this default.
+pub const DEFAULT_CLEARNET_URL: &str =
+    "wss://potential-replacing-directed-suite.trycloudflare.com/ws";
 /// Local Tor SOCKS5 proxy used to dial `.onion` server URLs.
 pub const DEFAULT_TOR_SOCKS: &str = "127.0.0.1:9050";
 
@@ -468,6 +483,22 @@ impl AppHandle {
                     .ok()
                     .flatten()
                     .filter(|s| !s.trim().is_empty())
+            })
+            // huddle 1.1: fall back to the operator's baked-in clearnet door
+            // (`DEFAULT_CLEARNET_URL`) so a fresh client reaches the relay over
+            // clearnet with zero config when Tor is unavailable. Gated on an
+            // onion relay being configured: the real binaries always bake in
+            // `DEFAULT_SERVER_URL`, while tests / libp2p-only embedders pass
+            // `onion_url: None` (`TransportConfig::default`) and must NOT get a
+            // network door they'd silently dial. Still tried only AFTER the
+            // onion (see `default_fallback_order`); any explicit CLI / config /
+            // saved-DB value above wins, and clearing the relay (empty DB
+            // value) reverts to this default rather than to "no clearnet".
+            .or_else(|| {
+                transports
+                    .onion_url
+                    .as_ref()
+                    .map(|_| DEFAULT_CLEARNET_URL.to_string())
             });
         let tor_bridge = transports.tor_bridge.clone().or_else(config::tor_bridge);
         let transport_profiles = transport::builtin_profiles(

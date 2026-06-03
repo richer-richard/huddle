@@ -28,6 +28,12 @@ at once, so all doors share one set of rooms + mailboxes. Pick a door with
 `--transport <id>`, set an order with `--transport-order`, or point at a
 clearnet relay with `--clearnet-server ws://<ip>:<port>/ws`.
 
+As of **1.1**, huddle also ships with the operator's **clearnet relay baked
+in** (a cloudflared `wss://` tunnel onto the very same rooms + mailboxes), so
+a client that can't reach Tor connects with zero config. It's tried only
+*after* the onion, so a Tor user never touches it; `--clearnet-server`,
+`clearnet_url` in `config.toml`, or Settings → Network override it.
+
 **Contacts** are a durable, fingerprint-keyed address book — keyed by
 identity, not by an ephemeral LAN address — so a conversation keeps
 working after a peer leaves the LAN. `a` adds a contact by HD-ID; over the

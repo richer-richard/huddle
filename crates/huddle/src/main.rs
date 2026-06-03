@@ -390,7 +390,14 @@ fn run_transports(cli: &Cli) -> Result<()> {
     let clearnet = cli
         .clearnet_server
         .clone()
-        .or_else(huddle_core::config::clearnet_url);
+        .or_else(huddle_core::config::clearnet_url)
+        // huddle 1.1: surface the operator's baked-in clearnet door, gated on
+        // the onion default being present (mirrors AppHandle's resolution).
+        .or_else(|| {
+            onion
+                .as_ref()
+                .map(|_| huddle_core::app::DEFAULT_CLEARNET_URL.to_string())
+        });
     let tor_socks = cli
         .tor_socks
         .clone()
