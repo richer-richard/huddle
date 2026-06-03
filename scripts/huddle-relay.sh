@@ -50,9 +50,11 @@ fi
 
 SERVER_PID=""
 TUNNEL_PID=""
+TUNNEL_LOG=""
 cleanup() {
   [ -n "$TUNNEL_PID" ] && kill "$TUNNEL_PID" >/dev/null 2>&1 || true
   [ -n "$SERVER_PID" ] && kill "$SERVER_PID" >/dev/null 2>&1 || true
+  [ -n "$TUNNEL_LOG" ] && rm -f "$TUNNEL_LOG" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
 
