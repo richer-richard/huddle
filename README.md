@@ -329,6 +329,49 @@ have no direct connection for will opportunistically dial the first
 listed address (rate-limited per announcer). This lets cross-internet
 peers bootstrap without invite links.
 
+## Run your own relay (cloudflared, no domain)
+
+The default relay is reached over Tor. If you (or the people you talk to)
+can't use Tor, run **your own relay on a VPS and front it with a
+[cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)
+tunnel** — no registered domain, no TLS cert of your own:
+
+```bash
+# On the VPS:
+cargo build --release -p huddle-server
+./scripts/huddle-relay.sh
+# → prints:  wss://<rand>.trycloudflare.com/ws
+```
+
+`huddle-server` only ever moves **ciphertext** (it never holds keys or
+decrypts). The script runs it on `127.0.0.1:8787` and points cloudflared at it;
+cloudflared supplies a publicly-trusted `*.trycloudflare.com` hostname, which
+huddle reaches through its TLS `clearnet-wss` door. Point clients at the URL:
+
+- **GUI:** Settings → Network → **"Set / edit"** relay, paste the `wss://…/ws`.
+- **CLI:** `huddle --clearnet-server wss://<rand>.trycloudflare.com/ws`, or set
+  `clearnet_url = "wss://…/ws"` in `config.toml`.
+
+A configured clearnet relay is tried **first** (you connect without waiting on a
+Tor timeout) and the onion stays as a fallback. Any **invite you then generate
+embeds this relay** (a signed v3 invite), so your contacts join with zero
+config — they just accept the invite.
+
+No tunnel and don't mind exposing your IP? Run the server directly and use a
+raw plain-WebSocket door (open the firewall for the port):
+
+```bash
+HUDDLE_SERVER_BIND=0.0.0.0:8787 huddle-server      # on the VPS, e.g. 2.24.124.188
+huddle --clearnet-server ws://2.24.124.188:8787/ws  # on each client
+```
+
+Caveats: free `*.trycloudflare.com` hostnames **rotate** when cloudflared
+restarts (so embedded-relay invites go stale — use a *named* cloudflared tunnel
+or a real domain for a stable URL); the raw `ws://` door reveals your IP +
+WebSocket metadata to on-path observers (messages stay end-to-end encrypted);
+and the server's SQLite DB on the VPS is not encrypted at rest (it holds only
+ciphertext + routing metadata, never keys). See `scripts/README.md` for detail.
+
 ## Join codes (read-only joiners)
 
 Owners press `Ctrl+J` in a Group pane to generate a single-use,
