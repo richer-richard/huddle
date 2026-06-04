@@ -3206,7 +3206,7 @@ checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 
 [[package]]
 name = "huddle"
-version = "1.2.2"
+version = "1.2.3"
 dependencies = [
  "anyhow",
  "base64",
@@ -3226,7 +3226,7 @@ dependencies = [
 
 [[package]]
 name = "huddle-core"
-version = "1.2.2"
+version = "1.2.3"
 dependencies = [
  "argon2",
  "arti-client",
@@ -3260,7 +3260,7 @@ dependencies = [
 
 [[package]]
 name = "huddle-gui"
-version = "1.2.2"
+version = "1.2.3"
 dependencies = [
  "anyhow",
  "base64",
@@ -3282,7 +3282,7 @@ dependencies = [
 
 [[package]]
 name = "huddle-server"
-version = "1.2.2"
+version = "1.2.3"
 dependencies = [
  "anyhow",
  "base64",

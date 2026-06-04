@@ -630,6 +630,23 @@ your platform's Downloads folder. Phase 2 cap is 1 MiB per file.
   doesn't). Per-DM ephemeral ratchets (Double Ratchet-style) are a
   candidate follow-up.
 
+## What's new in 1.2.3 — message timestamps show when there's a real gap
+
+- **No more "continuous" messages across a quiet gap.** The chat view used to
+  only break on a new calendar day, so two messages sent minutes (or hours)
+  apart with nobody talking in between ran together as if they were one burst.
+  Now a fresh, timestamped group starts whenever messages are more than a couple
+  of minutes apart — so you can see when time actually passed.
+- **Seconds in timestamps.** Message times now show `HH:MM:SS` (UTC), matching
+  the logs (which were already UTC).
+- The desktop app re-shows the sender + time header after a gap; the terminal UI
+  draws a centered time divider (each message already carries its own time).
+
+> Seeing an old version number (e.g. `v1.1.3`) in the app? That's a **stale
+> install** — the version is compiled in, so update with
+> `cargo install huddle-gui --force` / `cargo install huddle --force`, or
+> `git pull && huddle app`.
+
 ## What's new in 1.2.2 — docs refresh + `huddle app` tidies up after itself
 
 - **`huddle app` reclaims the build cache.** After it builds + installs the

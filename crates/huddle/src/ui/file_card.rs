@@ -10,10 +10,11 @@ use ratatui::prelude::*;
 /// when computing scroll position.
 pub const CARD_HEIGHT: usize = 4;
 
-/// Width reserved for the message prefix column ("  HH:MM  label  ").
-/// Mirrors `MSG_PREFIX_WIDTH` in room.rs so cards sit under the body
-/// column.
-const PREFIX_WIDTH: usize = 2 + 5 + 2 + 6 + 2;
+/// Width reserved for the message prefix column ("  HH:MM:SS  label  ") so a
+/// card sits under the message body. Imported from `chat_common` (the single
+/// source of truth) rather than re-hardcoded — they used to drift apart, which
+/// misaligned cards when the message time/label columns changed.
+use crate::ui::pane::chat_common::MSG_PREFIX_WIDTH as PREFIX_WIDTH;
 
 /// Render one file card as 4 `Line`s. The caller is responsible for
 /// stacking them. `focused` overrides the normal border colour with

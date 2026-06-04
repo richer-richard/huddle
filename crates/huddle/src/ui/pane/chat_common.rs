@@ -16,7 +16,10 @@ use crate::ui::short_fp;
 use crate::ui::theme::Theme;
 
 const MSG_LABEL_WIDTH: usize = 12;
-const MSG_PREFIX_WIDTH: usize = 2 + 5 + 2 + MSG_LABEL_WIDTH + 2; // 23
+// 2 lead + 8 (HH:MM:SS) + 2 + label + 2 trailing. `pub(crate)` so `file_card`
+// reserves the SAME left column (cards sit under message bodies) from one
+// source of truth — they previously drifted apart.
+pub(crate) const MSG_PREFIX_WIDTH: usize = 2 + 8 + 2 + MSG_LABEL_WIDTH + 2; // 26
 
 /// Compute the desired height for the input box, accounting for the
 /// number of lines the user has typed (including soft-wrapped lines).
@@ -69,12 +72,22 @@ pub fn render_messages(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme, r
 
     let mut lines: Vec<Line> = Vec::new();
     let mut prev_day: Option<i64> = None;
+    let mut prev_ts: Option<i64> = None;
     for (ts, row) in timeline {
-        let day = ts / 86_400;
+        let day = ts.div_euclid(86_400);
         if prev_day.map(|p| p != day).unwrap_or(true) {
+            // New calendar day → a dated separator.
             lines.push(separator_line(ts, inner_w, theme));
             prev_day = Some(day);
+        } else if prev_ts
+            .map(|p| ts - p >= huddle_core::app::MESSAGE_GROUP_GAP_SECS)
+            .unwrap_or(false)
+        {
+            // huddle 1.2.3: same day but a quiet gap — a time separator so the
+            // pause is visible instead of the messages running together.
+            lines.push(time_separator_line(ts, inner_w, theme));
         }
+        prev_ts = Some(ts);
         match row {
             Row::Text(m) => {
                 let is_me = m.sender_fingerprint == me || m.direction == "out";
@@ -245,6 +258,23 @@ fn separator_line(unix_secs: i64, inner_w: usize, theme: &Theme) -> Line<'static
     ])
 }
 
+/// huddle 1.2.3: a within-day separator marking a quiet gap, labelled with the
+/// UTC time the conversation resumed. Same centered-rule style as the dated
+/// separator, so a pause reads at a glance even though each line already shows
+/// its own timestamp.
+fn time_separator_line(unix_secs: i64, inner_w: usize, theme: &Theme) -> Line<'static> {
+    let label = format!(" {} UTC ", format_time(unix_secs));
+    let total = inner_w.saturating_sub(2);
+    let side = total.saturating_sub(label.chars().count()) / 2;
+    let dashes = "─".repeat(side.max(3));
+    Line::from(vec![
+        Span::raw("  "),
+        Span::styled(dashes.clone(), theme.dim()),
+        Span::styled(label, theme.dim()),
+        Span::styled(dashes, theme.dim()),
+    ])
+}
+
 fn wrap_body(body: &str, width: usize) -> Vec<String> {
     if width == 0 {
         return vec![body.to_string()];
@@ -266,11 +296,14 @@ fn wrap_body(body: &str, width: usize) -> Vec<String> {
     out
 }
 
+/// UTC `HH:MM:SS` for a unix timestamp. Seconds are shown so a pause of even a
+/// minute or two between messages is visible (UTC, matching the logs).
 fn format_time(unix_secs: i64) -> String {
-    let secs_today = (unix_secs % 86_400) as u32;
+    let secs_today = unix_secs.rem_euclid(86_400) as u32;
     let hh = (secs_today / 3600) % 24;
     let mm = (secs_today / 60) % 60;
-    format!("{:02}:{:02}", hh, mm)
+    let ss = secs_today % 60;
+    format!("{:02}:{:02}:{:02}", hh, mm, ss)
 }
 
 fn format_ymd(unix_secs: i64) -> String {
@@ -284,6 +317,22 @@ fn format_ymd(unix_secs: i64) -> String {
     let month = (h / 153 + 2).rem_euclid(12) + 1;
     let year = e.div_euclid(1461) - 4716 + (12 + 2 - month) / 12;
     format!("{:04}-{:02}-{:02}", year, month, day)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_time;
+
+    #[test]
+    fn format_time_shows_seconds_utc() {
+        assert_eq!(format_time(0), "00:00:00");
+        // 2021-01-01 03:25:07 UTC
+        assert_eq!(
+            format_time(1_609_459_200 + 3 * 3600 + 25 * 60 + 7),
+            "03:25:07"
+        );
+        assert_eq!(format_time(86_399), "23:59:59");
+    }
 }
 
 /// huddle 0.7: render the typing indicator (used by both DM and Group headers).

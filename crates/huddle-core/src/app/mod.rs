@@ -72,6 +72,13 @@ pub struct ContactView {
     pub last_seen: Option<i64>,
 }
 
+/// huddle 1.2.3: how long a quiet gap between two consecutive messages has to
+/// be before the chat view starts a fresh, timestamped group (GUI) / draws a
+/// time separator (TUI) instead of running them together. Kept short — a couple
+/// of minutes — so a message sent even a few minutes after the last one shows
+/// its own time rather than looking continuous. UTC throughout (matches logs).
+pub const MESSAGE_GROUP_GAP_SECS: i64 = 2 * 60;
+
 /// huddle 0.7: compute the deterministic room_id for a 1-1 DM between two
 /// fingerprints. Both peers, regardless of who calls `start_direct` first,
 /// derive identical IDs — no `created_at` mixing, no creator-fingerprint

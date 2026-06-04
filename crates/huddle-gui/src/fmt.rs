@@ -41,6 +41,18 @@ pub fn hhmm(unix: i64) -> String {
     format!("{:02}:{:02}", secs / 3600, (secs % 3600) / 60)
 }
 
+/// UTC `HH:MM:SS` for a unix timestamp — used on message group headers so a
+/// pause of even a couple of minutes is visible down to the second.
+pub fn hms(unix: i64) -> String {
+    let secs = unix.rem_euclid(86_400);
+    format!(
+        "{:02}:{:02}:{:02}",
+        secs / 3600,
+        (secs % 3600) / 60,
+        secs % 60
+    )
+}
+
 /// UTC calendar-day bucket (days since the epoch) — used to detect day changes.
 pub fn day_bucket(unix: i64) -> i64 {
     unix.div_euclid(86_400)
@@ -71,6 +83,14 @@ mod tests {
         // 2021-01-01 00:00:00 UTC = 1609459200
         assert_eq!(ymd_string(1_609_459_200), "2021-01-01");
         assert_eq!(hhmm(1_609_459_200 + 3 * 3600 + 25 * 60), "03:25");
+    }
+
+    #[test]
+    fn hms_shows_seconds_utc() {
+        assert_eq!(hms(0), "00:00:00");
+        // 03:25:07 UTC
+        assert_eq!(hms(1_609_459_200 + 3 * 3600 + 25 * 60 + 7), "03:25:07");
+        assert_eq!(hms(86_399), "23:59:59");
     }
 
     #[test]

@@ -249,9 +249,17 @@ pub fn render(
             }
             let mut last_sender: Option<String> = None;
             let mut last_day: Option<i64> = None;
-            for m in &room.messages {
+            let mut last_ts: Option<i64> = None;
+            // huddle 1.2.3: render chronologically (mirrors the TUI's sort) so a
+            // peer message that arrives with a slightly behind sent_at can't
+            // land out of order or break the gap grouping. Stable, so equal
+            // timestamps keep arrival order.
+            let mut ordered: Vec<&_> = room.messages.iter().collect();
+            ordered.sort_by_key(|m| m.sent_at);
+            for m in ordered {
                 let day = fmt::day_bucket(m.sent_at);
-                if last_day != Some(day) {
+                let day_changed = last_day != Some(day);
+                if day_changed {
                     last_day = Some(day);
                     ui.add_space(8.0);
                     ui.vertical_centered(|ui| {
@@ -271,8 +279,18 @@ pub fn render(
                         .cloned()
                         .unwrap_or_else(|| fmt::display_id(&m.sender_fingerprint))
                 };
-                let new_group = last_sender.as_deref() != Some(m.sender_fingerprint.as_str());
+                // huddle 1.2.3: start a fresh, timestamped group not only when the
+                // sender changes, but also after a quiet gap or a day change — so
+                // a message sent minutes later shows its own time instead of
+                // running on under the previous one's header.
+                let gap_big = last_ts
+                    .map(|t| m.sent_at - t >= huddle_core::app::MESSAGE_GROUP_GAP_SECS)
+                    .unwrap_or(true);
+                let new_group = day_changed
+                    || gap_big
+                    || last_sender.as_deref() != Some(m.sender_fingerprint.as_str());
                 last_sender = Some(m.sender_fingerprint.clone());
+                last_ts = Some(m.sent_at);
 
                 if new_group {
                     ui.add_space(8.0);
@@ -284,7 +302,7 @@ pub fn render(
                                 .color(if is_me { palette().accent } else { palette().text }),
                         );
                         ui.label(
-                            RichText::new(fmt::hhmm(m.sent_at))
+                            RichText::new(format!("{} UTC", fmt::hms(m.sent_at)))
                                 .small()
                                 .color(palette().text_dim),
                         );
