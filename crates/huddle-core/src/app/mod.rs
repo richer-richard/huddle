@@ -196,14 +196,18 @@ pub const DEFAULT_SERVER_URL: &str =
 /// is always preferred and a Tor user never dials clearnet — this only lights
 /// up when the onion is unreachable.
 ///
-/// NOTE: a free `*.trycloudflare.com` hostname **rotates** whenever the relay's
-/// `cloudflared` restarts, so this constant can go stale; a release pins
-/// whatever was live at build time. For a durable default, repoint it at a
-/// **named** cloudflared tunnel (stable hostname via a domain on Cloudflare).
-/// Override per-client with `--clearnet-server`, `clearnet_url` in config.toml,
-/// or Settings → Network; an explicit value always wins over this default.
+/// huddle 1.1.5: this is now a **stable** address — a free Cloudflare
+/// `*.workers.dev` Worker that WS-proxies to the operator's relay. The Worker
+/// reads the relay's current (rotating) `cloudflared` backend from KV, which the
+/// VPS keeps fresh on every rotation, so this hostname never goes stale (unlike
+/// the raw `*.trycloudflare.com` quick-tunnel URLs baked in 1.1.0–1.1.4). It
+/// exists for users in regions where Tor itself is blocked. Still LAST in
+/// [`default_fallback_order`], so a working onion is always preferred and a Tor
+/// user never dials clearnet. Override per-client with `--clearnet-server`,
+/// `clearnet_url` in config.toml, or Settings → Network; an explicit value
+/// always wins over this default.
 pub const DEFAULT_CLEARNET_URL: &str =
-    "wss://potential-replacing-directed-suite.trycloudflare.com/ws";
+    "wss://huddle-ws-proxy.richer-richard.workers.dev/ws";
 /// Local Tor SOCKS5 proxy used to dial `.onion` server URLs.
 pub const DEFAULT_TOR_SOCKS: &str = "127.0.0.1:9050";
 

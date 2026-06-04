@@ -615,6 +615,20 @@ your platform's Downloads folder. Phase 2 cap is 1 MiB per file.
   doesn't). Per-DM ephemeral ratchets (Double Ratchet-style) are a
   candidate follow-up.
 
+## What's new in 1.1.5 — a permanent clearnet address (for Tor-blocked users)
+
+The baked-in clearnet fallback is now a **stable** address that never rotates,
+so people in regions where Tor itself is blocked have a reliable non-Tor door.
+
+- **Stable clearnet relay default.** `DEFAULT_CLEARNET_URL` now points at a
+  permanent Cloudflare `*.workers.dev` proxy in front of the operator's relay,
+  instead of a raw `*.trycloudflare.com` quick-tunnel hostname that rotated on
+  every restart and went stale. The proxy reads the relay's current backend from
+  KV (kept fresh automatically), so the address is durable. The Tor onion stays
+  the canonical, preferred door; this clearnet fallback is tried only when the
+  onion is unreachable, and any explicit `--clearnet-server` / `clearnet_url` /
+  Settings value still wins over it.
+
 ## What's new in 1.1.4 — security & robustness pass
 
 A hardening release across the relay client, the DM/SAS key exchange, the
