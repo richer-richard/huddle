@@ -20,7 +20,7 @@ third machine.
 - [ ] **First time only:** an onboarding card appears — press Enter
       to advance through the pages, then dismiss the last one
 - [ ] The Welcome pane appears with the sidebar on the left
-      (`huddle 1.1.4` banner up top)
+      (`huddle 1.2.2` banner up top)
 - [ ] In the sidebar's Profile section, your branded `HD-XXXX-XXXX-…`
       ID is visible. In the default (relay-only) mode the relay dot
       `●` shows next to your name once the onion link is up. With
@@ -98,6 +98,40 @@ they haven't, do scenario 2 first.
 - [ ] Confirm a third machine C never sees the DM in its sidebar:
       the consumer-side visibility filter drops Direct announces
       addressed to anyone else
+
+## 5c. Add a contact by connect code (huddle 1.2.1)
+
+Both A and B must be connected to the relay (relay dot `●` lit). No prior
+shared room is needed — this is a cold first contact over the relay.
+
+- [ ] On A, press `G` — a "your connect code" modal shows an 8-char code
+      (e.g. `K7M9-Q2X4`) with a 5-minute countdown; `c` copies it
+- [ ] Read/paste the code to B out of band
+- [ ] On B, press `a`, type (or paste) the code, press `Enter`
+- [ ] Within ~1-2 s A sees a contact request from B (status line +
+      Contacts → Requests)
+- [ ] A accepts it from the Requests tab; a DM with B opens on both sides
+- [ ] A sends "hi"; it reaches B over the relay (and vice versa)
+- [ ] Wait >5 min, generate a *new* code on A, and confirm an *old* code
+      no longer resolves on B ("invalid or expired connect code")
+- [ ] GUI parity: in the desktop app, the add-contact dialog's *Generate a
+      code to share* shows the same code, and its input box accepts a code
+
+## 5d. Offline first contact over the relay (huddle 1.2)
+
+- [ ] With B fully closed, on A add B by HD-ID (or have B mint a code
+      before closing and redeem it while B is offline)
+- [ ] The request is mailboxed by the relay (no error on A)
+- [ ] Start B; within a few seconds of connecting, the queued request
+      surfaces in B's Contacts → Requests (it is *not* rejected as stale,
+      even if minutes/hours passed)
+- [ ] B accepts; a DM converges and messages flow both ways
+
+## 5e. About window + GitHub link (GUI, huddle 1.2.1)
+
+- [ ] In the desktop app, open Settings → Account → **About huddle**
+- [ ] The window shows the version and a clickable link to
+      `github.com/richer-richard/huddle` that opens in the browser
 
 ## 6. Phase A — inbound dial accept gate
 

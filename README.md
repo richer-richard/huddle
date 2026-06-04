@@ -43,6 +43,15 @@ relay this reaches them across the internet (live or via the mailbox), and
 they accept from the Contacts pane to open a DM. DMs persist across
 restarts and keep flowing over the relay.
 
+Don't want to read out a 24-character HD-ID? As of **1.2.1** you can
+**add a contact by a short connect code** instead: generate an 8-character
+code (valid 5 minutes) — `G` in the terminal UI, or *Generate a code to
+share* in the desktop app's add-contact dialog — and the other person
+types it into their own "add a contact" box. The relay resolves the code to
+your identity and sends the request; the code grants nothing on its own and
+expires quickly. (The desktop app's **About** window — Settings → Account →
+About — links back to this repo.)
+
 > **Tor is optional now.** LAN works with no Tor at all, and a clearnet
 > relay door needs no Tor either. The onion doors do need a local Tor
 > daemon (SOCKS5 on `127.0.0.1:9050`; override with `--tor-socks`). On
@@ -130,6 +139,12 @@ desktop apps, then launches it:
   and adds a `huddle.desktop` launcher to your app menu.
 - **Windows** — installs to `%LOCALAPPDATA%\Programs\Huddle` with a Start-Menu
   shortcut.
+
+Once the app is installed, `huddle app` **reclaims the build cache** for you —
+it runs `cargo clean` so the multi-gigabyte `target/` from the release build
+doesn't linger (the app binary is already copied to its OS location, so this is
+safe). Pass `HUDDLE_KEEP_BUILD=1` to keep the cache if you plan to keep building
+from the clone.
 
 Plain `huddle` (no subcommand) still opens the terminal UI. Run `huddle app`
 from inside the repo, or point it at a clone with
@@ -614,6 +629,16 @@ your platform's Downloads folder. Phase 2 cap is 1 MiB per file.
   two parties (Megolm message keys still ratchet, but the wrap key
   doesn't). Per-DM ephemeral ratchets (Double Ratchet-style) are a
   candidate follow-up.
+
+## What's new in 1.2.2 — docs refresh + `huddle app` tidies up after itself
+
+- **`huddle app` reclaims the build cache.** After it builds + installs the
+  desktop app, it now runs `cargo clean` for you, so the multi-gigabyte
+  `target/` from the release build doesn't linger. Set `HUDDLE_KEEP_BUILD=1` to
+  keep it (e.g. when iterating from a source clone).
+- **Docs brought current** for the 1.2 line — the `huddle app` installer,
+  connect codes, the About window, and the relay's DM/friend-request delivery
+  model (see `SECURITY.md`).
 
 ## What's new in 1.2.1 — add a contact by short code, + an About window
 

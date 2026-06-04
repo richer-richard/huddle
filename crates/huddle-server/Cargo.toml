@@ -1,6 +1,6 @@
 [package]
 name = "huddle-server"
-version = "1.2.1"
+version = "1.2.2"
 edition = "2021"
 description = "Centralized E2E relay + offline mailbox for huddle, designed to run behind a Tor v3 onion service. Treats huddle's wire bytes as opaque ciphertext — it never decrypts."
 license = "MIT OR Apache-2.0"
@@ -50,4 +50,4 @@ base64 = "0.22"
 tempfile = "3"
 # Exercise the real client connector (huddle_core::network::server) against
 # the server binary, end to end.
-huddle-core = { path = "../huddle-core", version = "1.2.1" }
+huddle-core = { path = "../huddle-core", version = "1.2.2" }

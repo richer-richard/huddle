@@ -1,6 +1,6 @@
 # Security
 
-This document describes huddle's security model as of **1.1.4**: what is
+This document describes huddle's security model as of **1.2.2**: what is
 protected, how, and — just as importantly — what is *not*. Read the
 "Known limitations / by-design tradeoffs" section before trusting huddle
 with anything that matters.
@@ -123,6 +123,35 @@ own careful review.
   X25519 scalar in DM derivation, and other short-lived secret buffers
   are held in `Zeroizing` wrappers so they are overwritten on drop rather
   than lingering in a stale heap page or swap.
+
+## 1.2 changes
+
+- **Fingerprint-addressed relay delivery (`SendDirect`).** 1:1 DMs and
+  friend requests are delivered to a recipient *fingerprint* (live to its
+  connections, or queued in its per-fingerprint mailbox), independent of room
+  membership. The security posture is unchanged: the relay still only sees
+  opaque ciphertext plus the same routing metadata (sender/recipient
+  fingerprints, room/inbox ids, timing) it already saw for membership fan-out —
+  it never decrypts. The recipient still proves their identity at the relay via
+  the 1.1.4 challenge–response before any mailbox is drained to them.
+- **Replay window made store-and-forward-aware.** The ±5-minute wall-clock
+  window on signed envelopes (anti-replay) is now applied *after* signature
+  verification and is **not** enforced for store-and-forward control messages
+  (`ContactRequest`, `MemberAnnounce`, `SessionKeyRequest`). Those legitimately
+  sit in the offline mailbox for hours/days, so a wall-clock window would drop
+  valid first-contact requests and first key exchanges. The Ed25519 signature
+  still proves the sender's identity, and re-applying these messages is
+  idempotent (re-adding a known member / re-showing a pending request is a
+  no-op), so dropping the window for them does not enable a meaningful replay.
+  Every other signed type keeps the strict window.
+- **Connect codes carry no authority (1.2.1).** A connect code is a short
+  (40-bit, 5-minute) handle the relay maps to an identity *only* so a peer can
+  look up your fingerprint and send you a contact request — which you still
+  accept. Redeeming a code grants nothing else; the code is never persisted and
+  expires fast, bounding any enumeration. The redeeming client verifies the
+  pubkey the relay returns hashes to the fingerprint it claims, and the real
+  identity proof remains the owner's *signed* contact-request/announce, so a
+  misbehaving relay can't substitute an identity undetected.
 
 ## Known limitations / by-design tradeoffs
 

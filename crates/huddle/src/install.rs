@@ -13,6 +13,11 @@
 //! portable, so the only platform-specific work is the install + launch step.
 //! Everything here is plain `std` (runtime-branched on `env::consts::OS`), so
 //! all branches compile on every platform.
+//!
+//! huddle 1.2.2: once the app is installed out to its OS location, `huddle app`
+//! runs `cargo clean` to reclaim the multi-GB release build cache (the binary
+//! is already copied elsewhere, so this is safe). Set `HUDDLE_KEEP_BUILD=1` to
+//! keep the cache.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -44,19 +49,24 @@ pub fn run() -> Result<()> {
         );
     }
 
-    match std::env::consts::OS {
+    // Whether the app was copied OUT to an OS location (so the build cache is
+    // now safe to delete) vs. launched in place from `target/release`.
+    let installed_out = match std::env::consts::OS {
         "macos" => {
             let app = install_macos(&built)?;
             println!("installed {}", app.display());
             launch_macos(&app)?;
+            true
         }
         "linux" => {
             let dest = install_linux(&built)?;
             launch_detached(&dest)?;
+            true
         }
         "windows" => {
             let dest = install_windows(&built)?;
             launch_detached(&dest)?;
+            true
         }
         other => {
             eprintln!(
@@ -64,9 +74,42 @@ pub fn run() -> Result<()> {
                  launching the freshly built binary in place."
             );
             launch_detached(&built)?;
+            false
         }
+    };
+
+    // huddle 1.2.2: reclaim the (multi-GB) release build cache now that the app
+    // lives elsewhere. Skipped when the binary runs in place (we'd delete what
+    // we just launched) or when HUDDLE_KEEP_BUILD is set — e.g. a dev iterating
+    // from the clone who doesn't want to rebuild from scratch next time.
+    if installed_out && std::env::var_os("HUDDLE_KEEP_BUILD").is_none() {
+        clean_build_cache(&workspace);
     }
     Ok(())
+}
+
+/// huddle 1.2.2: `cargo clean` the workspace to reclaim the release build cache
+/// after a successful `huddle app` install. Best-effort — a failure here never
+/// fails the install, since the app is already in place. Set `HUDDLE_KEEP_BUILD=1`
+/// to keep the cache.
+fn clean_build_cache(workspace: &Path) {
+    println!(
+        "reclaiming the build cache (cargo clean) — set HUDDLE_KEEP_BUILD=1 to keep it next time…"
+    );
+    match Command::new(cargo_bin())
+        .args(["clean"])
+        .current_dir(workspace)
+        .status()
+    {
+        Ok(s) if s.success() => println!("build cache cleared."),
+        Ok(s) => eprintln!(
+            "note: `cargo clean` exited {:?}; the build cache was left in place.",
+            s.code()
+        ),
+        Err(e) => eprintln!(
+            "note: couldn't run `cargo clean` ({e}); the build cache was left in place."
+        ),
+    }
 }
 
 /// Run `cargo build --release -p huddle-gui` in the workspace, streaming output.
