@@ -118,6 +118,15 @@ pub struct NetworkHandle {
     /// reach over libp2p still receive our traffic (and we theirs, via the
     /// server's offline mailbox). `None` until `attach_server` runs.
     server: Arc<std::sync::Mutex<Option<server::ServerClient>>>,
+    /// huddle 1.2: map of `room_id -> partner fingerprint` for 1:1 DM rooms.
+    /// When a room is registered here, relay traffic for it is delivered by
+    /// recipient fingerprint (`ServerClient::send_direct`) instead of by room
+    /// membership fan-out — so DMs reach the partner reliably (live or via
+    /// their offline mailbox) without both sides having subscribed the same
+    /// room on the relay. Group rooms are absent from this map and keep using
+    /// membership fan-out (`publish`). Populated by the app from
+    /// `start_direct` / `bootstrap_direct_room` / `add_contact`.
+    dm_partners: Arc<std::sync::Mutex<HashMap<String, String>>>,
 }
 
 /// Stable per-message id for the server mailbox/receipts: a short hash of
@@ -168,9 +177,56 @@ impl NetworkHandle {
             .await;
     }
 
+    /// huddle 1.2: register a 1:1 DM room so its relay traffic is delivered by
+    /// the partner's fingerprint instead of by room-membership fan-out. Safe
+    /// to call repeatedly (idempotent). Never registers an empty partner.
+    pub fn register_dm(&self, room_id: String, partner_fingerprint: String) {
+        if partner_fingerprint.is_empty() {
+            return;
+        }
+        self.dm_partners
+            .lock()
+            .unwrap()
+            .insert(room_id, partner_fingerprint);
+    }
+
+    /// huddle 1.2: forget a DM room's direct-delivery mapping (e.g. on leave).
+    pub fn forget_dm(&self, room_id: &str) {
+        self.dm_partners.lock().unwrap().remove(room_id);
+    }
+
+    fn dm_partner(&self, room_id: &str) -> Option<String> {
+        self.dm_partners.lock().unwrap().get(room_id).cloned()
+    }
+
     pub async fn publish_room_message(&self, room_id: String, payload: Vec<u8>) {
         if let Some(s) = self.server_client() {
-            let _ = s.publish(&room_id, &server_msg_id(&payload), &payload);
+            // huddle 1.2: a registered DM room delivers straight to the
+            // partner's fingerprint (reliable even if they never subscribed
+            // this room on the relay); a group room fans out by membership.
+            match self.dm_partner(&room_id) {
+                Some(to) => {
+                    let _ = s.send_direct(&to, &room_id, &server_msg_id(&payload), &payload);
+                }
+                None => {
+                    let _ = s.publish(&room_id, &server_msg_id(&payload), &payload);
+                }
+            }
+        }
+        let _ = self
+            .cmd_tx
+            .send(NetworkCommand::PublishRoomMessage { room_id, payload })
+            .await;
+    }
+
+    /// huddle 1.2: deliver `payload` straight to `to`'s fingerprint over the
+    /// relay (independent of room membership), and also ride libp2p gossipsub
+    /// on the `room_id` topic for LAN reachability. Used for friend requests
+    /// (delivered to the target's inbox tag) and any other point-to-point
+    /// control message where the recipient is known.
+    pub async fn publish_direct(&self, to: String, room_id: String, payload: Vec<u8>) {
+        if let Some(s) = self.server_client() {
+            let _ = s.send_direct(&to, &room_id, &server_msg_id(&payload), &payload);
         }
         let _ = self
             .cmd_tx
@@ -313,6 +369,7 @@ pub fn start_network_disabled() -> NetworkHandle {
     NetworkHandle {
         cmd_tx,
         server: Arc::new(std::sync::Mutex::new(None)),
+        dm_partners: Arc::new(std::sync::Mutex::new(HashMap::new())),
     }
 }
 
@@ -459,6 +516,7 @@ pub fn start_network_with(
     Ok(NetworkHandle {
         cmd_tx,
         server: Arc::new(std::sync::Mutex::new(None)),
+        dm_partners: Arc::new(std::sync::Mutex::new(HashMap::new())),
     })
 }
 

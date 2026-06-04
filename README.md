@@ -615,6 +615,43 @@ your platform's Downloads folder. Phase 2 cap is 1 MiB per file.
   doesn't). Per-DM ephemeral ratchets (Double Ratchet-style) are a
   candidate follow-up.
 
+## What's new in 1.2.0 — the relay actually carries DMs + friend requests
+
+The headline fix: **two people can now reliably chat.** Earlier builds delivered
+relay traffic *only* by room membership, so a 1:1 DM or a friend request needed
+both sides to have independently subscribed the exact same room before anything
+flowed — a fragile convergence that often left the chat window empty with no
+explanation. 1.2 moves that smarts into the server.
+
+- **Fingerprint-addressed direct delivery (server).** The relay gains a
+  `SendDirect` primitive: a message addressed to a recipient's fingerprint is
+  delivered to every connection that identity has open, or queued in its
+  per-fingerprint mailbox when it's offline — **no shared-room subscription
+  required**. DMs and friend requests now ride this path, so they reach the
+  other person live or as soon as they next connect. Group rooms keep using
+  membership fan-out. *(The relay must be on 1.2 for this; the protocol is
+  backward-compatible — older clients still work over the membership path.)*
+- **Offline first-contact actually works.** Add someone by HD-ID while they're
+  offline and the signed request now waits in their mailbox and is handed over
+  on their next connect. Previously two bugs killed this: the request needed a
+  live inbox subscription, and the signed envelope was rejected as "outside the
+  ±5-minute replay window" once it had sat in the mailbox. 1.2 exempts
+  store-and-forward control messages (contact requests, member announces,
+  session-key requests) from the wall-clock window — the signature still proves
+  identity, and replaying them is idempotent.
+- **Robust relay membership across reconnects.** Every room you belong to —
+  including encrypted groups and DMs parked awaiting a passphrase or the
+  partner's key — is now re-asserted to the relay on every (re)connect, closing
+  a window where a room created during the connect handshake (or restored at
+  startup) was never registered and silently received nothing.
+- **Honest composer (TUI + GUI).** The message box is now gated on real
+  deliverability: when no transport can carry a message it tells you
+  ("connecting to relay" / "offline") and keeps your text instead of showing a
+  fake "sent" echo that reached no one.
+- **DMs self-heal.** A DM that delivery reaches but that wasn't open locally is
+  lazily re-activated so the partner's first message / session-key announce
+  isn't dropped.
+
 ## What's new in 1.1.5 — a permanent clearnet address (for Tor-blocked users)
 
 The baked-in clearnet fallback is now a **stable** address that never rotates,

@@ -52,12 +52,9 @@ pub fn verify_signed_at(
             "signed envelope is missing signed_at_ms — pre-0.7.11 sender or forgery".into(),
         ));
     }
-    if (now_ms - env.signed_at_ms).abs() > window_ms {
-        return Err(HuddleError::Session(format!(
-            "signed envelope timestamp {} is outside the ±{}ms window vs now {}",
-            env.signed_at_ms, window_ms, now_ms
-        )));
-    }
+    // huddle 1.2: the replay-window check moved to AFTER cryptographic
+    // verification (below) so we know the message TYPE and can exempt store-
+    // and-forward control messages from the wall-clock window.
 
     let pubkey_bytes = B64
         .decode(&env.ed25519_pubkey_b64)
@@ -109,7 +106,37 @@ pub fn verify_signed_at(
 
     let msg: RoomMessage = serde_json::from_slice(&payload)
         .map_err(|e| HuddleError::Session(format!("bad payload json: {e}")))?;
+
+    // huddle 1.2: apply the wall-clock replay window SELECTIVELY. Store-and-
+    // forward, idempotent control messages — ContactRequest, MemberAnnounce,
+    // SessionKeyRequest — are EXEMPT: they ride the relay's offline mailbox,
+    // which can hold them for hours or days until the recipient reconnects, so
+    // a ±5-minute window would silently drop legitimate first-contact requests
+    // and first key-exchange announces (precisely the "I added them but no
+    // chat ever appears" failure). Their replay protection is idempotency
+    // (re-applying them is a no-op) plus the signature, which still proves the
+    // sender's identity and is verified above regardless of type. Every other
+    // signed type keeps the strict window.
+    if window_applies(&msg) && (now_ms - env.signed_at_ms).abs() > window_ms {
+        return Err(HuddleError::Session(format!(
+            "signed envelope timestamp {} is outside the ±{}ms window vs now {}",
+            env.signed_at_ms, window_ms, now_ms
+        )));
+    }
     Ok((msg, derived_fp))
+}
+
+/// huddle 1.2: whether the wall-clock replay window applies to a signed
+/// message of this type. Store-and-forward, idempotent control messages are
+/// exempt because they legitimately arrive long after they were signed, via
+/// the relay's offline mailbox. All other signed types keep the strict window.
+fn window_applies(msg: &RoomMessage) -> bool {
+    !matches!(
+        msg,
+        RoomMessage::ContactRequest { .. }
+            | RoomMessage::MemberAnnounce { .. }
+            | RoomMessage::SessionKeyRequest { .. }
+    )
 }
 
 /// Wrap a `RoomMessage` into a `SignedRoomMessage` using the given
@@ -251,5 +278,57 @@ mod tests {
         // Inside the window: ok.
         let now = signed_at + 4 * 60 * 1000;
         assert!(verify_signed_at(&env, now, SIGNED_ENVELOPE_WINDOW_MS).is_ok());
+    }
+
+    #[test]
+    fn store_and_forward_types_exempt_from_window() {
+        // huddle 1.2: ContactRequest and MemberAnnounce ride the relay's
+        // offline mailbox and may legitimately arrive days later. They MUST
+        // verify even far outside the wall-clock window (signature still
+        // proves identity); otherwise offline first-contact + first key
+        // exchange silently fail and "no chat ever appears".
+        let id = Identity::generate().unwrap();
+        let signed_at = 1_700_000_000_000_i64;
+        let now = signed_at + 30 * 24 * 60 * 60 * 1000; // 30 days later
+
+        let contact = RoomMessage::ContactRequest {
+            requester_fingerprint: id.fingerprint().to_string(),
+            display_name: Some("late arrival".into()),
+            note: None,
+            sender_ed25519_pubkey: Some(B64.encode(id.public_bytes())),
+        };
+        let env = sign_message_at(&id, &contact, signed_at).unwrap();
+        assert!(
+            verify_signed_at(&env, now, SIGNED_ENVELOPE_WINDOW_MS).is_ok(),
+            "a mailboxed ContactRequest must verify regardless of age"
+        );
+
+        let announce = RoomMessage::MemberAnnounce {
+            sender_fingerprint: id.fingerprint().to_string(),
+            wrapped_session_key: Some("d2VsbA==".into()),
+            display_name: None,
+            sender_ed25519_pubkey: Some(B64.encode(id.public_bytes())),
+        };
+        let env = sign_message_at(&id, &announce, signed_at).unwrap();
+        assert!(
+            verify_signed_at(&env, now, SIGNED_ENVELOPE_WINDOW_MS).is_ok(),
+            "a mailboxed MemberAnnounce (carries the session key) must verify regardless of age"
+        );
+
+        // A non-exempt type (MemberLeave) still honors the window.
+        let env = sign_message_at(&id, &sample_msg(), signed_at).unwrap();
+        assert!(
+            verify_signed_at(&env, now, SIGNED_ENVELOPE_WINDOW_MS).is_err(),
+            "non-store-and-forward types must still be window-checked"
+        );
+
+        // Tampering still fails for exempt types — signature is verified
+        // regardless of the window exemption.
+        let mut bad = sign_message_at(&id, &contact, signed_at).unwrap();
+        bad.signature_b64 = B64.encode([0u8; 64]);
+        assert!(
+            verify_signed_at(&bad, now, SIGNED_ENVELOPE_WINDOW_MS).is_err(),
+            "an exempt type with a bad signature must still be rejected"
+        );
     }
 }

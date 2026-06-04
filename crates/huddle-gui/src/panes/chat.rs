@@ -39,6 +39,9 @@ pub fn render(
     let room_vonly = handle.room_verified_only(room_id);
     // Which transport this conversation is currently riding (status only).
     let transport = handle.room_transport(room_id);
+    // huddle 1.2: whether a typed message can actually be delivered right now.
+    // Gates the composer so we never echo an undeliverable message.
+    let readiness = handle.room_send_readiness(room_id);
 
     let Some(room) = vm.open_room_mut(room_id) else {
         ui.centered_and_justified(|ui| {
@@ -119,13 +122,27 @@ pub fn render(
                     .color(palette().text_dim),
             );
         }
+        // huddle 1.2: when no transport can carry the message, don't pretend
+        // it sent — show why and keep the user's text intact (no echo).
+        let can_send = readiness.can_send();
+        if !can_send {
+            ui.label(
+                RichText::new(format!("○ {}", readiness.reason()))
+                    .small()
+                    .color(palette().error),
+            );
+        }
         ui.horizontal(|ui| {
             let btn_w = 64.0;
             let resp = ui.add_sized(
                 [ui.available_width() - btn_w - 8.0, 28.0],
-                TextEdit::singleline(&mut room.input).hint_text("message…"),
+                TextEdit::singleline(&mut room.input).hint_text(if can_send {
+                    "message…"
+                } else {
+                    "waiting for connection…"
+                }),
             );
-            if resp.changed() && !room.input.is_empty() {
+            if resp.changed() && !room.input.is_empty() && can_send {
                 let now = Instant::now();
                 let due = room
                     .last_typing_sent
@@ -136,8 +153,8 @@ pub fn render(
                 }
             }
             let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-            let clicked = ui.button("Send").clicked();
-            if (enter || clicked) && !room.input.trim().is_empty() {
+            let clicked = ui.add_enabled(can_send, egui::Button::new("Send")).clicked();
+            if can_send && (enter || clicked) && !room.input.trim().is_empty() {
                 let body = std::mem::take(&mut room.input);
                 actions.push(UiAction::SendMessage {
                     room_id: room_id.to_string(),

@@ -3372,6 +3372,19 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
                     _ => return Ok(false),
                 }
             };
+            // huddle 1.2: gate on real deliverability. If no transport can
+            // carry this message, restore the user's text and tell them why
+            // rather than optimistically echoing a message that reaches no one.
+            let readiness = app.handle.room_send_readiness(&room_id);
+            if !readiness.can_send() {
+                if let Some(r) = app.active_room_mut() {
+                    if r.input.is_empty() {
+                        r.input = body; // give the text back, unsent
+                    }
+                }
+                app.set_status(format!("not sent — {}", readiness.reason()));
+                return Ok(false);
+            }
             if let Err(e) = app.handle.send_room_message(&room_id, &body).await {
                 app.modal = Modal::Error(format!("send failed: {e}"));
             }

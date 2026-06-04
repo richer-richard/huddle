@@ -127,3 +127,60 @@ async fn client_connector_fanout_and_mailbox() {
     assert_eq!(id2, "msg-2");
     assert_eq!(payload2, b"queued-while-offline");
 }
+
+/// huddle 1.2: fingerprint-addressed direct delivery. The whole point is that
+/// it works with **no shared room membership at all** — neither side ever
+/// subscribes the room. This is what makes 1:1 DMs and friend requests robust:
+/// the sender knows the recipient's fingerprint, so the relay delivers straight
+/// to it (live), or queues it in that fingerprint's mailbox when offline. This
+/// is the behavior that was missing pre-1.2 (relay only fanned out by room
+/// membership, so a DM needed the fragile both-sides-subscribed convergence).
+#[tokio::test]
+async fn send_direct_delivers_by_fingerprint_without_membership() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("d.db");
+    let port = 18801;
+    let _server = spawn_server(port, db.to_str().unwrap());
+    wait_listening(port).await;
+    let url = format!("ws://127.0.0.1:{port}/ws");
+
+    let a_id = Arc::new(Identity::generate().unwrap());
+    let b_id = Arc::new(Identity::generate().unwrap());
+    let b_fp = b_id.fingerprint().to_string();
+
+    // Both connect with NO rooms — zero membership anywhere.
+    let (a, mut a_rx) = ServerClient::connect(&url, &DialMode::Direct, a_id.clone(), vec![])
+        .await
+        .unwrap();
+    let (_b, mut b_rx) = ServerClient::connect(&url, &DialMode::Direct, b_id.clone(), vec![])
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // A → B by fingerprint. `room` is just an opaque filing tag (a DM room id).
+    a.send_direct(&b_fp, "dm-tag-1", "d1", b"\x00direct-hi").unwrap();
+    let (id, payload) = next_message(&mut b_rx).await;
+    assert_eq!(id, "d1");
+    assert_eq!(payload, b"\x00direct-hi");
+    // A's receipt: delivered live, not queued — despite no room membership.
+    let (sid, delivered, queued) = next_sent(&mut a_rx).await;
+    assert_eq!(sid, "d1");
+    assert_eq!((delivered, queued), (1, 0));
+
+    // Offline path: drop B, send direct, reconnect B → the per-fingerprint
+    // mailbox flushes it on Hello with no Subscribe/Fetch needed.
+    drop(_b);
+    drop(b_rx);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    a.send_direct(&b_fp, "dm-tag-1", "d2", b"direct-while-offline").unwrap();
+    let (sid2, delivered2, queued2) = next_sent(&mut a_rx).await;
+    assert_eq!(sid2, "d2");
+    assert_eq!((delivered2, queued2), (0, 1));
+
+    let (_b2, mut b2_rx) = ServerClient::connect(&url, &DialMode::Direct, b_id.clone(), vec![])
+        .await
+        .unwrap();
+    let (id2, payload2) = next_message(&mut b2_rx).await;
+    assert_eq!(id2, "d2");
+    assert_eq!(payload2, b"direct-while-offline");
+}

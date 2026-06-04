@@ -268,6 +268,90 @@ async fn contact_request_over_server_opens_dm() {
     handle_b.shutdown().await;
 }
 
+/// huddle 1.2: the real-world first-contact case — you add someone by HD-ID
+/// while they are OFFLINE. The signed ContactRequest is delivered straight to
+/// their fingerprint's relay mailbox (1.2 direct delivery), held there, and
+/// handed over when they next connect — even though that can be far outside the
+/// signed-envelope replay window (1.2 exempts store-and-forward types). They
+/// accept, and an encrypted DM converges in both directions over the relay.
+/// Pre-1.2 this silently failed: the request needed a live inbox subscription
+/// AND the mailboxed envelope was rejected as "outside the ±5min window".
+#[tokio::test]
+async fn offline_first_contact_then_dm_over_server() {
+    let dir = tempfile::tempdir().unwrap();
+    let port = 18814;
+    let _server = spawn_server(port, dir.path().join("srv.db").to_str().unwrap());
+    wait_listening(port).await;
+    let url = format!("ws://127.0.0.1:{port}/ws");
+    let b_db_path = dir.path().join("b.db");
+
+    // Pre-seed B's identity on disk so A can address B by HD-ID while B has
+    // NEVER connected (genuinely offline first contact). The request must
+    // survive in B's per-fingerprint mailbox until B's very first Hello.
+    let b_identity = huddle_core::identity::Identity::generate().unwrap();
+    let b_fp = b_identity.fingerprint().to_string();
+    {
+        let db_seed = storage::open_db(&b_db_path, None).unwrap();
+        repo::save_identity(&db_seed, &b_identity.secret_bytes(), 0).unwrap();
+    }
+
+    // A online.
+    let db_a = storage::open_db_in_memory().unwrap();
+    let handle_a = AppHandle::start_with_db_and_options(
+        db_a,
+        NetworkMode::Server,
+        0,
+        [0u8; 32],
+        Vec::new(),
+        huddle_core::app::TransportConfig::onion_only(url.clone()),
+    )
+    .await
+    .unwrap();
+    let mut events_a = handle_a.subscribe();
+    let a_fp = handle_a.fingerprint().to_string();
+    wait_server_connected(&handle_a).await;
+
+    // A adds B by HD-ID while B is offline → request lands in B's mailbox.
+    handle_a
+        .send_contact_request(&b_fp, Some("hi while you were away"))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    // B connects for the FIRST time: the mailboxed request flushes on Hello
+    // and surfaces as a pending contact request — even though it is a signed
+    // store-and-forward envelope (1.2 exempts these from the replay window).
+    let db_b = storage::open_db(&b_db_path, None).unwrap();
+    let handle_b = AppHandle::start_with_db_and_options(
+        db_b,
+        NetworkMode::Server,
+        0,
+        [0u8; 32],
+        Vec::new(),
+        huddle_core::app::TransportConfig::onion_only(url.clone()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(handle_b.fingerprint(), b_fp, "pre-seeded identity loaded");
+    let mut events_b = handle_b.subscribe();
+    wait_server_connected(&handle_b).await;
+
+    assert_eq!(next_contact_request(&mut events_b).await, a_fp);
+
+    // B accepts → DM converges over the relay.
+    handle_b.accept_contact_request(&a_fp).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let dm = huddle_core::app::canonical_dm_room_id(&a_fp, &b_fp);
+    handle_a.send_room_message(&dm, "first words").await.unwrap();
+    assert_eq!(next_message(&mut events_b).await, "first words");
+    handle_b.send_room_message(&dm, "got them").await.unwrap();
+    assert_eq!(next_message(&mut events_a).await, "got them");
+
+    handle_a.shutdown().await;
+    handle_b.shutdown().await;
+}
+
 /// huddle 1.0: DMs stay live across a restart. A establishes a DM with B,
 /// exchanges a message, then A's process "restarts" (handle dropped, the same
 /// on-disk DB reopened). The restarted A must auto-activate the DM (Phase 0.2)

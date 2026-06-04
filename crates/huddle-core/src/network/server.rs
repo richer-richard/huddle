@@ -46,6 +46,12 @@ enum ClientMsg {
     Subscribe { room: String },
     Unsubscribe { room: String },
     Publish { room: String, id: String, payload_b64: String },
+    /// huddle 1.2: deliver straight to a recipient fingerprint (`to`),
+    /// independent of room membership. Used for 1:1 DMs and friend requests,
+    /// where we know exactly who the recipient is. `room` is the opaque tag
+    /// the recipient files it under (DM room id, or their inbox id). Mirrors
+    /// `huddle-server`'s `ClientMsg::SendDirect`.
+    SendDirect { to: String, room: String, id: String, payload_b64: String },
     Fetch,
     Ping,
 }
@@ -298,6 +304,20 @@ impl ServerClient {
     /// Send a room's opaque wire bytes to the server for fan-out.
     pub fn publish(&self, room: &str, id: &str, payload: &[u8]) -> Result<()> {
         self.send(ClientMsg::Publish {
+            room: room.to_string(),
+            id: id.to_string(),
+            payload_b64: B64.encode(payload),
+        })
+    }
+
+    /// huddle 1.2: deliver `payload` straight to recipient `to`'s
+    /// fingerprint, independent of room membership (1:1 DMs, friend requests).
+    /// The server delivers it live to every connection `to` has open, or
+    /// queues it in their mailbox when they're offline. `room` is the opaque
+    /// tag the recipient files it under.
+    pub fn send_direct(&self, to: &str, room: &str, id: &str, payload: &[u8]) -> Result<()> {
+        self.send(ClientMsg::SendDirect {
+            to: to.to_string(),
             room: room.to_string(),
             id: id.to_string(),
             payload_b64: B64.encode(payload),

@@ -370,6 +370,42 @@ impl RoomTransport {
     }
 }
 
+/// huddle 1.2: whether a message typed into a room can actually leave this
+/// device right now. The UIs query this to gate the composer instead of
+/// optimistically echoing a message that silently reaches no one — the
+/// "I typed but nothing happened" failure. Distinct from `RoomTransport`,
+/// which is a pure status label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendReadiness {
+    /// A live transport exists (a direct LAN link to a member, or the relay).
+    /// The message will be delivered live, or — over the relay — reliably
+    /// queued in the recipient's offline mailbox until they reconnect.
+    Ready,
+    /// The relay is configured but not connected yet (booting, reconnecting,
+    /// or the Tor circuit is still coming up). Sending now would not leave the
+    /// device, so the UI should hold the message and show "connecting".
+    Connecting,
+    /// No transport at all — the relay is disabled (`--no-server`) and there's
+    /// no LAN link. Nothing typed here can reach the other party.
+    Disconnected,
+}
+
+impl SendReadiness {
+    /// True only when a send will actually go somewhere.
+    pub fn can_send(self) -> bool {
+        matches!(self, SendReadiness::Ready)
+    }
+
+    /// Short reason for the UI to show when the composer is gated.
+    pub fn reason(self) -> &'static str {
+        match self {
+            SendReadiness::Ready => "",
+            SendReadiness::Connecting => "connecting to relay — message held",
+            SendReadiness::Disconnected => "offline — no relay and no LAN link",
+        }
+    }
+}
+
 /// Phase D follow-up: minimum seconds between two opportunistic
 /// `host_addrs` dials to the same announcer fingerprint.
 const HOST_ADDR_DIAL_BACKOFF_SECS: i64 = 300;
@@ -687,6 +723,26 @@ impl AppHandle {
         }
     }
 
+    /// huddle 1.2: can a message typed into `room_id` actually be delivered
+    /// right now? Drives composer gating in both front-ends so we never show
+    /// an optimistic local echo for a message that reached no one. A `Relay`
+    /// or `LanDirect` transport means Ready (the relay mailboxes an offline
+    /// partner, so it still counts). `Offline` resolves to `Connecting` when a
+    /// relay is configured (it should come up shortly) or `Disconnected` when
+    /// no relay is configured at all.
+    pub fn room_send_readiness(&self, room_id: &str) -> SendReadiness {
+        match self.room_transport(room_id) {
+            RoomTransport::LanDirect | RoomTransport::Relay => SendReadiness::Ready,
+            RoomTransport::Offline => {
+                if self.server_enabled() {
+                    SendReadiness::Connecting
+                } else {
+                    SendReadiness::Disconnected
+                }
+            }
+        }
+    }
+
     pub fn subscribe(&self) -> broadcast::Receiver<AppEvent> {
         self.app_event_tx.subscribe()
     }
@@ -991,6 +1047,10 @@ impl AppHandle {
             return Err(HuddleError::Other("cannot DM yourself".into()));
         }
         let room_id = canonical_dm_room_id(&our_fp, partner_fingerprint);
+        // huddle 1.2: ensure relay traffic for this DM is delivered straight
+        // to the partner's fingerprint (works even before they subscribe).
+        self.network
+            .register_dm(room_id.clone(), partner_fingerprint.to_string());
 
         // huddle 1.0: a DM is a relationship — record the partner in the
         // durable Contacts book so they persist (and stay chattable over the
@@ -1168,6 +1228,10 @@ impl AppHandle {
         partner_fingerprint: &str,
     ) -> Result<String> {
         let our_fp = self.identity.fingerprint().to_string();
+        // huddle 1.2: re-register direct-delivery routing for this restored DM
+        // so its relay traffic addresses the partner by fingerprint.
+        self.network
+            .register_dm(room_id.to_string(), partner_fingerprint.to_string());
         let info = repo::get_room(&self.db, room_id)?
             .ok_or_else(|| HuddleError::Other(format!("DM room {room_id} not found on disk")))?;
         let mut members = HashSet::new();
@@ -1895,6 +1959,11 @@ impl AppHandle {
             return Ok(());
         }
         let dm_room_id = canonical_dm_room_id(our_fp, fingerprint);
+        // huddle 1.2: route this contact's DM relay traffic by fingerprint
+        // (direct delivery), not by room-membership fan-out — so DMs reach
+        // them reliably even before both sides have subscribed the DM room.
+        self.network
+            .register_dm(dm_room_id.clone(), fingerprint.to_string());
         let pubkey = repo::lookup_peer_ed25519_pubkey(&self.db, fingerprint)
             .ok()
             .flatten();
@@ -2002,7 +2071,15 @@ impl AppHandle {
         let env = crate::crypto::sign_message(&self.identity, &msg)?;
         let bytes = crate::network::protocol::encode_wire_signed(&env)?;
         let inbox = crate::network::protocol::inbox_room_id(target_fingerprint);
-        self.network.publish_room_message(inbox, bytes).await;
+        // huddle 1.2: deliver the request STRAIGHT to the target's fingerprint
+        // over the relay (live, or queued in their mailbox if offline), tagged
+        // with their inbox id so their client files it as a contact request.
+        // This no longer depends on the target having an active inbox
+        // subscription on the relay, and also rides libp2p gossipsub on the
+        // inbox topic for LAN delivery.
+        self.network
+            .publish_direct(target_fingerprint.to_string(), inbox, bytes)
+            .await;
         Ok(())
     }
 
@@ -2352,6 +2429,21 @@ impl AppHandle {
     /// message arriving via the relay is decoded, verified, and decrypted by
     /// exactly the same code path. The live door is recorded in
     /// `active_transport` for the UI/CLI.
+    /// huddle 1.2: every room id whose membership must be asserted on the
+    /// relay — active rooms, rooms parked as `restorable` (encrypted groups /
+    /// keyless DMs awaiting a passphrase or the partner's pubkey), and the aux
+    /// subscriptions (our own contact inbox). Used both to build the Hello
+    /// room set and to re-subscribe after each (re)connect, so the relay knows
+    /// we belong to a room even before we can decrypt it — otherwise its
+    /// fan-out skips us and group messages silently never arrive.
+    fn relay_membership_ids(&self) -> Vec<String> {
+        let mut set: HashSet<String> =
+            self.active_rooms.lock().unwrap().keys().cloned().collect();
+        set.extend(self.restorable_rooms.lock().unwrap().keys().cloned());
+        set.extend(self.aux_subscriptions.lock().unwrap().iter().cloned());
+        set.into_iter().collect()
+    }
+
     fn spawn_server_connection(&self, order: Vec<TransportId>) {
         let handle = self.clone();
         tokio::spawn(async move {
@@ -2361,12 +2453,7 @@ impl AppHandle {
                 // PLUS our aux subscriptions (the contact inbox), so the relay
                 // re-registers inbox membership on every reconnect and flushes
                 // any queued contact requests.
-                let rooms: Vec<String> = {
-                    let mut r: Vec<String> =
-                        handle.active_rooms.lock().unwrap().keys().cloned().collect();
-                    r.extend(handle.aux_subscriptions.lock().unwrap().iter().cloned());
-                    r
-                };
+                let rooms: Vec<String> = handle.relay_membership_ids();
 
                 // Try each door in order until one connects. Unavailable
                 // doors (no URL / wrong build) are skipped.
@@ -2409,6 +2496,18 @@ impl AppHandle {
                     backoff = 1;
                     handle.network.attach_server(client);
                     *handle.active_transport.lock().unwrap() = Some(id);
+                    // huddle 1.2: re-assert membership for every active room
+                    // over the freshly attached connection. Hello carried the
+                    // room snapshot taken before we connected, so a room
+                    // created/joined during the connect-handshake window would
+                    // otherwise stay unknown to the relay until the next
+                    // reconnect — silently breaking group fan-out for it. The
+                    // relay's add_membership is idempotent, so re-subscribing is
+                    // free. (DM rooms route by fingerprint and don't depend on
+                    // this, but re-subscribing them is harmless.)
+                    for rid in handle.relay_membership_ids() {
+                        handle.network.subscribe_room(rid).await;
+                    }
                     while let Some(ev) = rx.recv().await {
                         match ev {
                             ServerEvent::Message { room, payload, .. } => {
@@ -3040,6 +3139,37 @@ impl AppHandle {
         verified_signer: Option<String>,
     ) {
         let our_fp = self.identity.fingerprint().to_string();
+        // huddle 1.2: lazily re-activate a known DM that isn't currently in
+        // active_rooms before dispatching. Otherwise the first inbound message
+        // or MemberAnnounce (which carries the session key!) for a DM that was
+        // parked as `restorable` (partner pubkey unknown at restore) or simply
+        // closed this session is silently dropped by the per-arm
+        // `active_rooms.get(room_id) -> None => return` guards — and the DM
+        // appears dead. Only DM rooms that ALREADY exist on disk with a known
+        // partner are auto-activated here; group rooms (which need a
+        // passphrase) and unknown rooms are left untouched.
+        {
+            let known_inactive = !self.active_rooms.lock().unwrap().contains_key(room_id);
+            if known_inactive {
+                if let Ok(Some(info)) = repo::get_room(&self.db, room_id) {
+                    if info.kind == RoomKind::Direct {
+                        let partner = repo::list_room_members(&self.db, room_id)
+                            .ok()
+                            .into_iter()
+                            .flatten()
+                            .map(|m| m.fingerprint)
+                            .find(|fp| *fp != our_fp);
+                        if let Some(partner_fp) = partner {
+                            if let Err(e) =
+                                self.bootstrap_direct_room(room_id, &partner_fp).await
+                            {
+                                debug!(%e, %room_id, "lazy DM re-activation on inbound failed");
+                            }
+                        }
+                    }
+                }
+            }
+        }
         match msg {
             RoomMessage::MemberAnnounce {
                 sender_fingerprint,

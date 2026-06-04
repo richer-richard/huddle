@@ -93,6 +93,22 @@ enum ClientMsg {
         id: String,
         payload_b64: String,
     },
+    /// huddle 1.2: deliver an opaque payload to a SPECIFIC recipient
+    /// fingerprint, independent of room membership. This is how 1:1 DMs and
+    /// friend requests route reliably: the sender knows exactly who the
+    /// recipient is, so the server delivers to that fingerprint's live
+    /// connections (or queues it in their per-fingerprint mailbox when
+    /// offline) without requiring the fragile "both parties subscribed the
+    /// same room" convergence that room fan-out needs. `room` is an opaque
+    /// tag the recipient's client uses to file the message (the DM room id,
+    /// or the recipient's inbox id for a contact request); the server never
+    /// interprets it. The recipient need not be subscribed to `room` at all.
+    SendDirect {
+        to: String,
+        room: String,
+        id: String,
+        payload_b64: String,
+    },
     /// Re-drain the mailbox on demand.
     Fetch,
     Ping,
@@ -480,6 +496,53 @@ async fn handle_client_msg(
                     queued += 1;
                 }
             }
+            let _ = tx.send(ServerMsg::Sent { id, delivered, queued }).await;
+        }
+        ClientMsg::SendDirect {
+            to,
+            room,
+            id,
+            payload_b64,
+        } => {
+            // huddle 1.2: must be authenticated (the proven fingerprint gates
+            // every op), but the SENDER need not share any room with `to`.
+            // We deliver straight to the recipient fingerprint's connections,
+            // or queue it in their mailbox when they're offline — exactly the
+            // same per-fingerprint mailbox group fan-out uses for offline
+            // members. This makes 1:1 DMs and friend requests work without the
+            // both-sides-subscribed-the-same-room dance.
+            let _from = require_fp(fingerprint)?;
+            let to = clean_id(&to).ok_or_else(|| anyhow!("invalid recipient"))?;
+            let room = clean_id(&room).ok_or_else(|| anyhow!("invalid room"))?;
+            if id.is_empty() || id.len() > MAX_MSG_ID_LEN {
+                bail!("invalid message id");
+            }
+            if payload_b64.len() > MAX_PAYLOAD_B64 {
+                bail!("payload too large");
+            }
+            let online = {
+                let conns = shared.conns.lock().await;
+                match conns.get(&to) {
+                    Some(senders) => {
+                        let out = ServerMsg::Message {
+                            room: room.clone(),
+                            id: id.clone(),
+                            payload_b64: payload_b64.clone(),
+                        };
+                        senders
+                            .iter()
+                            .fold(false, |acc, s| acc | s.try_send(out.clone()).is_ok())
+                    }
+                    None => false,
+                }
+            };
+            let (delivered, queued) = if online {
+                (1usize, 0usize)
+            } else {
+                let db = shared.db.lock().await;
+                enqueue(&db, &to, &room, &id, &payload_b64)?;
+                (0usize, 1usize)
+            };
             let _ = tx.send(ServerMsg::Sent { id, delivered, queued }).await;
         }
         ClientMsg::Fetch => {

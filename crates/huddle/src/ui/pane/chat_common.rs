@@ -174,13 +174,25 @@ pub fn render_input(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme, room
         Some(r) => r,
         None => return,
     };
-    let border_style = if r.input_active {
+    // huddle 1.2: surface real deliverability in the composer so the user
+    // isn't typing into a window that can't send. When not Ready, the border
+    // turns to the error style and the idle hint shows why.
+    let readiness = app.handle.room_send_readiness(room_id);
+    let not_ready = !readiness.can_send();
+    let border_style = if not_ready {
+        theme.err_style()
+    } else if r.input_active {
         theme.warn_style()
     } else {
         theme.border_style()
     };
 
-    let lines: Vec<Line> = if !r.input_active {
+    let lines: Vec<Line> = if not_ready && !r.input_active {
+        vec![Line::from(Span::styled(
+            format!("○ {}", readiness.reason()),
+            theme.err_style(),
+        ))]
+    } else if !r.input_active {
         vec![Line::from(Span::styled(
             "press / to type   ·   Alt+Enter or ^J for newline   ·   Ctrl+P for command palette",
             theme.dim(),
