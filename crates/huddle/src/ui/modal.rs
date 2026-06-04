@@ -1253,7 +1253,7 @@ pub fn render_add_friend(f: &mut Frame, s: &crate::app::AddFriendState) {
     f.render_widget(Clear, area);
     let displayed = if s.input.is_empty() {
         Span::styled(
-            "HD-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX   or   alice",
+            "HD-XXXX-…   ·   a connect code (K7M9Q2X4)   ·   alice",
             Style::default().fg(Color::DarkGray),
         )
     } else {
@@ -1265,15 +1265,15 @@ pub fn render_add_friend(f: &mut Frame, s: &crate::app::AddFriendState) {
     let lines = vec![
         Line::from(""),
         Line::from(Span::styled(
-            "  enter a friend's HD ID or username.",
+            "  enter a friend's HD ID, a connect code, or username.",
             Style::default().fg(Color::White),
         )),
         Line::from(Span::styled(
-            "  works for peers seen on the mesh; for cold start,",
+            "  a connect code is the short code a friend generated",
             Style::default().fg(Color::DarkGray),
         )),
         Line::from(Span::styled(
-            "  paste an invite link with v instead.",
+            "  with G; paste an invite link with v for a cold start.",
             Style::default().fg(Color::DarkGray),
         )),
         Line::from(""),
@@ -1298,6 +1298,68 @@ pub fn render_add_friend(f: &mut Frame, s: &crate::app::AddFriendState) {
                 .padding(Padding::uniform(1))
                 .title(Span::styled(
                     " add friend ",
+                    Style::default().fg(Color::Cyan).bold(),
+                )),
+        );
+    f.render_widget(para, area);
+}
+
+/// huddle 1.2.1: show a freshly minted connect code for the user to share. A
+/// peer types it into their "add friend" field to add us — short-lived, so it
+/// can't be reused later to enumerate us.
+pub fn render_connect_code(f: &mut Frame, s: &crate::app::ConnectCodeState) {
+    let area = centered_rect(60, 13, f.area());
+    f.render_widget(Clear, area);
+    // Pretty-print as two groups of four for readability (K7M9-Q2X4).
+    let pretty = if s.code.len() == 8 {
+        format!("{}-{}", &s.code[..4], &s.code[4..])
+    } else {
+        s.code.clone()
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let remaining = (s.expires_at - now).max(0);
+    let mins = remaining / 60;
+    let secs = remaining % 60;
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "  share this code — a friend adds you by typing it",
+            Style::default().fg(Color::White),
+        )),
+        Line::from(Span::styled(
+            "  into their \"add friend\" box (a, or A on the GUI).",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("        {pretty}"),
+            Style::default().fg(Color::Cyan).bold(),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("  expires in {mins}m {secs:02}s"),
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" c", Style::default().fg(Color::Yellow)),
+            Span::styled(" copy   ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Esc", Style::default().fg(Color::Yellow)),
+            Span::styled(" close", Style::default().fg(Color::DarkGray)),
+        ]),
+    ];
+    let para = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan))
+                .padding(Padding::uniform(1))
+                .title(Span::styled(
+                    " your connect code ",
                     Style::default().fg(Color::Cyan).bold(),
                 )),
         );

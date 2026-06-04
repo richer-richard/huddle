@@ -445,7 +445,37 @@ impl Ready {
             UiAction::OpenAddContact => {
                 self.vm.modal = Modal::AddContact(AddContactState::default());
             }
+            UiAction::GenerateConnectCode => {
+                // huddle 1.2.1: ask the relay to mint a short-lived code others
+                // can use to add us. It arrives via AppEvent::ConnectCodeCreated
+                // and is shown in the Add-contact modal.
+                match self.handle.create_connect_code() {
+                    Ok(()) => self.vm.set_status("generating a connect code…"),
+                    Err(e) => self.vm.set_status(format!("connect code: {e}")),
+                }
+            }
+            UiAction::OpenAbout => {
+                self.vm.modal = Modal::About;
+            }
             UiAction::SubmitAddContact { target, note } => {
+                // huddle 1.2.1: a connect code (8 Crockford-base32 chars) is the
+                // short-lived alternative to a full HD-ID — resolve it via the
+                // relay (which then sends the contact request). Checked first;
+                // it can't collide with a 24-hex HD-ID.
+                if huddle_core::app::normalize_connect_code(&target).is_some() {
+                    match self.handle.redeem_connect_code(&target) {
+                        Ok(()) => {
+                            self.vm.set_status("looking up connect code…");
+                            self.vm.modal = Modal::None;
+                        }
+                        Err(e) => {
+                            if let Modal::AddContact(s) = &mut self.vm.modal {
+                                s.error = Some(format!("connect code: {e}"));
+                            }
+                        }
+                    }
+                    return;
+                }
                 let resolved =
                     huddle_core::app::normalize_to_fingerprint(&target).or_else(|| {
                         let m = self.handle.peers_with_username(&target);

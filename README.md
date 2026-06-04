@@ -615,6 +615,22 @@ your platform's Downloads folder. Phase 2 cap is 1 MiB per file.
   doesn't). Per-DM ephemeral ratchets (Double Ratchet-style) are a
   candidate follow-up.
 
+## What's new in 1.2.1 — add a contact by short code, + an About window
+
+A small UX follow-up to 1.2.0's working DMs: you no longer have to read out your
+full 24-character HD-ID to start a DM.
+
+- **Connect codes.** Generate a short, single-screen code (8 characters, e.g.
+  `K7M9-Q2X4`) that's valid for **5 minutes**. A friend types it into their
+  "add a contact" box and a contact request flies to you — no HD-ID required.
+  The relay holds the (ephemeral) code→identity map; the code grants nothing on
+  its own (redeeming it only sends *you* a request you still accept), and it
+  expires fast so it can't be reused to track you. Generate one from the
+  add-contact dialog (GUI) or with `G` (TUI); the same box accepts either a
+  code, an HD-ID, or a username.
+- **About window (GUI).** Settings → Account → *About huddle* shows the version
+  and a link to the source: **github.com/richer-richard/huddle**.
+
 ## What's new in 1.2.0 — the relay actually carries DMs + friend requests
 
 The headline fix: **two people can now reliably chat.** Earlier builds delivered

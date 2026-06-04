@@ -48,7 +48,10 @@ async fn next_message(rx: &mut Rx) -> (String, Vec<u8>) {
         loop {
             match rx.recv().await.expect("event stream open") {
                 ServerEvent::Message { id, payload, .. } => return (id, payload),
-                ServerEvent::Ready | ServerEvent::Sent { .. } => continue,
+                ServerEvent::Ready
+                | ServerEvent::Sent { .. }
+                | ServerEvent::ConnectToken { .. }
+                | ServerEvent::ConnectTokenResolved { .. } => continue,
                 ServerEvent::Disconnected => panic!("disconnected"),
             }
         }
@@ -64,7 +67,10 @@ async fn next_sent(rx: &mut Rx) -> (String, usize, usize) {
         loop {
             match rx.recv().await.expect("event stream open") {
                 ServerEvent::Sent { id, delivered, queued } => return (id, delivered, queued),
-                ServerEvent::Ready | ServerEvent::Message { .. } => continue,
+                ServerEvent::Ready
+                | ServerEvent::Message { .. }
+                | ServerEvent::ConnectToken { .. }
+                | ServerEvent::ConnectTokenResolved { .. } => continue,
                 ServerEvent::Disconnected => panic!("disconnected"),
             }
         }
@@ -72,6 +78,89 @@ async fn next_sent(rx: &mut Rx) -> (String, usize, usize) {
     tokio::time::timeout(Duration::from_secs(5), fut)
         .await
         .expect("timed out waiting for sent receipt")
+}
+
+/// Pull the next `ConnectToken` event.
+async fn next_connect_token(rx: &mut Rx) -> (String, u64) {
+    let fut = async {
+        loop {
+            match rx.recv().await.expect("event stream open") {
+                ServerEvent::ConnectToken { token, ttl_secs } => return (token, ttl_secs),
+                ServerEvent::Ready
+                | ServerEvent::Sent { .. }
+                | ServerEvent::Message { .. }
+                | ServerEvent::ConnectTokenResolved { .. } => continue,
+                ServerEvent::Disconnected => panic!("disconnected"),
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), fut)
+        .await
+        .expect("timed out waiting for connect token")
+}
+
+/// Pull the next `ConnectTokenResolved` event.
+async fn next_connect_resolved(rx: &mut Rx) -> (Option<String>, Option<String>) {
+    let fut = async {
+        loop {
+            match rx.recv().await.expect("event stream open") {
+                ServerEvent::ConnectTokenResolved { fingerprint, pubkey_b64 } => {
+                    return (fingerprint, pubkey_b64)
+                }
+                ServerEvent::Ready
+                | ServerEvent::Sent { .. }
+                | ServerEvent::Message { .. }
+                | ServerEvent::ConnectToken { .. } => continue,
+                ServerEvent::Disconnected => panic!("disconnected"),
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), fut)
+        .await
+        .expect("timed out waiting for connect-token resolution")
+}
+
+/// huddle 1.2.1: minting + redeeming a connect code. A mints a short code; B
+/// redeems it and gets A's fingerprint + pubkey back (so it can send a contact
+/// request). A bogus code resolves to `None`.
+#[tokio::test]
+async fn connect_token_mint_and_redeem() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("t.db");
+    let port = 18802;
+    let _server = spawn_server(port, db.to_str().unwrap());
+    wait_listening(port).await;
+    let url = format!("ws://127.0.0.1:{port}/ws");
+
+    let a_id = Arc::new(Identity::generate().unwrap());
+    let b_id = Arc::new(Identity::generate().unwrap());
+    let a_fp = a_id.fingerprint().to_string();
+
+    let (a, mut a_rx) = ServerClient::connect(&url, &DialMode::Direct, a_id.clone(), vec![])
+        .await
+        .unwrap();
+    let (b, mut b_rx) = ServerClient::connect(&url, &DialMode::Direct, b_id.clone(), vec![])
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // A mints a code.
+    a.create_connect_token().unwrap();
+    let (code, ttl) = next_connect_token(&mut a_rx).await;
+    assert_eq!(code.len(), 8, "code is 8 chars: {code}");
+    assert!(ttl >= 60, "ttl is a few minutes, got {ttl}");
+
+    // B redeems it → resolves to A's identity.
+    b.redeem_connect_token(&code).unwrap();
+    let (fp, pk) = next_connect_resolved(&mut b_rx).await;
+    assert_eq!(fp.as_deref(), Some(a_fp.as_str()));
+    assert!(pk.is_some(), "owner pubkey returned for TOFU pinning");
+
+    // A bogus code resolves to nothing.
+    b.redeem_connect_token("ZZZZZZZZ").unwrap();
+    let (fp2, pk2) = next_connect_resolved(&mut b_rx).await;
+    assert_eq!(fp2, None);
+    assert_eq!(pk2, None);
 }
 
 #[tokio::test]

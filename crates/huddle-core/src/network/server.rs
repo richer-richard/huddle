@@ -52,6 +52,10 @@ enum ClientMsg {
     /// the recipient files it under (DM room id, or their inbox id). Mirrors
     /// `huddle-server`'s `ClientMsg::SendDirect`.
     SendDirect { to: String, room: String, id: String, payload_b64: String },
+    /// huddle 1.2.1: mint a short-lived connect code bound to our identity.
+    CreateConnectToken,
+    /// huddle 1.2.1: resolve a connect code → owner fingerprint + pubkey.
+    RedeemConnectToken { token: String },
     Fetch,
     Ping,
 }
@@ -69,6 +73,17 @@ enum ServerMsg {
     Ready,
     Message { room: String, id: String, payload_b64: String },
     Sent { id: String, delivered: usize, queued: usize },
+    /// huddle 1.2.1: a freshly minted connect code + its lifetime in seconds.
+    ConnectToken { token: String, ttl_secs: u64 },
+    /// huddle 1.2.1: result of redeeming a connect code. `fingerprint`/`pubkey_b64`
+    /// are `None` when the code was unknown or expired. (The relay also echoes
+    /// the `token`, but we don't need it client-side — serde ignores it.)
+    ConnectTokenResolved {
+        #[serde(default)]
+        fingerprint: Option<String>,
+        #[serde(default)]
+        pubkey_b64: Option<String>,
+    },
     Pong,
     Error { message: String },
 }
@@ -86,6 +101,14 @@ pub enum ServerEvent {
     Sent { id: String, delivered: usize, queued: usize },
     /// A room message delivered (live or from the offline mailbox).
     Message { room: String, id: String, payload: Vec<u8> },
+    /// huddle 1.2.1: the relay minted a connect code for us (with its TTL).
+    ConnectToken { token: String, ttl_secs: u64 },
+    /// huddle 1.2.1: the relay resolved a connect code we redeemed.
+    /// `fingerprint`/`pubkey` are `None` when the code was unknown or expired.
+    ConnectTokenResolved {
+        fingerprint: Option<String>,
+        pubkey_b64: Option<String>,
+    },
     /// The socket closed; the caller may choose to reconnect.
     Disconnected,
 }
@@ -282,6 +305,15 @@ impl ServerClient {
                     Ok(ServerMsg::Sent { id, delivered, queued }) => {
                         let _ = ev_tx.send(ServerEvent::Sent { id, delivered, queued });
                     }
+                    Ok(ServerMsg::ConnectToken { token, ttl_secs }) => {
+                        let _ = ev_tx.send(ServerEvent::ConnectToken { token, ttl_secs });
+                    }
+                    Ok(ServerMsg::ConnectTokenResolved { fingerprint, pubkey_b64 }) => {
+                        let _ = ev_tx.send(ServerEvent::ConnectTokenResolved {
+                            fingerprint,
+                            pubkey_b64,
+                        });
+                    }
                     Ok(ServerMsg::Message { room, id, payload_b64 }) => {
                         match B64.decode(payload_b64.as_bytes()) {
                             Ok(payload) => {
@@ -331,6 +363,18 @@ impl ServerClient {
 
     pub fn unsubscribe(&self, room: &str) -> Result<()> {
         self.send(ClientMsg::Unsubscribe { room: room.to_string() })
+    }
+
+    /// huddle 1.2.1: ask the relay to mint a short-lived connect code bound to
+    /// our identity. The reply arrives as `ServerEvent::ConnectToken`.
+    pub fn create_connect_token(&self) -> Result<()> {
+        self.send(ClientMsg::CreateConnectToken)
+    }
+
+    /// huddle 1.2.1: ask the relay to resolve a connect code to its owner.
+    /// The reply arrives as `ServerEvent::ConnectTokenResolved`.
+    pub fn redeem_connect_token(&self, token: &str) -> Result<()> {
+        self.send(ClientMsg::RedeemConnectToken { token: token.to_string() })
     }
 
     /// Ask the server to re-drain our mailbox.

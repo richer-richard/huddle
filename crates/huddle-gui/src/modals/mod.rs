@@ -40,6 +40,7 @@ pub fn render(ctx: &egui::Context, modal: &mut Modal, our_id: &str, actions: &mu
         Modal::EditUsername(s) => edit_username(ctx, s, actions),
         Modal::GoDark(s) => go_dark(ctx, s, actions),
         Modal::Qr => qr(ctx, our_id, actions),
+        Modal::About => about(ctx, actions),
         Modal::Onboarding { cursor } => onboarding(ctx, *cursor, actions),
         Modal::UpdateOptIn => update_opt_in(ctx, actions),
         Modal::QuitConfirm => quit_confirm(ctx, actions),
@@ -757,18 +758,19 @@ fn add_contact(ctx: &egui::Context, s: &mut AddContactState, actions: &mut Vec<U
         ui.heading("Add a contact");
         ui.label(
             RichText::new(
-                "enter their HD-ID. huddle sends a signed contact request over the relay \
-                 (works across the internet) and also tries a direct LAN connection.",
+                "enter their HD-ID or a connect code they shared. huddle sends a signed \
+                 contact request over the relay (works across the internet) and also tries \
+                 a direct LAN connection.",
             )
             .small()
             .color(palette().text_dim),
         );
         ui.add_space(10.0);
-        ui.label("HD-ID");
+        ui.label("HD-ID or connect code");
         let r = ui.add(
             TextEdit::singleline(&mut s.target)
                 .desired_width(f32::INFINITY)
-                .hint_text("HD-XXXX-XXXX-…"),
+                .hint_text("HD-XXXX-XXXX-…  or  K7M9Q2X4"),
         );
         let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
         ui.add_space(6.0);
@@ -782,6 +784,55 @@ fn add_contact(ctx: &egui::Context, s: &mut AddContactState, actions: &mut Vec<U
             ui.add_space(6.0);
             ui.colored_label(palette().error, e);
         }
+
+        // huddle 1.2.1: the other direction — mint a short-lived code THEY can
+        // type to add you, instead of reading out your full HD-ID.
+        ui.add_space(12.0);
+        ui.separator();
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new("…or let them add you")
+                .small()
+                .strong()
+                .color(palette().text_dim),
+        );
+        match &s.code {
+            Some((code, expires_at)) => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                let remaining = (*expires_at - now).max(0);
+                let pretty = if code.len() == 8 {
+                    format!("{}-{}", &code[..4], &code[4..])
+                } else {
+                    code.clone()
+                };
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(&pretty).heading().monospace().color(palette().accent));
+                    if ui.button("Copy").clicked() {
+                        actions.push(UiAction::Copy(code.clone()));
+                    }
+                });
+                ui.label(
+                    RichText::new(format!(
+                        "valid {}m {:02}s — they enter it above on their device",
+                        remaining / 60,
+                        remaining % 60
+                    ))
+                    .small()
+                    .color(palette().text_dim),
+                );
+                // Keep the countdown ticking while the modal is open.
+                ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
+            }
+            None => {
+                if ui.button("Generate a code to share").clicked() {
+                    actions.push(UiAction::GenerateConnectCode);
+                }
+            }
+        }
+
         ui.add_space(12.0);
         let mut go = enter;
         ui.horizontal(|ui| {
@@ -803,6 +854,54 @@ fn add_contact(ctx: &egui::Context, s: &mut AddContactState, actions: &mut Vec<U
                 });
             }
         }
+    });
+    if resp.should_close() {
+        actions.push(UiAction::CloseModal);
+    }
+}
+
+/// huddle 1.2.1: the About window — app name, version, a one-line summary, and
+/// a clickable link to the GitHub repository.
+fn about(ctx: &egui::Context, actions: &mut Vec<UiAction>) {
+    let resp = egui::Modal::new(Id::new("modal-about")).show(ctx, |ui| {
+        ui.set_width(360.0);
+        ui.vertical_centered(|ui| {
+            ui.heading("huddle");
+            ui.label(
+                RichText::new(format!("version {}", env!("CARGO_PKG_VERSION")))
+                    .small()
+                    .color(palette().text_dim),
+            );
+        });
+        ui.add_space(10.0);
+        ui.label(
+            RichText::new(
+                "Terminal- and desktop-native chat over a self-hosted Tor onion relay, \
+                 end-to-end encrypted.",
+            )
+            .small()
+            .color(palette().text_dim),
+        );
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            ui.label("Source code:");
+            ui.hyperlink_to(
+                "github.com/richer-richard/huddle",
+                "https://github.com/richer-richard/huddle",
+            );
+        });
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new("MIT OR Apache-2.0")
+                .small()
+                .color(palette().text_dim),
+        );
+        ui.add_space(12.0);
+        ui.vertical_centered(|ui| {
+            if ui.button("Close").clicked() {
+                actions.push(UiAction::CloseModal);
+            }
+        });
     });
     if resp.should_close() {
         actions.push(UiAction::CloseModal);

@@ -135,6 +135,11 @@ pub enum UiAction {
     AcceptContactRequest(String),
     RejectContactRequest(String),
     RemoveContact(String),
+    // huddle 1.2.1: short-lived "connect code" — generate one to share, or
+    // redeem one a friend shared (handled inside SubmitAddContact).
+    GenerateConnectCode,
+    // huddle 1.2.1: open the About window (version + GitHub link).
+    OpenAbout,
     OpenEditAlias(String),
     SubmitEditAlias {
         fingerprint: String,
@@ -270,6 +275,8 @@ pub enum Modal {
     EditUsername(EditUsernameState),
     GoDark(GoDarkState),
     Qr,
+    /// huddle 1.2.1: About window — version + a link to the GitHub repo.
+    About,
     Onboarding { cursor: usize },
     UpdateOptIn,
     QuitConfirm,
@@ -412,6 +419,9 @@ pub struct AddContactState {
     pub target: String,
     pub note: String,
     pub error: Option<String>,
+    /// huddle 1.2.1: a connect code we minted to share (code, expiry-epoch-secs),
+    /// shown inside this modal once the relay returns it.
+    pub code: Option<(String, i64)>,
 }
 
 /// Rename a contact locally (sets the alias used everywhere in the UI).
@@ -498,6 +508,10 @@ pub struct ViewModel {
     // active modal overlay + queue for async-raised modals
     pub modal: Modal,
     pub modal_queue: VecDeque<Modal>,
+    /// huddle 1.2.1: the most recently minted connect code + its expiry (epoch
+    /// secs), shown in the Add-contact modal so the user can share it. Cleared
+    /// when it expires or a new one is minted.
+    pub connect_code: Option<(String, i64)>,
 }
 
 impl ViewModel {
@@ -548,6 +562,7 @@ impl ViewModel {
             status: None,
             modal: Modal::None,
             modal_queue: VecDeque::new(),
+            connect_code: None,
         };
         vm.refresh(h);
         vm
@@ -913,6 +928,22 @@ fn apply_event(vm: &mut ViewModel, h: &AppHandle, ev: AppEvent) {
             let who = display_name.unwrap_or_else(|| fmt::display_id(&fingerprint));
             vm.set_status(format!("contact request from {who} — see Contacts"));
         }
+        AppEvent::ConnectCodeCreated { code, expires_at } => {
+            // huddle 1.2.1: surface the minted code in the open Add-contact
+            // modal (with a Copy button + countdown), and record it on the vm.
+            vm.set_status(format!("connect code ready: {code}"));
+            if let Modal::AddContact(s) = &mut vm.modal {
+                s.code = Some((code.clone(), expires_at));
+            }
+            vm.connect_code = Some((code, expires_at));
+        }
+        AppEvent::ConnectCodeRedeemed { fingerprint } => {
+            let who = fmt::display_id(&fingerprint);
+            vm.set_status(format!("connect code accepted — request sent to {who}"));
+        }
+        AppEvent::ConnectCodeFailed { reason } => {
+            vm.set_status(format!("connect code: {reason}"));
+        }
         // The remaining variants surface in later phases (files, SAS, rotation,
         // inbound dial, NAT, …). They're already in the activity log above.
         _ => {}
@@ -1029,6 +1060,7 @@ mod tests {
             status: None,
             modal: Modal::None,
             modal_queue: VecDeque::new(),
+            connect_code: None,
         }
     }
 

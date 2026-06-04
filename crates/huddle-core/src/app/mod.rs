@@ -2107,6 +2107,93 @@ impl AppHandle {
         Ok(())
     }
 
+    /// huddle 1.2.1: ask the relay to mint a short-lived **connect code** bound
+    /// to our identity, so a peer can add/DM us by typing the code instead of
+    /// our full HD-ID. The code (and its expiry) arrive asynchronously as
+    /// `AppEvent::ConnectCodeCreated`. Errors immediately if the relay isn't
+    /// connected (codes are a relay feature — there's no one to mint them).
+    pub fn create_connect_code(&self) -> Result<()> {
+        if !self.network.create_connect_token() {
+            return Err(HuddleError::Network(
+                "not connected to the relay — can't create a connect code".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// huddle 1.2.1: redeem a connect code someone shared. The relay resolves
+    /// it to their identity and we send them a contact request (which opens a
+    /// DM once they accept). Progress arrives as `AppEvent::ConnectCodeRedeemed`
+    /// / `ConnectCodeFailed`. Errors immediately for a malformed code or when
+    /// the relay isn't connected.
+    pub fn redeem_connect_code(&self, code: &str) -> Result<()> {
+        let norm = normalize_connect_code(code)
+            .ok_or_else(|| HuddleError::Other("that doesn't look like a connect code".into()))?;
+        if !self.network.redeem_connect_token(&norm) {
+            return Err(HuddleError::Network(
+                "not connected to the relay — can't redeem a connect code".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// huddle 1.2.1: the relay resolved a connect code we redeemed. Validate the
+    /// resolution, then send the owner a contact request (which opens a DM when
+    /// they accept). Emits `ConnectCodeRedeemed` on success, `ConnectCodeFailed`
+    /// otherwise.
+    async fn on_connect_code_resolved(
+        &self,
+        fingerprint: Option<String>,
+        pubkey_b64: Option<String>,
+    ) {
+        let our_fp = self.identity.fingerprint().to_string();
+        let fp = match fingerprint {
+            Some(fp) if !fp.is_empty() => fp,
+            _ => {
+                let _ = self.app_event_tx.send(AppEvent::ConnectCodeFailed {
+                    reason: "invalid or expired connect code".into(),
+                });
+                return;
+            }
+        };
+        if fp == our_fp {
+            let _ = self.app_event_tx.send(AppEvent::ConnectCodeFailed {
+                reason: "that's your own connect code".into(),
+            });
+            return;
+        }
+        // Integrity check: if the relay also returned the owner's pubkey, it
+        // MUST hash to the fingerprint it claims — else the mapping is bogus
+        // (a buggy or hostile relay). The real identity proof still comes from
+        // the owner's signed reply; this just rejects an obviously-wrong map.
+        if let Some(pk_b64) = pubkey_b64.as_deref() {
+            if let Some(pk) = B64
+                .decode(pk_b64)
+                .ok()
+                .and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok())
+            {
+                if crate::identity::compute_fingerprint(&pk) != fp {
+                    let _ = self.app_event_tx.send(AppEvent::ConnectCodeFailed {
+                        reason: "connect code resolved to a mismatched identity".into(),
+                    });
+                    return;
+                }
+            }
+        }
+        match self.send_contact_request(&fp, None).await {
+            Ok(()) => {
+                let _ = self
+                    .app_event_tx
+                    .send(AppEvent::ConnectCodeRedeemed { fingerprint: fp });
+            }
+            Err(e) => {
+                let _ = self.app_event_tx.send(AppEvent::ConnectCodeFailed {
+                    reason: format!("couldn't send the request: {e}"),
+                });
+            }
+        }
+    }
+
     /// Decline a pending contact request. `block` also adds the requester to
     /// the persistent blocklist so they can't re-request.
     pub fn reject_contact_request(&self, fingerprint: &str, block: bool) -> Result<()> {
@@ -2520,6 +2607,20 @@ impl AppHandle {
                                     .await;
                             }
                             ServerEvent::Ready | ServerEvent::Sent { .. } => {}
+                            ServerEvent::ConnectToken { token, ttl_secs } => {
+                                // huddle 1.2.1: relay minted our connect code.
+                                let expires_at = now_unix() + ttl_secs as i64;
+                                let _ = handle.app_event_tx.send(AppEvent::ConnectCodeCreated {
+                                    code: token,
+                                    expires_at,
+                                });
+                            }
+                            ServerEvent::ConnectTokenResolved {
+                                fingerprint,
+                                pubkey_b64,
+                            } => {
+                                handle.on_connect_code_resolved(fingerprint, pubkey_b64).await;
+                            }
                             ServerEvent::Disconnected => break,
                         }
                     }
@@ -5621,6 +5722,31 @@ pub fn normalize_to_fingerprint(input: &str) -> Option<String> {
         .map(|c| std::str::from_utf8(c).unwrap().to_string())
         .collect();
     Some(chunks.join("-"))
+}
+
+/// huddle 1.2.1: length of a connect code (chars), matching the relay's
+/// `CONNECT_TOKEN_LEN`.
+pub const CONNECT_CODE_LEN: usize = 8;
+/// Crockford base32 alphabet (no I/L/O/U) — matches the relay's generator.
+const CONNECT_CODE_ALPHABET: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+/// huddle 1.2.1: canonicalize a typed connect code (uppercase, strip spaces /
+/// dashes) and validate it's exactly `CONNECT_CODE_LEN` Crockford-base32
+/// chars. Returns `None` for anything that isn't a well-formed code — so the
+/// UIs can tell a connect code apart from an HD-ID (24 hex) or a username, and
+/// route "add by …" input to the right path.
+pub fn normalize_connect_code(input: &str) -> Option<String> {
+    let up: String = input
+        .trim()
+        .to_ascii_uppercase()
+        .chars()
+        .filter(|c| *c != '-' && *c != ' ')
+        .collect();
+    if up.len() == CONNECT_CODE_LEN && up.bytes().all(|b| CONNECT_CODE_ALPHABET.contains(&b)) {
+        Some(up)
+    } else {
+        None
+    }
 }
 
 /// huddle 0.5.2: rank a multiaddr by transport preference. Lower =

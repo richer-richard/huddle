@@ -191,6 +191,11 @@ pub enum Action {
     AddFriendTypeChar(char),
     AddFriendBackspace,
     AddFriendConfirm,
+    // huddle 1.2.1: mint a short-lived connect code to share, close the modal
+    // that shows it, and copy the shown code to the clipboard.
+    GenerateConnectCode,
+    CloseConnectCode,
+    CopyConnectCode,
     // Phase F: short-lived join codes
     OpenGenerateJoinCode,
     OpenJoinWithCode,
@@ -487,6 +492,13 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
             KeyCode::Enter => Action::AddFriendConfirm,
             KeyCode::Backspace => Action::AddFriendBackspace,
             KeyCode::Char(c) => Action::AddFriendTypeChar(c),
+            _ => Action::Nothing,
+        },
+        // huddle 1.2.1: the "your connect code" display — any of Esc/Enter/q
+        // dismisses it; `c` copies the code to the clipboard.
+        Modal::ConnectCode(_) => match key.code {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => Action::CloseConnectCode,
+            KeyCode::Char('c') => Action::CopyConnectCode,
             _ => Action::Nothing,
         },
         Modal::ShowJoinCode(_) => match key.code {
@@ -818,6 +830,7 @@ fn map_sidebar(key: KeyEvent, app: &TuiApp) -> Action {
         KeyCode::Char('?') => return Action::OpenHelp,
         KeyCode::Char(':') => return Action::OpenCommandPalette,
         KeyCode::Char('a') => return Action::OpenAddFriend,
+        KeyCode::Char('G') => return Action::GenerateConnectCode,
         KeyCode::Char('d') => return Action::OpenDialPeer,
         KeyCode::Char('i') => return Action::OpenQrIdentity,
         KeyCode::Char(',') => return Action::JumpToSettingsPane,

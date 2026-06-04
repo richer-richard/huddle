@@ -80,6 +80,21 @@ fn account(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
         .small()
         .color(palette().text_dim),
     );
+
+    // huddle 1.2.1: About — version + a link to the source.
+    ui.add_space(14.0);
+    ui.separator();
+    ui.label(RichText::new("About").strong());
+    ui.horizontal(|ui| {
+        if ui.button("About huddle").clicked() {
+            actions.push(UiAction::OpenAbout);
+        }
+        ui.label(
+            RichText::new(format!("version {}", env!("CARGO_PKG_VERSION")))
+                .small()
+                .color(palette().text_dim),
+        );
+    });
 }
 
 fn network(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {

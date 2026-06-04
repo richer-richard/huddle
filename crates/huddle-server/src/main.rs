@@ -53,6 +53,21 @@ const OUTBOUND_CAP: usize = 256;
 /// huddle 1.1.4: drop a connection that connects but never completes the auth
 /// handshake within this many seconds (idle pre-auth DoS defense).
 const PRE_AUTH_TIMEOUT_SECS: u64 = 20;
+/// huddle 1.2.1: short-lived "connect code" registry. A client can mint a code
+/// that maps to its (authenticated) identity so a peer adds/DMs it by typing
+/// the code instead of the full 24-hex HD-ID. Codes expire after this many
+/// seconds. They grant NO authority — redeeming one only resolves the owner's
+/// fingerprint+pubkey so the redeemer can send a contact request the owner
+/// still has to accept — so the only abuse is spammy contact requests, bounded
+/// by the TTL and the 40-bit code space.
+const CONNECT_TOKEN_TTL_SECS: i64 = 5 * 60;
+/// Crockford base32 (no I/L/O/U) — unambiguous to read aloud / retype.
+const CONNECT_TOKEN_ALPHABET: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+/// 8 chars × 5 bits = 40 bits (~1.1e12), short to type yet infeasible to
+/// brute-force within the 5-minute window.
+const CONNECT_TOKEN_LEN: usize = 8;
+/// Global cap on live codes (memory bound; far above any real concurrency).
+const MAX_CONNECT_TOKENS: usize = 50_000;
 
 /// Reject base64 payloads larger than this (≈256 KiB encoded).
 const MAX_PAYLOAD_B64: usize = 256 * 1024;
@@ -109,6 +124,15 @@ enum ClientMsg {
         id: String,
         payload_b64: String,
     },
+    /// huddle 1.2.1: mint a short-lived connect code bound to this
+    /// authenticated identity. The server replies with `ConnectToken`.
+    CreateConnectToken,
+    /// huddle 1.2.1: resolve a connect code to its owner's fingerprint+pubkey
+    /// so we can send them a contact request. The server replies with
+    /// `ConnectTokenResolved` (fingerprint = None when unknown/expired).
+    RedeemConnectToken {
+        token: String,
+    },
     /// Re-drain the mailbox on demand.
     Fetch,
     Ping,
@@ -123,17 +147,63 @@ enum ServerMsg {
     Ready { fingerprint: String },
     Message { room: String, id: String, payload_b64: String },
     Sent { id: String, delivered: usize, queued: usize },
+    /// huddle 1.2.1: a freshly minted connect code + its lifetime (seconds).
+    ConnectToken { token: String, ttl_secs: u64 },
+    /// huddle 1.2.1: result of redeeming a connect code. `fingerprint`/`pubkey_b64`
+    /// are `None` when the code is unknown or expired.
+    ConnectTokenResolved {
+        token: String,
+        fingerprint: Option<String>,
+        pubkey_b64: Option<String>,
+    },
     Pong,
     Error { message: String },
 }
 
 type Tx = mpsc::Sender<ServerMsg>;
 
+/// huddle 1.2.1: one minted connect code and what it resolves to.
+struct ConnectTokenEntry {
+    fingerprint: String,
+    pubkey_b64: String,
+    expires_at: i64,
+}
+
+/// huddle 1.2.1: the in-memory connect-code registry. Ephemeral (never
+/// persisted — codes live ≤5 min). Indexed both ways so minting a fresh code
+/// can evict the owner's previous one.
+#[derive(Default)]
+struct ConnectTokens {
+    by_token: HashMap<String, ConnectTokenEntry>,
+    by_fp: HashMap<String, String>,
+}
+
+impl ConnectTokens {
+    /// Drop every expired entry from both indexes.
+    fn gc(&mut self, now: i64) {
+        let expired: Vec<String> = self
+            .by_token
+            .iter()
+            .filter(|(_, e)| e.expires_at <= now)
+            .map(|(t, _)| t.clone())
+            .collect();
+        for t in expired {
+            if let Some(e) = self.by_token.remove(&t) {
+                if self.by_fp.get(&e.fingerprint) == Some(&t) {
+                    self.by_fp.remove(&e.fingerprint);
+                }
+            }
+        }
+    }
+}
+
 struct Shared {
     db: Mutex<Connection>,
     /// fingerprint → the live socket senders for that identity (a user may
     /// be connected from more than one client at once).
     conns: Mutex<HashMap<String, Vec<Tx>>>,
+    /// huddle 1.2.1: short-lived connect codes (the DM "add by code" feature).
+    tokens: Mutex<ConnectTokens>,
 }
 
 #[tokio::main]
@@ -153,6 +223,7 @@ async fn main() -> Result<()> {
     let shared = Arc::new(Shared {
         db: Mutex::new(conn),
         conns: Mutex::new(HashMap::new()),
+        tokens: Mutex::new(ConnectTokens::default()),
     });
 
     // huddle 1.1.4: periodic mailbox GC. Every hour drop queued ciphertext
@@ -305,6 +376,9 @@ async fn serve_ws(ws: WebSocketStream<TcpStream>, shared: Arc<Shared>) -> Result
     }
 
     let mut fingerprint: Option<String> = None;
+    // huddle 1.2.1: the pubkey proven at auth, retained so `CreateConnectToken`
+    // can bind it into the code (lets a redeemer TOFU-pin the owner's key).
+    let mut proven_pubkey: Option<String> = None;
     let mut authenticated = false;
     // Drop a connection that never finishes the handshake within the deadline
     // (idle pre-auth DoS defense). Disabled once authenticated.
@@ -352,6 +426,7 @@ async fn serve_ws(ws: WebSocketStream<TcpStream>, shared: Arc<Shared>) -> Result
                 } => match verify_client_auth(claimed, pubkey_b64, signature_b64, &nonce) {
                     Ok(proven_fp) => {
                         fingerprint = Some(proven_fp);
+                        proven_pubkey = Some(pubkey_b64.clone());
                         authenticated = true;
                     }
                     Err(e) => {
@@ -374,7 +449,7 @@ async fn serve_ws(ws: WebSocketStream<TcpStream>, shared: Arc<Shared>) -> Result
                 }
             }
         }
-        if let Err(e) = handle_client_msg(msg, &mut fingerprint, &tx, &shared).await {
+        if let Err(e) = handle_client_msg(msg, &mut fingerprint, &proven_pubkey, &tx, &shared).await {
             let _ = tx
                 .send(ServerMsg::Error {
                     message: e.to_string(),
@@ -400,6 +475,7 @@ async fn serve_ws(ws: WebSocketStream<TcpStream>, shared: Arc<Shared>) -> Result
 async fn handle_client_msg(
     msg: ClientMsg,
     fingerprint: &mut Option<String>,
+    proven_pubkey: &Option<String>,
     tx: &Tx,
     shared: &Arc<Shared>,
 ) -> Result<()> {
@@ -545,6 +621,72 @@ async fn handle_client_msg(
             };
             let _ = tx.send(ServerMsg::Sent { id, delivered, queued }).await;
         }
+        ClientMsg::CreateConnectToken => {
+            // huddle 1.2.1: mint a short-lived code bound to the proven identity.
+            let fp = require_fp(fingerprint)?;
+            let pubkey = proven_pubkey.clone().unwrap_or_default();
+            let now = now_unix();
+            let token = {
+                let mut t = shared.tokens.lock().await;
+                t.gc(now);
+                // Evict this fp's previous code so only one is live at a time.
+                if let Some(old) = t.by_fp.remove(&fp) {
+                    t.by_token.remove(&old);
+                }
+                if t.by_token.len() >= MAX_CONNECT_TOKENS {
+                    bail!("connect-code registry full; try again shortly");
+                }
+                // Generate a code not currently in use.
+                let mut tok = gen_connect_token();
+                let mut tries = 0;
+                while t.by_token.contains_key(&tok) && tries < 8 {
+                    tok = gen_connect_token();
+                    tries += 1;
+                }
+                t.by_token.insert(
+                    tok.clone(),
+                    ConnectTokenEntry {
+                        fingerprint: fp.clone(),
+                        pubkey_b64: pubkey,
+                        expires_at: now + CONNECT_TOKEN_TTL_SECS,
+                    },
+                );
+                t.by_fp.insert(fp.clone(), tok.clone());
+                tok
+            };
+            let _ = tx
+                .send(ServerMsg::ConnectToken {
+                    token,
+                    ttl_secs: CONNECT_TOKEN_TTL_SECS as u64,
+                })
+                .await;
+        }
+        ClientMsg::RedeemConnectToken { token } => {
+            // huddle 1.2.1: resolve a code → owner fingerprint+pubkey. Must be
+            // authenticated (so redemptions are traceable), but the resolution
+            // grants nothing beyond the identity to send a contact request to.
+            let _fp = require_fp(fingerprint)?;
+            let now = now_unix();
+            let resolved = {
+                let mut t = shared.tokens.lock().await;
+                t.gc(now);
+                normalize_connect_token(&token)
+                    .and_then(|norm| t.by_token.get(&norm))
+                    .filter(|e| e.expires_at > now)
+                    .map(|e| (e.fingerprint.clone(), e.pubkey_b64.clone()))
+            };
+            let (fingerprint, pubkey_b64) = match resolved {
+                Some((fp, pk)) => (Some(fp), Some(pk)),
+                None => (None, None),
+            };
+            let _ = tx
+                .send(ServerMsg::ConnectTokenResolved {
+                    token: normalize_connect_token(&token).unwrap_or_default(),
+                    fingerprint,
+                    pubkey_b64,
+                })
+                .await;
+        }
         ClientMsg::Fetch => {
             let fp = require_fp(fingerprint)?;
             flush_mailbox(&fp, tx, shared).await?;
@@ -671,6 +813,39 @@ fn now_unix() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+/// huddle 1.2.1: generate a fresh connect code — `CONNECT_TOKEN_LEN` chars from
+/// the Crockford base32 alphabet. The alphabet length (32) divides 2^32, so
+/// `next_u32() % 32` is unbiased.
+fn gen_connect_token() -> String {
+    let mut rng = rand::rngs::OsRng;
+    (0..CONNECT_TOKEN_LEN)
+        .map(|_| {
+            let i = (rng.next_u32() as usize) % CONNECT_TOKEN_ALPHABET.len();
+            CONNECT_TOKEN_ALPHABET[i] as char
+        })
+        .collect()
+}
+
+/// huddle 1.2.1: canonicalize a typed connect code — uppercase, strip spaces /
+/// dashes — and validate it's exactly `CONNECT_TOKEN_LEN` Crockford-base32
+/// chars. Returns `None` for anything that isn't a well-formed code (so a
+/// stray HD-ID or username can't accidentally match a stored token).
+fn normalize_connect_token(s: &str) -> Option<String> {
+    let up: String = s
+        .trim()
+        .to_ascii_uppercase()
+        .chars()
+        .filter(|c| *c != '-' && *c != ' ')
+        .collect();
+    if up.len() == CONNECT_TOKEN_LEN
+        && up.bytes().all(|b| CONNECT_TOKEN_ALPHABET.contains(&b))
+    {
+        Some(up)
+    } else {
+        None
+    }
 }
 
 // ---- storage ----

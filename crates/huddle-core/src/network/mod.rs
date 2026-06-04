@@ -238,6 +238,25 @@ impl NetworkHandle {
         let _ = self.cmd_tx.send(NetworkCommand::AnnounceRoom(ann)).await;
     }
 
+    /// huddle 1.2.1: ask the attached relay to mint a short-lived connect code.
+    /// Returns `false` (no request sent) when no relay is currently attached.
+    /// The reply surfaces as `ServerEvent::ConnectToken` → `AppEvent`.
+    pub fn create_connect_token(&self) -> bool {
+        match self.server_client() {
+            Some(s) => s.create_connect_token().is_ok(),
+            None => false,
+        }
+    }
+
+    /// huddle 1.2.1: ask the attached relay to resolve a connect code.
+    /// Returns `false` when no relay is attached.
+    pub fn redeem_connect_token(&self, token: &str) -> bool {
+        match self.server_client() {
+            Some(s) => s.redeem_connect_token(token).is_ok(),
+            None => false,
+        }
+    }
+
     /// True when a server connection is currently attached.
     pub fn has_server(&self) -> bool {
         self.server.lock().unwrap().is_some()

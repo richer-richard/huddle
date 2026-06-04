@@ -268,6 +268,77 @@ async fn contact_request_over_server_opens_dm() {
     handle_b.shutdown().await;
 }
 
+async fn next_connect_code(rx: &mut tokio::sync::broadcast::Receiver<AppEvent>) -> String {
+    let fut = async {
+        loop {
+            match rx.recv().await {
+                Ok(AppEvent::ConnectCodeCreated { code, .. }) => return code,
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(_) => panic!("event channel closed"),
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), fut)
+        .await
+        .expect("timed out waiting for ConnectCodeCreated")
+}
+
+/// huddle 1.2.1: the connect-code shortcut for DMs. A mints a short code; B
+/// types it (instead of A's full HD-ID); the relay resolves it and B sends A a
+/// contact request — so A sees an inbound request from B, exactly as if B had
+/// typed the HD-ID. Proves the whole create→share→redeem→contact-request path
+/// across two real AppHandles over the relay.
+#[tokio::test]
+async fn connect_code_adds_contact_over_server() {
+    let dir = tempfile::tempdir().unwrap();
+    let port = 18815;
+    let _server = spawn_server(port, dir.path().join("srv.db").to_str().unwrap());
+    wait_listening(port).await;
+    let url = format!("ws://127.0.0.1:{port}/ws");
+
+    let db_a = storage::open_db_in_memory().unwrap();
+    let handle_a = AppHandle::start_with_db_and_options(
+        db_a,
+        NetworkMode::Server,
+        0,
+        [0u8; 32],
+        Vec::new(),
+        huddle_core::app::TransportConfig::onion_only(url.clone()),
+    )
+    .await
+    .unwrap();
+    let db_b = storage::open_db_in_memory().unwrap();
+    let handle_b = AppHandle::start_with_db_and_options(
+        db_b,
+        NetworkMode::Server,
+        0,
+        [0u8; 32],
+        Vec::new(),
+        huddle_core::app::TransportConfig::onion_only(url.clone()),
+    )
+    .await
+    .unwrap();
+    let mut events_a = handle_a.subscribe();
+    wait_server_connected(&handle_a).await;
+    wait_server_connected(&handle_b).await;
+    let b_fp = handle_b.fingerprint().to_string();
+
+    // A mints a connect code and shares it (out of band).
+    handle_a.create_connect_code().unwrap();
+    let code = next_connect_code(&mut events_a).await;
+    assert_eq!(code.len(), 8);
+    // A well-formed code is recognized by the shared detector.
+    assert!(huddle_core::app::normalize_connect_code(&code).is_some());
+
+    // B types the code → resolves to A → B sends A a contact request.
+    handle_b.redeem_connect_code(&code).unwrap();
+    assert_eq!(next_contact_request(&mut events_a).await, b_fp);
+
+    handle_a.shutdown().await;
+    handle_b.shutdown().await;
+}
+
 /// huddle 1.2: the real-world first-contact case — you add someone by HD-ID
 /// while they are OFFLINE. The signed ContactRequest is delivered straight to
 /// their fingerprint's relay mailbox (1.2 direct delivery), held there, and

@@ -210,4 +210,14 @@ pub enum AppEvent {
         display_name: Option<String>,
         note: Option<String>,
     },
+    /// huddle 1.2.1: the relay minted a short-lived "connect code" we asked for
+    /// (the DM "add by code" feature). The UI shows `code` for the user to
+    /// share; it stops working at `expires_at` (epoch seconds).
+    ConnectCodeCreated { code: String, expires_at: i64 },
+    /// huddle 1.2.1: a connect code we redeemed resolved to `fingerprint`, and
+    /// a contact request was sent to them. The UI can surface "request sent".
+    ConnectCodeRedeemed { fingerprint: String },
+    /// huddle 1.2.1: a connect code we tried to redeem was invalid or expired
+    /// (or the relay wasn't reachable). `reason` is a short human message.
+    ConnectCodeFailed { reason: String },
 }

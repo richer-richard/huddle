@@ -413,6 +413,9 @@ pub enum Modal {
     /// (HD-prefix / bare hex / username lookup) and dials via the
     /// usual flow.
     AddFriend(AddFriendState),
+    /// huddle 1.2.1: shows a freshly minted connect code for the user to share
+    /// (the short-lived DM "add by code" alternative to typing a full HD-ID).
+    ConnectCode(ConnectCodeState),
     /// huddle 0.7: "message who?" — Compose-DM modal. Single field
     /// with inline autocomplete; on confirm, resolves to a fingerprint
     /// and starts a DM via `AppHandle::start_direct`. Falls back to
@@ -515,6 +518,14 @@ pub const GO_DARK_CONFIRM_PHRASE: &str = "DELETE EVERYTHING";
 #[derive(Debug, Clone, Default)]
 pub struct AddFriendState {
     pub input: String,
+}
+
+/// huddle 1.2.1: state for the "your connect code" modal — the minted code and
+/// the epoch-seconds instant it expires (so the UI can show a countdown).
+#[derive(Debug, Clone, Default)]
+pub struct ConnectCodeState {
+    pub code: String,
+    pub expires_at: i64,
 }
 
 /// huddle 0.7: Compose-DM modal state. Single-field input; autocomplete
@@ -1974,6 +1985,23 @@ impl TuiApp {
                     format!("HD-{}", short_fp(&fingerprint).to_uppercase())
                 });
                 self.set_status(format!("contact request from {} — see Contacts", who));
+            }
+            AppEvent::ConnectCodeCreated { code, expires_at } => {
+                // huddle 1.2.1: the relay minted our connect code — show it so
+                // the user can share it (don't clobber an in-progress modal).
+                self.replace_modal_if_idle(Modal::ConnectCode(crate::app::ConnectCodeState {
+                    code,
+                    expires_at,
+                }));
+            }
+            AppEvent::ConnectCodeRedeemed { fingerprint } => {
+                self.set_status(format!(
+                    "connect code accepted — request sent to HD-{}, opens a DM when they accept",
+                    short_fp(&fingerprint).to_uppercase()
+                ));
+            }
+            AppEvent::ConnectCodeFailed { reason } => {
+                self.set_status(format!("connect code: {reason}"));
             }
         }
     }
@@ -4301,6 +4329,29 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             app.modal = Modal::AddFriend(AddFriendState::default());
             Ok(false)
         }
+        Action::GenerateConnectCode => {
+            // huddle 1.2.1: ask the relay to mint a short-lived code others can
+            // use to add us. The code arrives via AppEvent::ConnectCodeCreated.
+            match app.handle.create_connect_code() {
+                Ok(()) => app.set_status("generating a connect code…".to_string()),
+                Err(e) => app.modal = Modal::Error(format!("connect code: {e}")),
+            }
+            Ok(false)
+        }
+        Action::CloseConnectCode => {
+            app.modal = Modal::None;
+            Ok(false)
+        }
+        Action::CopyConnectCode => {
+            if let Modal::ConnectCode(s) = &app.modal {
+                let code = s.code.clone();
+                match crate::clipboard::copy(&code) {
+                    Ok(()) => app.set_status(format!("copied connect code {code}")),
+                    Err(e) => app.set_status(format!("copy failed: {e}")),
+                }
+            }
+            Ok(false)
+        }
         Action::AddFriendTypeChar(c) => {
             if let Modal::AddFriend(s) = &mut app.modal {
                 if s.input.chars().count() < 64 {
@@ -4325,6 +4376,17 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             }
             app.modal = Modal::None;
             let trimmed = input.trim();
+            // huddle 1.2.1: a connect code (8 Crockford-base32 chars) is the
+            // short-lived alternative to a full HD-ID — resolve it via the relay
+            // and send a contact request. Checked first; it can't collide with a
+            // 24-hex HD-ID (different length).
+            if huddle_core::app::normalize_connect_code(trimmed).is_some() {
+                match app.handle.redeem_connect_code(trimmed) {
+                    Ok(()) => app.set_status("looking up connect code…".to_string()),
+                    Err(e) => app.modal = Modal::Error(format!("connect code: {e}")),
+                }
+                return Ok(false);
+            }
             // huddle 1.0: a literal HD-ID sends a signed contact request over
             // the relay inbox — that works over the INTERNET (not just the LAN
             // mesh), reaching the peer live or via the offline mailbox. We
