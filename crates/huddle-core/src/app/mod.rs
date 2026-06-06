@@ -5773,6 +5773,52 @@ pub fn normalize_connect_code(input: &str) -> Option<String> {
     }
 }
 
+/// huddle 1.2.5: best-effort POSIX `~` expansion for a user-typed file path,
+/// shared by the TUI and GUI "attach by path" entries so they behave
+/// identically. Only the exact `~` and a leading `~/` are expanded to `$HOME`;
+/// anything else (including `~user`, which we don't resolve) is left literal so
+/// a bad path surfaces verbatim in the error. `$HOME` unset → no expansion.
+pub fn expand_tilde(input: &str) -> PathBuf {
+    expand_tilde_with(input, std::env::var("HOME").ok().as_deref())
+}
+
+/// Testable core of [`expand_tilde`] with an explicit home dir.
+fn expand_tilde_with(input: &str, home: Option<&str>) -> PathBuf {
+    if let Some(h) = home {
+        if input == "~" {
+            return PathBuf::from(h);
+        }
+        if let Some(rest) = input.strip_prefix("~/") {
+            return PathBuf::from(h).join(rest);
+        }
+    }
+    PathBuf::from(input)
+}
+
+#[cfg(test)]
+mod attach_path_tests {
+    use super::expand_tilde_with;
+    use std::path::PathBuf;
+
+    #[test]
+    fn tilde_expansion_matches_posix_basics() {
+        let home = Some("/home/alice");
+        assert_eq!(expand_tilde_with("~", home), PathBuf::from("/home/alice"));
+        assert_eq!(
+            expand_tilde_with("~/docs/f.txt", home),
+            PathBuf::from("/home/alice/docs/f.txt")
+        );
+        // Absolute + relative paths pass through untouched.
+        assert_eq!(expand_tilde_with("/etc/hosts", home), PathBuf::from("/etc/hosts"));
+        assert_eq!(expand_tilde_with("rel/f", home), PathBuf::from("rel/f"));
+        // `~user` is NOT resolved — left literal so the error shows what was typed
+        // (no `$HOME`+username gluing like the old TUI path did).
+        assert_eq!(expand_tilde_with("~bob/f", home), PathBuf::from("~bob/f"));
+        // No $HOME → no expansion.
+        assert_eq!(expand_tilde_with("~/f", None), PathBuf::from("~/f"));
+    }
+}
+
 /// huddle 0.5.2: rank a multiaddr by transport preference. Lower =
 /// better. Used to sort candidate addresses for the parallel dialer so
 /// LAN connections get a head-start over relay-hopped ones when wall-

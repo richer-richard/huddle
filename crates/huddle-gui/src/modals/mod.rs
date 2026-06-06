@@ -444,27 +444,33 @@ fn attach_path(ctx: &egui::Context, s: &mut AttachPathState, actions: &mut Vec<U
                 .color(palette().text_dim),
         );
         ui.add_space(8.0);
-        ui.add(
+        let r = ui.add(
             TextEdit::singleline(&mut s.path)
                 .desired_width(f32::INFINITY)
                 .hint_text("/path/to/file"),
         );
+        // Enter in the field submits, like the other single-field modals.
+        let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
         if let Some(e) = &s.error {
             ui.add_space(6.0);
             ui.colored_label(palette().error, e);
         }
         ui.add_space(10.0);
+        let mut submit = enter;
         ui.horizontal(|ui| {
             if ui.button("Attach").clicked() {
-                actions.push(UiAction::SubmitAttachPath {
-                    room_id: s.room_id.clone(),
-                    path: s.path.trim().to_string(),
-                });
+                submit = true;
             }
             if ui.button("Cancel").clicked() {
                 actions.push(UiAction::CloseModal);
             }
         });
+        if submit {
+            actions.push(UiAction::SubmitAttachPath {
+                room_id: s.room_id.clone(),
+                path: s.path.trim().to_string(),
+            });
+        }
     });
     if resp.should_close() {
         actions.push(UiAction::CloseModal);

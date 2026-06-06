@@ -286,7 +286,7 @@ from the actual key map.
 | `Esc`                     | Blur input (or focus sidebar)         |
 | `Ctrl+V`                  | Verify partner / member (SAS)         |
 | `Ctrl+F`                  | Search this room's history            |
-| `Ctrl+A`                  | Attach a file (native picker)         |
+| `Ctrl+A`                  | Attach a file (in-terminal file picker)|
 | `p` (in the attach picker)| Attach by typing a POSIX path (`~` expands; also in the palette) |
 | `Ctrl+L`                  | Leave the room                        |
 | `j` / `k`                 | Scroll messages (input blurred)       |

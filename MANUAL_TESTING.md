@@ -484,7 +484,8 @@ move `~/Library/Application Support/huddle` (macOS) / `~/.local/share/huddle`
       "attach by typing a path" starts **unchecked**. Click Attach in a chat:
       the native OS file dialog opens.
 - [ ] **GUI, toggle on.** Enable the toggle, click Attach: a path-entry box
-      opens instead of the native dialog. Enter an absolute path to attach.
+      opens instead of the native dialog. Type an absolute path and press
+      Enter (or click Attach) to send it.
 - [ ] **GUI, persists.** Quit and relaunch the GUI — the toggle is still on.
 
 ## Troubleshooting

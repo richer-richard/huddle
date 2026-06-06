@@ -4785,6 +4785,13 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             Ok(false)
         }
         Action::OpenAttachByPath => {
+            // Guard on an active room like OpenAttachmentPicker — the palette
+            // can reach this from outside a room, where there'd be nowhere to
+            // send (the confirm would otherwise silently no-op).
+            if app.active_room().is_none() {
+                app.set_status("attach is only available inside a room");
+                return Ok(false);
+            }
             // Replaces the picker modal if it's open — that's fine; the
             // two are alternatives for the same task.
             app.modal = Modal::AttachPath(AttachPathState::default());
@@ -4810,18 +4817,15 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
                 _ => return Ok(false),
             };
             if raw.is_empty() {
+                // Give feedback rather than a silent no-op (matches the GUI).
+                if let Modal::AttachPath(s) = &mut app.modal {
+                    s.error = Some("type a file path".into());
+                }
                 return Ok(false);
             }
-            // Best-effort `~` expansion via $HOME.
-            let expanded = if let Some(rest) = raw.strip_prefix('~') {
-                match std::env::var("HOME") {
-                    Ok(home) => format!("{home}{rest}"),
-                    Err(_) => raw.clone(),
-                }
-            } else {
-                raw.clone()
-            };
-            let path = std::path::PathBuf::from(expanded);
+            // Best-effort `~` expansion — shared with the GUI so both behave the
+            // same (only `~` and `~/…` expand; `~user` stays literal).
+            let path = huddle_core::app::expand_tilde(&raw);
             if !path.is_file() {
                 // Keep the modal open with the typed path intact + an inline
                 // error (like the attach picker and the GUI sibling), instead of

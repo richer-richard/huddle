@@ -697,19 +697,9 @@ impl Ready {
                 self.vm.attach_via_path = on;
             }
             UiAction::SubmitAttachPath { room_id, path } => {
-                let trimmed = path.trim();
-                // Best-effort `~` / `~/` expansion against $HOME.
-                let expanded = if trimmed == "~" {
-                    std::env::var("HOME").unwrap_or_else(|_| trimmed.to_string())
-                } else if let Some(rest) = trimmed.strip_prefix("~/") {
-                    match std::env::var("HOME") {
-                        Ok(home) => format!("{home}/{rest}"),
-                        Err(_) => trimmed.to_string(),
-                    }
-                } else {
-                    trimmed.to_string()
-                };
-                let pb = std::path::PathBuf::from(&expanded);
+                // Best-effort `~` expansion — shared with the TUI (core helper)
+                // so both front-ends resolve paths identically.
+                let pb = huddle_core::app::expand_tilde(path.trim());
                 if !pb.is_file() {
                     self.vm.modal = Modal::AttachPath(AttachPathState {
                         room_id,
