@@ -111,8 +111,12 @@ pub fn render(
         ui.add_space(4.0);
     });
 
-    // Composer (bottom).
-    egui::Panel::bottom(Id::new(("chat-comp", room_id))).show_inside(ui, |ui| {
+    // Composer (bottom). `.resizable(false)` so the panel collapses to its
+    // content height instead of inheriting egui's resizable default, which
+    // reserved a tall remembered band and left empty space under the input.
+    egui::Panel::bottom(Id::new(("chat-comp", room_id)))
+        .resizable(false)
+        .show_inside(ui, |ui| {
         ui.add_space(4.0);
         if !typers.is_empty() {
             ui.label(

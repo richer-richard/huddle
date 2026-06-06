@@ -1,6 +1,6 @@
 # Security
 
-This document describes huddle's security model as of **1.2.3**: what is
+This document describes huddle's security model as of **1.2.4**: what is
 protected, how, and — just as importantly — what is *not*. Read the
 "Known limitations / by-design tradeoffs" section before trusting huddle
 with anything that matters.
@@ -177,13 +177,14 @@ These are honest, deliberate tradeoffs — not oversights:
   bounded; under a heavy burst an event can be dropped. This is mitigated
   by resync (re-reading authoritative state) rather than guaranteed
   delivery of every transient event.
-- **The free clearnet hostname rotates.** The baked-in
-  `*.trycloudflare.com` quick-tunnel door gets a new hostname whenever
-  cloudflared restarts, so a relay URL embedded in an old invite can go
-  stale. **The Tor onion is the canonical, stable address;** the clearnet
-  door is tried only after the onion and is a convenience for users who
-  can't reach Tor. Use a named tunnel or a real domain for a stable
-  clearnet URL.
+- **The clearnet door is a fallback, not the primary path.** Since 1.1.5 the
+  baked-in clearnet default is a **stable** `*.workers.dev` proxy that
+  forwards to the operator's relay, so a URL embedded in an old invite no
+  longer goes stale. **The Tor onion is the canonical, preferred address;**
+  the clearnet door is tried only after the onion and exists for users in
+  regions where Tor itself is blocked. A *self-hosted* `*.trycloudflare.com`
+  quick-tunnel relay still rotates its hostname on each `cloudflared`
+  restart — use a named tunnel or a real domain for a stable self-hosted URL.
 - **Settings apply on next launch.** Several network-affecting toggles
   (LAN mDNS on/off, transport selection) take effect on the next launch
   rather than mid-session, to avoid a costly live behaviour rebuild.

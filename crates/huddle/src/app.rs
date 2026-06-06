@@ -378,6 +378,10 @@ pub enum Modal {
     JoinRoom(JoinRoomState),
     DialPeer(DialPeerState),
     AttachPicker(AttachPickerState),
+    /// Manual POSIX file-path entry — an alternative to the tree picker
+    /// (`AttachPicker`). Reachable from inside the picker (`p`) and from
+    /// the command palette ("attach a file by path").
+    AttachPath(AttachPathState),
     /// "Rotate the current room's key" — entered with ^R.
     RotateRoom(RotateRoomState),
     /// Someone else rotated our room's key; ask the user for the new
@@ -1086,6 +1090,17 @@ mod attach_picker_tests {
 pub struct DialPeerState {
     pub address: String,
     pub status: Option<String>,
+}
+
+/// State for the manual attach-by-path modal (`Modal::AttachPath`). A
+/// single text field holding the POSIX path the user is typing.
+#[derive(Debug, Clone, Default)]
+pub struct AttachPathState {
+    pub input: String,
+    /// Inline validation error (e.g. no file at the typed path). Shown in the
+    /// modal so a typo doesn't discard what the user typed — mirrors the attach
+    /// picker's `error` and the GUI sibling.
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4769,6 +4784,69 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             }
             Ok(false)
         }
+        Action::OpenAttachByPath => {
+            // Replaces the picker modal if it's open — that's fine; the
+            // two are alternatives for the same task.
+            app.modal = Modal::AttachPath(AttachPathState::default());
+            Ok(false)
+        }
+        Action::AttachPathTypeChar(c) => {
+            if let Modal::AttachPath(s) = &mut app.modal {
+                s.input.push(c);
+                s.error = None;
+            }
+            Ok(false)
+        }
+        Action::AttachPathBackspace => {
+            if let Modal::AttachPath(s) = &mut app.modal {
+                s.input.pop();
+                s.error = None;
+            }
+            Ok(false)
+        }
+        Action::AttachPathConfirm => {
+            let raw = match &app.modal {
+                Modal::AttachPath(s) => s.input.trim().to_string(),
+                _ => return Ok(false),
+            };
+            if raw.is_empty() {
+                return Ok(false);
+            }
+            // Best-effort `~` expansion via $HOME.
+            let expanded = if let Some(rest) = raw.strip_prefix('~') {
+                match std::env::var("HOME") {
+                    Ok(home) => format!("{home}{rest}"),
+                    Err(_) => raw.clone(),
+                }
+            } else {
+                raw.clone()
+            };
+            let path = std::path::PathBuf::from(expanded);
+            if !path.is_file() {
+                // Keep the modal open with the typed path intact + an inline
+                // error (like the attach picker and the GUI sibling), instead of
+                // a throwaway Modal::Error that any keypress dismisses.
+                if let Modal::AttachPath(s) = &mut app.modal {
+                    s.error = Some(format!("no file at {}", path.display()));
+                }
+                return Ok(false);
+            }
+            // Resolve room_id exactly as AttachPickerConfirm does.
+            let room_id = match app.active_room() {
+                Some(r) => r.room_id.clone(),
+                None => return Ok(false),
+            };
+            app.modal = Modal::None;
+            match app.handle.send_file(&room_id, &path).await {
+                Ok(file_id) => {
+                    app.set_status(format!("sending {} ({})", path.display(), &file_id[..12]));
+                }
+                Err(e) => {
+                    app.modal = Modal::Error(format!("send failed: {e}"));
+                }
+            }
+            Ok(false)
+        }
         // huddle 0.7 sidebar/pane helpers
         Action::SidebarSectionPrev => {
             sidebar_jump_section(app, -1);
@@ -5618,6 +5696,9 @@ pub async fn run_palette_action(label: &str, app: &mut TuiApp) -> Result<bool> {
         }
         "attach a file" => {
             return Box::pin(handle_action(Action::OpenAttachmentPicker, app)).await;
+        }
+        "attach a file by path" => {
+            return Box::pin(handle_action(Action::OpenAttachByPath, app)).await;
         }
         "toggle room mute" => {
             return Box::pin(handle_action(Action::ToggleMute, app)).await;

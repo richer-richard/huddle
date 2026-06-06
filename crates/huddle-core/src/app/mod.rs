@@ -4636,6 +4636,23 @@ impl AppHandle {
         repo::set_setting(&self.db, "mdns_enabled", if on { "1" } else { "0" })
     }
 
+    /// Persisted attach-mode toggle (desktop GUI). When true, the GUI's
+    /// "Attach" button opens a manual file-path text entry instead of the
+    /// native OS file dialog (rfd) — useful when the native picker is
+    /// unavailable (headless / remote display) or simply not wanted. The TUI
+    /// is unaffected (it always uses its in-terminal picker + path entry).
+    /// Default **OFF** (use the native dialog).
+    pub fn attach_via_path(&self) -> bool {
+        repo::get_setting(&self.db, "attach_via_path")
+            .unwrap_or(None)
+            .map(|v| v == "1")
+            .unwrap_or(false)
+    }
+
+    pub fn set_attach_via_path(&self, on: bool) -> Result<()> {
+        repo::set_setting(&self.db, "attach_via_path", if on { "1" } else { "0" })
+    }
+
     /// huddle 1.1.3: the persisted theme — `"system"` (default; the GUI follows
     /// the OS light/dark setting), `"dark"`, or `"light"`. The desktop GUI reads
     /// this to pick its egui visuals. huddle 1.1.4: the TUI now honors it too

@@ -20,7 +20,7 @@ third machine.
 - [ ] **First time only:** an onboarding card appears — press Enter
       to advance through the pages, then dismiss the last one
 - [ ] The Welcome pane appears with the sidebar on the left
-      (`huddle 1.2.3` banner up top)
+      (`huddle 1.2.4` banner up top)
 - [ ] In the sidebar's Profile section, your branded `HD-XXXX-XXXX-…`
       ID is visible. In the default (relay-only) mode the relay dot
       `●` shows next to your name once the onion link is up. With
@@ -47,7 +47,7 @@ third machine.
 - [ ] B's pane switches to the Group pane for the room
 - [ ] B's member count includes A's fingerprint
 - [ ] On A, B's fingerprint now shows in the member list (toggle
-      `Ctrl+I` if the member margin isn't visible)
+      `Alt+M` if the member margin isn't visible)
 
 ## 3. Public room messaging
 
@@ -349,8 +349,10 @@ move `~/Library/Application Support/huddle` (macOS) / `~/.local/share/huddle`
       (`Ctrl+P` / `:`) as "go dark (delete account)". Try the wrong
       master passphrase first → inline "incorrect master passphrase"
       appears; passphrase field clears.
-- [ ] Type the correct master passphrase. `Tab` to the second
-      field. Type `DELETE EVERYTHING` (exact case). Enter.
+- [ ] Type the correct master passphrase and press Enter. (The modal has a
+      single field — in a `--no-master-passphrase` session there is no
+      passphrase to check, so you type the literal phrase `DELETE EVERYTHING`,
+      exact case, instead.)
 - [ ] On B, within ~2 s A leaves every shared room. A's
       `MemberLeave` arrives; the member list updates.
 - [ ] On A, a "Goodbye. huddle has gone dark." modal shows for
@@ -466,6 +468,24 @@ move `~/Library/Application Support/huddle` (macOS) / `~/.local/share/huddle`
       Privacy) and Tor reachable, the daily crates.io poll succeeds through
       the SOCKS proxy; with Tor down it silently skips rather than making a
       direct clearnet request (no IP leak).
+
+## 29. huddle 1.2.4 — attach a file by typing a path
+
+- [ ] **TUI, file picker → path entry.** In a room, open the file picker
+      (`Ctrl+A`), then press `p`. The "attach a file by path" modal appears.
+      Type `~/some-file.txt` and Enter — confirm `~` expanded to `$HOME` and
+      the file is offered (a file card appears in chat).
+- [ ] **TUI, bad path is non-destructive.** Open the path modal again, type a
+      path that doesn't exist, Enter. An inline `! …` error shows and the text
+      you typed is **kept** (not cleared). Fix the path, Enter — it sends.
+- [ ] **TUI, palette.** Confirm "attach a file by path" is also reachable from
+      the command palette (`Ctrl+P` / `:`).
+- [ ] **GUI, toggle defaults off.** In the desktop app, Settings → Privacy —
+      "attach by typing a path" starts **unchecked**. Click Attach in a chat:
+      the native OS file dialog opens.
+- [ ] **GUI, toggle on.** Enable the toggle, click Attach: a path-entry box
+      opens instead of the native dialog. Enter an absolute path to attach.
+- [ ] **GUI, persists.** Quit and relaunch the GUI — the toggle is still on.
 
 ## Troubleshooting
 

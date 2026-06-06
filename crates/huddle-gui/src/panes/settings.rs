@@ -259,6 +259,24 @@ fn privacy(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
     {
         actions.push(UiAction::ToggleVerifiedOnlyInbound(vo));
     }
+    let mut ap = vm.attach_via_path;
+    if ui
+        .checkbox(
+            &mut ap,
+            "attach by typing a path (instead of the native file dialog)",
+        )
+        .changed()
+    {
+        actions.push(UiAction::ToggleAttachViaPath(ap));
+    }
+    ui.label(
+        RichText::new(
+            "When on, the chat Attach button opens a box to type a file path \
+             instead of the system file picker.",
+        )
+        .small()
+        .color(palette().text_dim),
+    );
     let mut uc = vm.update_check.unwrap_or(false);
     if ui
         .checkbox(&mut uc, "check crates.io for updates once a day")

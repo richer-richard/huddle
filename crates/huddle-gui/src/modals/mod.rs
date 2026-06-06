@@ -7,10 +7,10 @@ use egui::{Id, RichText, TextEdit};
 
 use crate::fmt;
 use crate::model::{
-    AcceptRotationState, AddContactState, ConfirmInviteState, EditAliasState, EditUsernameState,
-    GoDarkState, InboundDialState, JoinState, JoinWithCodeState, Modal, NewDmState, NewGroupState,
-    PasteInviteState, RotateState, SasStage, SasState, SearchState, SetRelayState, UiAction,
-    VerifyState, GO_DARK_CONFIRM_PHRASE, ONBOARDING_PAGES,
+    AcceptRotationState, AddContactState, AttachPathState, ConfirmInviteState, EditAliasState,
+    EditUsernameState, GoDarkState, InboundDialState, JoinState, JoinWithCodeState, Modal,
+    NewDmState, NewGroupState, PasteInviteState, RotateState, SasStage, SasState, SearchState,
+    SetRelayState, UiAction, VerifyState, GO_DARK_CONFIRM_PHRASE, ONBOARDING_PAGES,
 };
 use crate::theme::palette;
 
@@ -36,6 +36,7 @@ pub fn render(ctx: &egui::Context, modal: &mut Modal, our_id: &str, actions: &mu
         Modal::PasteInvite(s) => paste_invite(ctx, s, actions),
         Modal::ConfirmInvite(s) => confirm_invite(ctx, s, actions),
         Modal::SetRelay(s) => set_relay(ctx, s, actions),
+        Modal::AttachPath(s) => attach_path(ctx, s, actions),
         Modal::JoinWithCode(s) => join_with_code(ctx, s, actions),
         Modal::EditUsername(s) => edit_username(ctx, s, actions),
         Modal::GoDark(s) => go_dark(ctx, s, actions),
@@ -419,6 +420,46 @@ fn set_relay(ctx: &egui::Context, s: &mut SetRelayState, actions: &mut Vec<UiAct
             }
             if ui.button("Clear").clicked() {
                 actions.push(UiAction::SetClearnetRelay(None));
+            }
+            if ui.button("Cancel").clicked() {
+                actions.push(UiAction::CloseModal);
+            }
+        });
+    });
+    if resp.should_close() {
+        actions.push(UiAction::CloseModal);
+    }
+}
+
+/// Manual file-path entry for Attach — the alternative to the native rfd file
+/// dialog, enabled by the "Attach by typing a path" Settings toggle.
+fn attach_path(ctx: &egui::Context, s: &mut AttachPathState, actions: &mut Vec<UiAction>) {
+    let resp = egui::Modal::new(Id::new("modal-attach-path")).show(ctx, |ui| {
+        ui.set_width(460.0);
+        ui.heading("Attach a file");
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new("Type an absolute path to a file to send.")
+                .small()
+                .color(palette().text_dim),
+        );
+        ui.add_space(8.0);
+        ui.add(
+            TextEdit::singleline(&mut s.path)
+                .desired_width(f32::INFINITY)
+                .hint_text("/path/to/file"),
+        );
+        if let Some(e) = &s.error {
+            ui.add_space(6.0);
+            ui.colored_label(palette().error, e);
+        }
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            if ui.button("Attach").clicked() {
+                actions.push(UiAction::SubmitAttachPath {
+                    room_id: s.room_id.clone(),
+                    path: s.path.trim().to_string(),
+                });
             }
             if ui.button("Cancel").clicked() {
                 actions.push(UiAction::CloseModal);

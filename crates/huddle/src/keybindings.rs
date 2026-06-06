@@ -292,6 +292,12 @@ pub const BINDINGS: &[Binding] = &[
         palette_label: Some("attach a file"),
     },
     Binding {
+        keys: "p / palette",
+        context: Context::RoomChat,
+        description: "attach a file by typing a POSIX path",
+        palette_label: Some("attach a file by path"),
+    },
+    Binding {
         keys: "Ctrl+M",
         context: Context::RoomChat,
         description: "mute / unmute room notifications",

@@ -18,10 +18,10 @@ use huddle_core::storage::repo::RoomKind;
 use crate::bridge::{self, Cmd, Inbox, ReadyParts, ReqOk, ReqTag};
 use crate::cli::Cli;
 use crate::model::{
-    reduce, AddContactState, ConfirmInviteState, EditAliasState, EditUsernameState, GoDarkState,
-    JoinState, JoinWithCodeState, Modal, NewDmState, NewGroupState, Pane, PasteInviteState,
-    RotateState, SasStage, SasState, SearchState, Section, SetRelayState, UiAction, VerifyState,
-    ViewModel,
+    reduce, AddContactState, AttachPathState, ConfirmInviteState, EditAliasState, EditUsernameState,
+    GoDarkState, JoinState, JoinWithCodeState, Modal, NewDmState, NewGroupState, Pane,
+    PasteInviteState, RotateState, SasStage, SasState, SearchState, Section, SetRelayState,
+    UiAction, VerifyState, ViewModel,
 };
 use crate::panes;
 use crate::theme::palette;
@@ -679,10 +679,47 @@ impl Ready {
 
             // ---- Phase 7: files + invites + codes ----
             UiAction::AttachFile(room_id) => {
-                if let Some(path) = rfd::FileDialog::new().set_title("Attach a file").pick_file() {
+                if self.vm.attach_via_path {
+                    self.vm.modal = Modal::AttachPath(AttachPathState {
+                        room_id,
+                        ..Default::default()
+                    });
+                } else if let Some(path) =
+                    rfd::FileDialog::new().set_title("Attach a file").pick_file()
+                {
                     self.cmd.fire(move |h| async move {
                         h.send_file(&room_id, &path).await.map(|_| ())
                     });
+                }
+            }
+            UiAction::ToggleAttachViaPath(on) => {
+                let _ = self.handle.set_attach_via_path(on);
+                self.vm.attach_via_path = on;
+            }
+            UiAction::SubmitAttachPath { room_id, path } => {
+                let trimmed = path.trim();
+                // Best-effort `~` / `~/` expansion against $HOME.
+                let expanded = if trimmed == "~" {
+                    std::env::var("HOME").unwrap_or_else(|_| trimmed.to_string())
+                } else if let Some(rest) = trimmed.strip_prefix("~/") {
+                    match std::env::var("HOME") {
+                        Ok(home) => format!("{home}/{rest}"),
+                        Err(_) => trimmed.to_string(),
+                    }
+                } else {
+                    trimmed.to_string()
+                };
+                let pb = std::path::PathBuf::from(&expanded);
+                if !pb.is_file() {
+                    self.vm.modal = Modal::AttachPath(AttachPathState {
+                        room_id,
+                        path,
+                        error: Some(format!("no file at {}", pb.display())),
+                    });
+                } else {
+                    self.cmd
+                        .fire(move |h| async move { h.send_file(&room_id, &pb).await.map(|_| ()) });
+                    self.vm.modal = Modal::None;
                 }
             }
             UiAction::SaveAttachment { room_id, file_id } => {

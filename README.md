@@ -206,7 +206,7 @@ per-OS app directory:
 
 ```
 +----------------------------------------------------------------------+
-| huddle 1.0.0  ·  745e-fe8a-…  ·  relay ●               12:34 UTC     |
+| huddle 1.2.4  ·  745e-fe8a-…  ·  relay ●               12:34 UTC     |
 +------------------------+---------------------------------------------+
 | ▾ Profile              | # general                                   |
 |   alice  HD-AAAA-…  ●  |   4 members · encrypted                     |
@@ -286,7 +286,8 @@ from the actual key map.
 | `Esc`                     | Blur input (or focus sidebar)         |
 | `Ctrl+V`                  | Verify partner / member (SAS)         |
 | `Ctrl+F`                  | Search this room's history            |
-| `Ctrl+A`                  | Attach a file                         |
+| `Ctrl+A`                  | Attach a file (native picker)         |
+| `p` (in the attach picker)| Attach by typing a POSIX path (`~` expands; also in the palette) |
 | `Ctrl+L`                  | Leave the room                        |
 | `j` / `k`                 | Scroll messages (input blurred)       |
 | `g` / `G`                 | Scroll to top / bottom                |
@@ -296,7 +297,7 @@ from the actual key map.
 ### Group pane only
 | Key                       | Action                                |
 |---------------------------|---------------------------------------|
-| `Ctrl+I`                  | Toggle the right-margin member list   |
+| `Alt+M`                   | Toggle the right-margin member list (Option+M on macOS) |
 | `Ctrl+K`                  | Kick a member (owners only)           |
 | `Ctrl+G`                  | Grant owner role (owners only)        |
 | `Ctrl+R`                  | Rotate the room key (owners only)     |
@@ -593,6 +594,14 @@ ChaCha20-Poly1305-encrypted with a fresh file key that's
 Megolm-wrapped in the offer. Receivers see a focusable file card in
 chat — press `f` to enter card mode, `j/k` to step, Enter to save to
 your platform's Downloads folder. Phase 2 cap is 1 MiB per file.
+If the native picker is in your way (a headless box, an awkward
+window manager, or you simply know the path), attach by typing one
+instead: in the TUI press `p` in the file picker — or run "attach a
+file by path" from the command palette — where `~` expands to home
+and a bad path shows an inline error (your input is kept, not
+dropped); in the GUI, enable **Settings → Privacy → "attach by typing
+a path"** (off by default, persisted) to swap the Attach button's
+native dialog for a path-entry box.
 
 ## Operator notes
 
@@ -629,6 +638,22 @@ your platform's Downloads folder. Phase 2 cap is 1 MiB per file.
   two parties (Megolm message keys still ratchet, but the wrap key
   doesn't). Per-DM ephemeral ratchets (Double Ratchet-style) are a
   candidate follow-up.
+
+## What's new in 1.2.4 — attach a file by typing a path + a tidier composer
+
+- **Attach a file by typing its path** — for when the native file dialog is in
+  your way (a headless box, an awkward window manager, or you just know the
+  path):
+  - **TUI:** in the file picker press `p` (or run *"attach a file by path"* from
+    the command palette) to type a POSIX path; `~` expands to your home. A path
+    that doesn't point at a real file shows an inline error and keeps what you
+    typed, instead of silently dropping it.
+  - **GUI:** **Settings → Privacy → *"attach by typing a path"*** swaps the
+    Attach button's system file picker for a path-entry box. Off by default; the
+    choice persists.
+- **Tidier message composer (GUI).** The input row no longer reserves a tall
+  resizable band, so the dead space that used to sit under the message box is
+  gone.
 
 ## What's new in 1.2.3 — message timestamps show when there's a real gap
 

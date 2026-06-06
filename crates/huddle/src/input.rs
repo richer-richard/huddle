@@ -110,6 +110,11 @@ pub enum Action {
     AttachPickerCollapse,     // Left / Backspace: collapse or jump to parent
     AttachPickerConfirm,      // Enter: pick the focused file
     AttachPickerToggleHidden, // '.': show/hide dotfiles
+    // Attach-by-path modal (manual POSIX path entry; alternative to the tree picker)
+    OpenAttachByPath,
+    AttachPathTypeChar(char),
+    AttachPathBackspace,
+    AttachPathConfirm,
     // Rotation
     OpenRotateRoom,
     RotateRoomTypeChar(char),
@@ -434,6 +439,15 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
             // Enter picks a file; on a directory it expands/collapses.
             KeyCode::Enter => Action::AttachPickerConfirm,
             KeyCode::Char('.') => Action::AttachPickerToggleHidden,
+            // `p` switches from browsing a directory to typing a POSIX path.
+            KeyCode::Char('p') => Action::OpenAttachByPath,
+            _ => Action::Nothing,
+        },
+        Modal::AttachPath(_) => match key.code {
+            KeyCode::Esc => Action::CloseModal,
+            KeyCode::Enter => Action::AttachPathConfirm,
+            KeyCode::Backspace => Action::AttachPathBackspace,
+            KeyCode::Char(c) => Action::AttachPathTypeChar(c),
             _ => Action::Nothing,
         },
         Modal::RotateRoom(_) => match key.code {

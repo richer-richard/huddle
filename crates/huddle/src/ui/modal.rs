@@ -2,8 +2,9 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
 
 use crate::app::{
-    AcceptRotationState, AttachPickerState, ConfirmInviteState, DialPeerState, InboundDialState,
-    JoinRoomState, JoinWithCodeState, MemberActionKind, MemberActionState, PasteInviteState,
+    AcceptRotationState, AttachPathState, AttachPickerState, ConfirmInviteState, DialPeerState,
+    InboundDialState, JoinRoomState, JoinWithCodeState, MemberActionKind, MemberActionState,
+    PasteInviteState,
     RotateRoomState, SasStage, SasState, SearchState, ShowInviteState, ShowJoinCodeState,
     StartField, StartRoomState, VerifyState, ATTACH_VISIBLE_ROWS,
 };
@@ -310,6 +311,56 @@ pub fn render_dial_peer(f: &mut Frame, s: &DialPeerState) {
         Line::from(vec![
             Span::styled(" Enter", Style::default().fg(Color::Yellow)),
             Span::styled(" dial  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Esc", Style::default().fg(Color::Yellow)),
+            Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
+        ]),
+    ];
+
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false }).block(block);
+    f.render_widget(para, area);
+}
+
+pub fn render_attach_path(f: &mut Frame, s: &AttachPathState) {
+    let area = centered_rect(64, 11, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .padding(Padding::uniform(1))
+        .title(Span::styled(
+            " attach a file by path ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" path  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("[ {}_ ]", s.input),
+                Style::default().fg(Color::Yellow),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            " type an absolute path  ·  ~ expands to $HOME",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(""),
+        if let Some(err) = &s.error {
+            Line::from(Span::styled(
+                format!(" ! {err}"),
+                Style::default().fg(Color::Red),
+            ))
+        } else {
+            Line::from("")
+        },
+        Line::from(vec![
+            Span::styled(" Enter", Style::default().fg(Color::Yellow)),
+            Span::styled(" send  ", Style::default().fg(Color::DarkGray)),
             Span::styled("Esc", Style::default().fg(Color::Yellow)),
             Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
         ]),
@@ -774,6 +825,7 @@ pub fn render_attach_picker(f: &mut Frame, s: &AttachPickerState) {
     footer.extend(hint("Enter", " pick  "));
     footer.extend(hint("←/→", " out/in  "));
     footer.extend(hint(".", " hidden  "));
+    footer.extend(hint("p", " type path  "));
     footer.extend(hint("Esc", " cancel"));
     lines.push(Line::from(footer));
 

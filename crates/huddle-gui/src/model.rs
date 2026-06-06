@@ -202,6 +202,14 @@ pub enum UiAction {
     LeaveRoom(String),
     // Files + invites + join codes.
     AttachFile(String),
+    /// Toggle the Settings option that switches Attach between the native rfd
+    /// file dialog (off) and a manual file-path text-entry modal (on).
+    ToggleAttachViaPath(bool),
+    /// Submit the manually typed attach path from the AttachPath modal.
+    SubmitAttachPath {
+        room_id: String,
+        path: String,
+    },
     SaveAttachment {
         room_id: String,
         file_id: String,
@@ -271,6 +279,8 @@ pub enum Modal {
     PasteInvite(PasteInviteState),
     ConfirmInvite(ConfirmInviteState),
     SetRelay(SetRelayState),
+    /// Manual file-path entry for Attach (alternative to the native rfd dialog).
+    AttachPath(AttachPathState),
     JoinWithCode(JoinWithCodeState),
     EditUsername(EditUsernameState),
     GoDark(GoDarkState),
@@ -332,6 +342,15 @@ pub struct PasteInviteState {
 #[derive(Default)]
 pub struct SetRelayState {
     pub url: String,
+    pub error: Option<String>,
+}
+
+/// Manual file-path entry for the Attach button when "Attach by typing a path"
+/// is enabled in Settings (instead of the native rfd file dialog).
+#[derive(Default, Clone)]
+pub struct AttachPathState {
+    pub room_id: String,
+    pub path: String,
     pub error: Option<String>,
 }
 
@@ -486,6 +505,9 @@ pub struct ViewModel {
     // settings snapshots
     pub notifications_enabled: bool,
     pub mdns_enabled: bool,
+    /// When on, the chat Attach button opens a manual file-path text-entry
+    /// modal instead of the native rfd file dialog. Persisted (default false).
+    pub attach_via_path: bool,
     /// huddle 1.1.3: the user's GUI theme CHOICE (System/Dark/Light; `System`
     /// default, follows the OS). Persisted as `theme`; resolved to an effective
     /// Dark/Light at render time. Drives the Settings selector highlight.
@@ -549,6 +571,7 @@ impl ViewModel {
             transport_profiles: Vec::new(),
             notifications_enabled: true,
             mdns_enabled: false,
+            attach_via_path: h.attach_via_path(),
             theme: crate::theme::Theme::from_str(&h.theme()),
             clearnet_relay: None,
             verified_only_inbound: false,
@@ -620,6 +643,7 @@ impl ViewModel {
         }
         self.notifications_enabled = h.notifications_enabled();
         self.mdns_enabled = h.mdns_enabled();
+        self.attach_via_path = h.attach_via_path();
         self.theme = crate::theme::Theme::from_str(&h.theme());
         self.clearnet_relay = h.clearnet_relay();
         self.verified_only_inbound = h.verified_only_inbound();
@@ -1047,6 +1071,7 @@ mod tests {
             transport_profiles: Vec::new(),
             notifications_enabled: true,
             mdns_enabled: false,
+            attach_via_path: false,
             theme: crate::theme::Theme::System,
             clearnet_relay: None,
             verified_only_inbound: false,
