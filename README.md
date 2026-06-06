@@ -641,6 +641,21 @@ native dialog for a path-entry box.
   doesn't). Per-DM ephemeral ratchets (Double Ratchet-style) are a
   candidate follow-up.
 
+## What's new in 1.2.5 — bigger files (50 MiB) + attach-by-path polish
+
+- **Larger attachments — the per-file cap goes from 1 MiB to 50 MiB.** Chunks
+  are now 128 KiB (was 40 KiB), which keeps a full-size file at ~400 chunks —
+  under the relay's per-recipient mailbox cap, so a big file still reaches an
+  **offline** recipient. The whole file is held in memory on both ends, and the
+  receiver enforces its own cap, so a >1 MiB file only lands if **both** peers
+  are on 1.2.5+. (No relay change required — verified end-to-end against the
+  live relay, including 3-member group fan-out and a multi-MiB round-trip.)
+- **attach-by-path polish (from the 1.2.4 review).** TUI and GUI now share one
+  `~`-expansion helper (only `~` and `~/…` expand; `~user` stays literal);
+  "attach by path" is guarded on being in a room (no palette dead-end); the GUI
+  modal submits on Enter; empty input gives feedback; and the in-app help no
+  longer advertises a bare `p` shortcut that only works inside the file picker.
+
 ## What's new in 1.2.4 — attach a file by typing a path + a tidier composer
 
 - **Attach a file by typing its path** — for when the native file dialog is in
