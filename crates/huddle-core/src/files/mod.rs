@@ -22,16 +22,25 @@ use sha2::{Digest, Sha256};
 use crate::error::{HuddleError, Result};
 
 /// Bytes per chunk on the wire. A `FileChunk` is base64-encoded inside a
-/// JSON envelope, so the raw chunk must leave room for ~34% base64
-/// expansion plus the envelope and still fit under gossipsub's transmit
-/// limit. 40 KiB raw → ~55 KiB on the wire, comfortably under even the
-/// 64 KiB gossipsub default (and well under the 256 KiB ceiling huddle
-/// sets explicitly — see `network::start_network_with`).
-pub const CHUNK_SIZE: usize = 40 * 1024;
+/// JSON envelope, and on the relay path that envelope is itself base64'd
+/// again (the relay's `payload_b64`), so a raw chunk inflates ~1.78× before
+/// the relay's 256 KiB `MAX_PAYLOAD_B64` cap. huddle 1.2.5: 128 KiB raw →
+/// ~175 KiB JSON (under the 256 KiB gossipsub `max_transmit_size`) → ~233 KiB
+/// after the relay's second base64 — both safely under 256 KiB. Bigger chunks
+/// mean far fewer messages per file (a 50 MiB file is ~400 chunks, not ~1280),
+/// which keeps a whole file under the relay's 500-per-recipient mailbox cap so
+/// it still delivers to an OFFLINE peer.
+pub const CHUNK_SIZE: usize = 128 * 1024;
 
-/// Hard cap on a single offer for Phase 2. Larger files defer to a
-/// dedicated libp2p stream protocol (see plan.md Phase 3 notes).
-pub const MAX_FILE_SIZE: u64 = 1024 * 1024;
+/// Hard cap on a single file. huddle 1.2.5: raised from 1 MiB to 50 MiB. The
+/// transfer holds the whole file in memory on both ends (sender reads it all;
+/// receiver reassembles chunks in a map), and at 128 KiB/chunk a 50 MiB file is
+/// ~400 chunks — under the relay's 500-per-recipient mailbox cap, so even an
+/// offline recipient receives the complete file. Truly large (GB) files want a
+/// streaming/resumable transport (see the future-functionality brainstorm).
+/// NOTE: the RECEIVER enforces its own cap, so a >1 MiB file only lands if both
+/// peers are ≥1.2.5.
+pub const MAX_FILE_SIZE: u64 = 50 * 1024 * 1024;
 
 /// What `prepare_outgoing` hands back: enough to drive a sequence of
 /// FileOffer + N FileChunk gossipsub messages.
@@ -116,8 +125,10 @@ impl FileManager {
         let size = bytes.len() as u64;
         if size > MAX_FILE_SIZE {
             return Err(HuddleError::Other(format!(
-                "file is {} bytes — Phase 2 cap is {} (~1 MiB)",
-                size, MAX_FILE_SIZE
+                "file is {} bytes — the cap is {} bytes (~{} MiB)",
+                size,
+                MAX_FILE_SIZE,
+                MAX_FILE_SIZE / (1024 * 1024)
             )));
         }
         let file_id = sha256_hex(&bytes);

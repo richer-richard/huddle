@@ -514,3 +514,216 @@ async fn dm_stays_live_across_restart_over_server() {
     handle_a2.shutdown().await;
     handle_b.shutdown().await;
 }
+
+async fn next_file_ready(rx: &mut tokio::sync::broadcast::Receiver<AppEvent>) -> String {
+    let fut = async {
+        loop {
+            match rx.recv().await {
+                Ok(AppEvent::FileReady { file_id }) => return file_id,
+                Ok(AppEvent::FileFailed { reason, .. }) => panic!("file failed: {reason}"),
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(_) => panic!("event channel closed"),
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(30), fut)
+        .await
+        .expect("timed out waiting for FileReady")
+}
+
+/// Seed `room` into a fresh in-memory DB and start an AppHandle on it (Server
+/// mode, pointed at `url`). Used to stand up extra group members.
+async fn member_with_seeded_room(url: &str, room: &StoredRoom) -> AppHandle {
+    let db = storage::open_db_in_memory().unwrap();
+    repo::insert_room(&db, room).unwrap();
+    AppHandle::start_with_db_and_options(
+        db,
+        NetworkMode::Server,
+        0,
+        [0u8; 32],
+        Vec::new(),
+        huddle_core::app::TransportConfig::onion_only(url.to_string()),
+    )
+    .await
+    .unwrap()
+}
+
+/// huddle 1.2: a 3-member GROUP room over the relay — every member's message
+/// must fan out to BOTH others (not just one). Exercises the membership
+/// fan-out path with more than two parties.
+#[tokio::test]
+async fn group_fanout_reaches_all_members_over_server() {
+    let dir = tempfile::tempdir().unwrap();
+    let port = 18816;
+    let _server = spawn_server(port, dir.path().join("srv.db").to_str().unwrap());
+    wait_listening(port).await;
+    let url = format!("ws://127.0.0.1:{port}/ws");
+
+    let db_a = storage::open_db_in_memory().unwrap();
+    let handle_a = AppHandle::start_with_db_and_options(
+        db_a,
+        NetworkMode::Server,
+        0,
+        [0u8; 32],
+        Vec::new(),
+        huddle_core::app::TransportConfig::onion_only(url.clone()),
+    )
+    .await
+    .unwrap();
+    let mut ev_a = handle_a.subscribe();
+    let room_id = handle_a
+        .start_room("trio", false, None, RoomKind::Group)
+        .await
+        .unwrap();
+    let info = StoredRoom {
+        id: room_id.clone(),
+        name: "trio".into(),
+        creator_fingerprint: handle_a.fingerprint().to_string(),
+        encrypted: false,
+        passphrase_salt: None,
+        created_at: 0,
+        last_active: Some(0),
+        kind: RoomKind::Group,
+    };
+    let handle_b = member_with_seeded_room(&url, &info).await;
+    let handle_c = member_with_seeded_room(&url, &info).await;
+    let mut ev_b = handle_b.subscribe();
+    let mut ev_c = handle_c.subscribe();
+
+    wait_server_connected(&handle_a).await;
+    wait_server_connected(&handle_b).await;
+    wait_server_connected(&handle_c).await;
+    handle_b.join_room(&room_id, None).await.unwrap();
+    handle_c.join_room(&room_id, None).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    // A → both B and C.
+    handle_a.send_room_message(&room_id, "hello trio").await.unwrap();
+    assert_eq!(next_message(&mut ev_b).await, "hello trio");
+    assert_eq!(next_message(&mut ev_c).await, "hello trio");
+
+    // C → both A and B (fan-out works from any member, not just the creator).
+    handle_c.send_room_message(&room_id, "from C").await.unwrap();
+    assert_eq!(next_message(&mut ev_a).await, "from C");
+    assert_eq!(next_message(&mut ev_b).await, "from C");
+
+    handle_a.shutdown().await;
+    handle_b.shutdown().await;
+    handle_c.shutdown().await;
+}
+
+/// huddle 1.2.5: an ATTACHMENT larger than the old 1 MiB cap round-trips over
+/// the relay — proving the server carries multi-chunk FileOffer+FileChunk
+/// traffic and the receiver reassembles + SHA-256-verifies it (FileReady only
+/// fires on a verified complete file). 2 MiB at 128 KiB/chunk = 16 chunks.
+#[tokio::test]
+async fn large_attachment_round_trips_over_server() {
+    let dir = tempfile::tempdir().unwrap();
+    let port = 18817;
+    let _server = spawn_server(port, dir.path().join("srv.db").to_str().unwrap());
+    wait_listening(port).await;
+    let url = format!("ws://127.0.0.1:{port}/ws");
+
+    let db_a = storage::open_db_in_memory().unwrap();
+    let handle_a = AppHandle::start_with_db_and_options(
+        db_a,
+        NetworkMode::Server,
+        0,
+        [0u8; 32],
+        Vec::new(),
+        huddle_core::app::TransportConfig::onion_only(url.clone()),
+    )
+    .await
+    .unwrap();
+    let room_id = handle_a
+        .start_room("files", false, None, RoomKind::Group)
+        .await
+        .unwrap();
+    let info = StoredRoom {
+        id: room_id.clone(),
+        name: "files".into(),
+        creator_fingerprint: handle_a.fingerprint().to_string(),
+        encrypted: false,
+        passphrase_salt: None,
+        created_at: 0,
+        last_active: Some(0),
+        kind: RoomKind::Group,
+    };
+    let handle_b = member_with_seeded_room(&url, &info).await;
+    let mut ev_b = handle_b.subscribe();
+
+    wait_server_connected(&handle_a).await;
+    wait_server_connected(&handle_b).await;
+    handle_b.join_room(&room_id, None).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // A 2 MiB file (> the old 1 MiB cap) with non-trivial content.
+    let payload: Vec<u8> = (0..2 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+    let path = dir.path().join("payload.bin");
+    std::fs::write(&path, &payload).unwrap();
+
+    let file_id = handle_a.send_file(&room_id, &path).await.unwrap();
+    // FileReady on B means all chunks arrived over the relay AND the SHA-256
+    // matched the file_id — a full integrity-checked round-trip.
+    assert_eq!(next_file_ready(&mut ev_b).await, file_id);
+
+    handle_a.shutdown().await;
+    handle_b.shutdown().await;
+}
+
+/// huddle 1.2: smoke-test the **actually-deployed** relay (the systemd
+/// `huddle-server` on 127.0.0.1:8787) end to end — a group message and a small
+/// attachment between two real AppHandles. Ignored by default (needs the live
+/// relay; adds a couple of ephemeral memberships to its DB). Run with:
+/// `cargo test -p huddle-server --test app_over_server -- --ignored live_relay`
+#[tokio::test]
+#[ignore]
+async fn live_relay_group_and_attachment() {
+    let url = "ws://127.0.0.1:8787/ws".to_string();
+    let dir = tempfile::tempdir().unwrap();
+
+    let db_a = storage::open_db_in_memory().unwrap();
+    let handle_a = AppHandle::start_with_db_and_options(
+        db_a,
+        NetworkMode::Server,
+        0,
+        [0u8; 32],
+        Vec::new(),
+        huddle_core::app::TransportConfig::onion_only(url.clone()),
+    )
+    .await
+    .unwrap();
+    let room_id = handle_a
+        .start_room("live-smoke", false, None, RoomKind::Group)
+        .await
+        .unwrap();
+    let info = StoredRoom {
+        id: room_id.clone(),
+        name: "live-smoke".into(),
+        creator_fingerprint: handle_a.fingerprint().to_string(),
+        encrypted: false,
+        passphrase_salt: None,
+        created_at: 0,
+        last_active: Some(0),
+        kind: RoomKind::Group,
+    };
+    let handle_b = member_with_seeded_room(&url, &info).await;
+    let mut ev_b = handle_b.subscribe();
+    wait_server_connected(&handle_a).await;
+    wait_server_connected(&handle_b).await;
+    handle_b.join_room(&room_id, None).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    handle_a.send_room_message(&room_id, "live group msg").await.unwrap();
+    assert_eq!(next_message(&mut ev_b).await, "live group msg");
+
+    let payload: Vec<u8> = (0..300 * 1024).map(|i| (i % 251) as u8).collect();
+    let path = dir.path().join("live.bin");
+    std::fs::write(&path, &payload).unwrap();
+    let file_id = handle_a.send_file(&room_id, &path).await.unwrap();
+    assert_eq!(next_file_ready(&mut ev_b).await, file_id);
+
+    handle_a.shutdown().await;
+    handle_b.shutdown().await;
+}

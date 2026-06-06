@@ -593,7 +593,7 @@ messages. In encrypted rooms (DM or group) the bytes are
 ChaCha20-Poly1305-encrypted with a fresh file key that's
 Megolm-wrapped in the offer. Receivers see a focusable file card in
 chat — press `f` to enter card mode, `j/k` to step, Enter to save to
-your platform's Downloads folder. Phase 2 cap is 1 MiB per file.
+your platform's Downloads folder. The per-file cap is 50 MiB.
 If the native picker is in your way (a headless box, an awkward
 window manager, or you simply know the path), attach by typing one
 instead: in the TUI press `p` in the file picker — or run "attach a
@@ -623,8 +623,10 @@ native dialog for a path-entry box.
   and can't onboard further members.
 - Kick / ban are honest-client-enforced at the gossipsub layer; the
   cryptographic teeth come from the key rotation that follows.
-- File transfer is capped at 1 MiB per file (Phase 2). Larger files
-  defer to a dedicated libp2p stream protocol (planned).
+- File transfer is capped at 50 MiB per file (the whole file is held in
+  memory on both ends). Truly large (GB) files would want a streaming /
+  resumable transport (planned). A >1 MiB file only lands if both peers
+  are ≥1.2.5 — the receiver enforces its own cap.
 - mDNS may not work on some corporate / restricted networks.
 - Verified-only inbound mode trusts SAS-verified + previously-trusted
   fingerprints. Don't enable it before you've verified at least one
