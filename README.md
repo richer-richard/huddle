@@ -206,7 +206,7 @@ per-OS app directory:
 
 ```
 +----------------------------------------------------------------------+
-| huddle 1.2.4  ·  745e-fe8a-…  ·  relay ●               12:34 UTC     |
+| huddle 1.3.0  ·  745e-fe8a-…  ·  relay ●               12:34 UTC     |
 +------------------------+---------------------------------------------+
 | ▾ Profile              | # general                                   |
 |   alice  HD-AAAA-…  ●  |   4 members · encrypted                     |
@@ -640,6 +640,33 @@ native dialog for a path-entry box.
   two parties (Megolm message keys still ratchet, but the wrap key
   doesn't). Per-DM ephemeral ratchets (Double Ratchet-style) are a
   candidate follow-up.
+
+## What's new in 1.3.0 — post-quantum hybrid DM encryption (X25519 + ML-KEM-768)
+
+- **Direct-message key agreement is now hybrid post-quantum.** A DM's wrap key
+  is derived from **both** a classical X25519 ECDH **and** an ML-KEM-768 (FIPS
+  203) key encapsulation, mixed through HKDF-SHA256. The key is secure as long
+  as *either* primitive holds, so a future quantum computer that breaks X25519
+  no longer threatens recorded DMs — this closes the **"harvest now, decrypt
+  later"** gap, where an adversary stores ciphertext today to decrypt once
+  quantum hardware exists. The same approach Signal's PQXDH uses.
+- **No new key to manage, no migration.** Each identity's ML-KEM keypair is
+  derived deterministically from the existing Ed25519 seed, so every current
+  identity gains a post-quantum key for free; nothing changes on disk.
+- **Backward compatible.** The ML-KEM public key and ciphertext ride in new,
+  optional `MemberAnnounce` fields. A 1.3 peer talking to a pre-1.3 peer
+  automatically falls back to the classical X25519 DM key — DMs keep working.
+  A DM goes hybrid only when **both** peers are on 1.3+. Because the new fields
+  live inside the *signed* announce envelope, a malicious relay can't strip them
+  to force a downgrade without breaking the signature.
+- **Unchanged by design (and honest about it):** message *contents* are still
+  encrypted with **Megolm** (quantum-resistant already — it's symmetric
+  AES-256 + HMAC), file bytes with **ChaCha20-Poly1305**, and identities/
+  message authenticity still use **Ed25519** signatures (classical — forging a
+  signature needs a quantum computer operating *live*, not "harvest now", and
+  changing it would break the relay/identity ecosystem). Group-room key
+  delivery via a passphrase is already post-quantum (Argon2id is symmetric).
+  See `SECURITY.md` for the full posture.
 
 ## What's new in 1.2.5 — bigger files (50 MiB) + attach-by-path polish
 

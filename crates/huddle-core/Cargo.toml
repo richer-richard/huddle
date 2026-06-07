@@ -1,6 +1,6 @@
 [package]
 name = "huddle-core"
-version = "1.2.5"
+version = "1.3.0"
 edition = "2021"
 description = "Protocol, networking, crypto, and storage layer for huddle — a decentralized terminal chat app."
 license = "MIT OR Apache-2.0"
@@ -69,6 +69,13 @@ argon2 = "0.5"
 chacha20poly1305 = "0.10"
 base64 = "0.22"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
+# huddle 1.3: post-quantum hybrid key agreement. ML-KEM-768 (FIPS 203) via
+# RustCrypto's pure-Rust `ml-kem`. We use ONLY the deterministic API
+# (`from_seed` / `encapsulate_deterministic` / `decapsulate`), so ml-kem's
+# internal `rand_core 0.10` never participates — no RNG-version clash with our
+# `rand 0.8` (rand_core 0.6), and no `getrandom`. The `zeroize` feature wipes
+# the decapsulation key material on drop. See `crypto::pqc`.
+ml-kem = { version = "0.3.2", features = ["zeroize"] }
 # huddle 0.7.11: zeroize key material on drop. Used to wrap the
 # passphrase-derived 32-byte key, the DM HKDF output, the SAS shared
 # secret, and the master-passphrase-derived DB key — anywhere a secret

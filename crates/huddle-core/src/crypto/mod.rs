@@ -1,6 +1,7 @@
 pub mod dm;
 pub mod megolm;
 pub mod passphrase;
+pub mod pqc;
 pub mod sas;
 
 pub use megolm::RoomCrypto;
@@ -308,6 +309,8 @@ mod tests {
             wrapped_session_key: Some("d2VsbA==".into()),
             display_name: None,
             sender_ed25519_pubkey: Some(B64.encode(id.public_bytes())),
+            sender_mlkem_pubkey: None,
+            mlkem_ciphertext: None,
         };
         let env = sign_message_at(&id, &announce, signed_at).unwrap();
         assert!(

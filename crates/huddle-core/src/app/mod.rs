@@ -162,6 +162,26 @@ struct ActiveRoom {
     /// only). Pairs of (code, expires_at_unix). Single-use; entries
     /// removed after a successful CodeJoinResponse goes out.
     issued_codes: Vec<(String, i64)>,
+    /// huddle 1.3: for a hybrid post-quantum DM where WE are the initiator
+    /// (lower fingerprint), the base64 ML-KEM-768 ciphertext we encapsulated
+    /// to the partner. Re-published in every `MemberAnnounce` so the partner
+    /// can decapsulate the same hybrid wrap key. `None` for group rooms, for
+    /// classical DMs, and on the responder side (it never encapsulates). Held
+    /// in memory only — it is deterministic and re-derived after a restart
+    /// once the partner re-announces their ML-KEM key.
+    dm_kem_ciphertext: Option<String>,
+}
+
+impl Drop for ActiveRoom {
+    /// huddle 1.3: wipe the DM/group **wrap key** (the classical or hybrid
+    /// `passphrase_key` that unwraps Megolm session keys) when the room leaves
+    /// memory, so the secret doesn't linger in a freed heap page or swap.
+    /// Matches the project's `Zeroizing`-everything posture for derived keys.
+    fn drop(&mut self) {
+        if let Some(k) = self.passphrase_key.as_mut() {
+            zeroize::Zeroize::zeroize(k);
+        }
+    }
 }
 
 const TYPING_TTL_SECS: i64 = 3;
@@ -1001,6 +1021,7 @@ impl AppHandle {
                 typers: HashMap::new(),
                 read_only: false,
                 issued_codes: Vec::new(),
+                dm_kem_ciphertext: None,
             },
         );
 
@@ -1119,13 +1140,14 @@ impl AppHandle {
             },
         )?;
 
-        // Try to derive the ECDH key now. If the partner's pubkey
-        // hasn't been observed yet (we know their fingerprint from a
-        // QR / invite / username lookup, but never seen a signed
-        // message from them), the key is None and gets populated by
-        // the `MemberAnnounce` handler below the moment partner's
-        // first announcement lands.
-        let passphrase_key = self.try_derive_dm_key(&room_id, partner_fingerprint);
+        // huddle 1.3: the DM wrap key is derived lazily in the `MemberAnnounce`
+        // handler (`ensure_dm_key`), not here. We must first see the partner's
+        // announce to learn whether they are post-quantum capable (whether they
+        // publish an ML-KEM key) and, if we are the responder, to receive the
+        // KEM ciphertext — so committing to a key now would risk locking in
+        // classical and desyncing from a hybrid partner. Start with no key; the
+        // partner's first announcement populates it.
+        let passphrase_key: Option<[u8; KEY_LEN]> = None;
 
         // Always create our outbound Megolm session so we can encrypt
         // *something* the moment the key materializes. RoomCrypto
@@ -1148,6 +1170,7 @@ impl AppHandle {
                 typers: HashMap::new(),
                 read_only: false,
                 issued_codes: Vec::new(),
+                dm_kem_ciphertext: None,
             },
         );
 
@@ -1169,58 +1192,136 @@ impl AppHandle {
         Ok(room_id)
     }
 
-    /// huddle 0.7.1: derive a DM key from a base64-encoded partner
-    /// pubkey. Mirrors `try_derive_dm_key` but operates on a pubkey we
-    /// just received (e.g. via `MemberAnnounce.sender_ed25519_pubkey`)
-    /// without re-querying the DB.
-    fn derive_dm_key_from_pubkey_b64(
+    /// huddle 1.3: (re)derive the DM wrap key for a Direct room from a
+    /// partner `MemberAnnounce`, choosing the **hybrid** (X25519 + ML-KEM-768)
+    /// path when the partner published an ML-KEM key, else the classical
+    /// X25519 path. Returns `true` if a wrap key was newly set — the caller
+    /// then re-broadcasts our announce so it carries our (now wrappable)
+    /// session key and, when we are the initiator, the KEM ciphertext.
+    ///
+    /// The key is **locked in** on first derivation; we never silently switch
+    /// between classical and hybrid mid-DM (that would desync the wrap key
+    /// between the two peers). Capability is detected symmetrically — a DM goes
+    /// hybrid iff the partner's announce carried an ML-KEM key, and both peers
+    /// always publish theirs, so the two sides reach the same decision. The
+    /// lower-fingerprint peer is the **initiator** (encapsulates a fresh KEM
+    /// secret and ships the ciphertext); the higher-fingerprint peer is the
+    /// **responder** (decapsulates it) and waits for that ciphertext rather
+    /// than falling back to a classical key it would later have to abandon.
+    ///
+    /// Because the ML-KEM key + ciphertext ride *inside* the signed
+    /// `MemberAnnounce` envelope, a malicious relay cannot strip them to force
+    /// a classical downgrade without invalidating the signature.
+    fn ensure_dm_key(
         &self,
         room_id: &str,
-        pubkey_b64: &str,
-    ) -> Option<[u8; KEY_LEN]> {
-        let bytes = B64.decode(pubkey_b64).ok()?;
-        if bytes.len() != 32 {
-            return None;
-        }
-        let mut pubkey = [0u8; 32];
-        pubkey.copy_from_slice(&bytes);
-        // huddle 1.1.4: wipe our copy of the identity secret on drop.
-        let our_seed = zeroize::Zeroizing::new(self.identity.secret_bytes());
-        match crate::crypto::dm::derive_dm_key(&our_seed, &pubkey, room_id) {
-            Ok(k) => Some(k),
-            Err(e) => {
-                warn!(%e, "DM key derivation (from announce) failed");
-                None
+        partner_fp: &str,
+        partner_ed_b64: Option<&str>,
+        partner_mlkem_b64: Option<&str>,
+        ciphertext_b64: Option<&str>,
+    ) -> bool {
+        // Already keyed (or room gone)? Lock the first key in; don't re-derive.
+        {
+            let rooms = self.active_rooms.lock().unwrap();
+            match rooms.get(room_id) {
+                Some(r) if r.passphrase_key.is_some() => return false,
+                Some(_) => {}
+                None => return false,
             }
         }
-    }
+        // The partner's Ed25519 pubkey is required for either path.
+        let partner_ed = match partner_ed_b64 {
+            Some(b64) => match B64.decode(b64).ok() {
+                Some(b) if b.len() == 32 => {
+                    let mut a = [0u8; 32];
+                    a.copy_from_slice(&b);
+                    a
+                }
+                _ => return false,
+            },
+            None => return false,
+        };
+        let we_are_initiator = self.identity.fingerprint() < partner_fp;
+        // huddle 1.1.4: wipe our copy of the identity secret on drop.
+        let our_seed = zeroize::Zeroizing::new(self.identity.secret_bytes());
 
-    /// huddle 0.7.1: look up partner's Ed25519 pubkey (from anywhere
-    /// we've persisted it) and derive the DM room key via ECDH. Returns
-    /// `None` when the pubkey isn't known yet — the caller proceeds
-    /// without a key and the `MemberAnnounce` handler retries later.
-    fn try_derive_dm_key(
-        &self,
-        room_id: &str,
-        partner_fingerprint: &str,
-    ) -> Option<[u8; KEY_LEN]> {
-        let pubkey_b64 = repo::lookup_peer_ed25519_pubkey(&self.db, partner_fingerprint)
-            .ok()
-            .flatten()?;
-        let bytes = B64.decode(&pubkey_b64).ok()?;
-        if bytes.len() != 32 {
-            return None;
-        }
-        let mut pubkey = [0u8; 32];
-        pubkey.copy_from_slice(&bytes);
-        // huddle 1.1.4: wipe our copy of the identity secret on drop.
-        let our_seed = zeroize::Zeroizing::new(self.identity.secret_bytes());
-        match crate::crypto::dm::derive_dm_key(&our_seed, &pubkey, room_id) {
-            Ok(k) => Some(k),
-            Err(e) => {
-                warn!(%e, %partner_fingerprint, "DM key derivation failed");
-                None
+        // (wrap_key, optional ciphertext to publish). `None` => can't derive yet.
+        let derived: Option<([u8; KEY_LEN], Option<String>)> =
+            if let Some(ek_b64) = partner_mlkem_b64 {
+                // Partner is PQ-capable → hybrid ONLY; never downgrade to classical.
+                let ek = match B64.decode(ek_b64).ok() {
+                    Some(b) if b.len() == crate::crypto::pqc::MLKEM_EK_LEN => b,
+                    _ => {
+                        warn!(%partner_fp, "DM hybrid: malformed ML-KEM pubkey");
+                        return false;
+                    }
+                };
+                if we_are_initiator {
+                    match crate::crypto::dm::derive_dm_key_hybrid_initiator(
+                        &our_seed,
+                        &partner_ed,
+                        &ek,
+                        room_id,
+                    ) {
+                        Ok((key, ct)) => Some((key, Some(B64.encode(ct)))),
+                        Err(e) => {
+                            warn!(%e, %partner_fp, "DM hybrid initiator derivation failed");
+                            return false;
+                        }
+                    }
+                } else {
+                    // Responder: we need the initiator's ciphertext to decapsulate.
+                    let ct = match ciphertext_b64 {
+                        Some(c) => match B64.decode(c).ok() {
+                            Some(b) => b,
+                            None => {
+                                warn!(%partner_fp, "DM hybrid: malformed ML-KEM ciphertext");
+                                return false;
+                            }
+                        },
+                        // No ciphertext yet — wait for the initiator's next announce.
+                        None => return false,
+                    };
+                    match crate::crypto::dm::derive_dm_key_hybrid_responder(
+                        &self.identity.pq_keypair(),
+                        &our_seed,
+                        &partner_ed,
+                        &ct,
+                        room_id,
+                    ) {
+                        Ok(key) => Some((key, None)),
+                        Err(e) => {
+                            warn!(%e, %partner_fp, "DM hybrid responder derivation failed");
+                            return false;
+                        }
+                    }
+                }
+            } else {
+                // Partner published no ML-KEM key (pre-1.3 peer) → classical X25519.
+                match crate::crypto::dm::derive_dm_key(&our_seed, &partner_ed, room_id) {
+                    Ok(key) => Some((key, None)),
+                    Err(e) => {
+                        warn!(%e, %partner_fp, "DM classical derivation failed");
+                        return false;
+                    }
+                }
+            };
+
+        let (key, ct_b64) = match derived {
+            Some(d) => d,
+            None => return false,
+        };
+        let mut rooms = self.active_rooms.lock().unwrap();
+        match rooms.get_mut(room_id) {
+            // Re-check under the lock: a concurrent announce may have keyed it.
+            Some(room) if room.passphrase_key.is_none() => {
+                room.passphrase_key = Some(key);
+                if ct_b64.is_some() {
+                    room.dm_kem_ciphertext = ct_b64;
+                }
+                true
             }
+            _ => false,
         }
     }
 
@@ -1260,7 +1361,13 @@ impl AppHandle {
         // the ECDH derivation; the room continues operating as it did
         // before. New 0.7.1+ DMs all have `encrypted = true`.
         let (passphrase_key, crypto) = if info.encrypted {
-            let pk = self.try_derive_dm_key(room_id, partner_fingerprint);
+            // huddle 1.3: derive the DM wrap key lazily in the `MemberAnnounce`
+            // handler once the partner re-announces (revealing PQ capability +,
+            // for the responder, the KEM ciphertext). On restart the persisted
+            // Megolm sessions already decrypt history; the wrap key is only
+            // needed to process the partner's *next* session-key announce, which
+            // re-arrives on reconnect.
+            let pk: Option<[u8; KEY_LEN]> = None;
             // huddle 0.7.11: bubble up the error instead of .expect. The
             // inbound-DM auto-bootstrap path spawns this on its own task;
             // a transient DB write failure used to panic the task and
@@ -1294,6 +1401,7 @@ impl AppHandle {
                 typers: HashMap::new(),
                 read_only: false,
                 issued_codes: Vec::new(),
+                dm_kem_ciphertext: None,
             },
         );
 
@@ -1425,6 +1533,7 @@ impl AppHandle {
                 typers: HashMap::new(),
                 read_only: false,
                 issued_codes: Vec::new(),
+                dm_kem_ciphertext: None,
             },
         );
         // No longer "restorable" now that we've rejoined.
@@ -1537,6 +1646,7 @@ impl AppHandle {
                     typers: HashMap::new(),
                     read_only: false,
                     issued_codes: Vec::new(),
+                    dm_kem_ciphertext: None,
                 },
             );
             self.network.subscribe_room(info.id.clone()).await;
@@ -2451,25 +2561,30 @@ impl AppHandle {
 
     async fn broadcast_member_announce(&self, room_id: &str) -> Result<()> {
         let our_fp = self.identity.fingerprint().to_string();
-        let wrapped = {
+        let (wrapped, is_direct, dm_ct) = {
             let mut rooms = self.active_rooms.lock().unwrap();
             let room = rooms
                 .get_mut(room_id)
                 .ok_or_else(|| HuddleError::Other("not in room".into()))?;
-            if room.info.encrypted {
+            let is_direct = room.info.kind == RoomKind::Direct;
+            // huddle 1.3: the KEM ciphertext we (as DM initiator) encapsulated,
+            // re-published every announce so the responder can decapsulate the
+            // same hybrid wrap key. `None` for groups, classical DMs, responders.
+            let dm_ct = room.dm_kem_ciphertext.clone();
+            let wrapped = if room.info.encrypted {
                 let crypto = room.crypto.as_mut().unwrap();
                 let session_key = crypto.our_session_key_b64();
                 match room.passphrase_key.as_ref() {
                     Some(passphrase_key) => {
                         Some(passphrase::wrap(session_key.as_bytes(), passphrase_key)?)
                     }
-                    None if room.info.kind == RoomKind::Direct => {
+                    None if is_direct => {
                         // huddle 0.7.1: DM-specific path — partner's
                         // pubkey hasn't been observed yet, so we can't
-                        // derive the ECDH key. Send announce without
-                        // a wrapped key — it carries our Ed25519
-                        // pubkey, which lets the partner derive the
-                        // key on their side. They'll respond with
+                        // derive the wrap key. Send announce without
+                        // a wrapped key — it carries our Ed25519 +
+                        // ML-KEM pubkeys, which let the partner derive
+                        // the key on their side. They'll respond with
                         // their own wrapped key in a follow-up
                         // announce; once we receive it we re-broadcast
                         // ours with the wrap filled in.
@@ -2481,14 +2596,27 @@ impl AppHandle {
                 }
             } else {
                 None
-            }
+            };
+            (wrapped, is_direct, dm_ct)
         };
         let display_name = repo::get_display_name(&self.db).unwrap_or(None);
+        // huddle 1.3: advertise our ML-KEM-768 encapsulation key on Direct-room
+        // announces (only — group rooms stay byte-identical) so the partner can
+        // run the hybrid post-quantum DM key agreement. Its presence is also how
+        // the partner detects our PQ capability. The ciphertext is set only when
+        // we are the initiator (lower fingerprint) and have encapsulated.
+        let (sender_mlkem_pubkey, mlkem_ciphertext) = if is_direct {
+            (Some(B64.encode(self.identity.mlkem_public_bytes())), dm_ct)
+        } else {
+            (None, None)
+        };
         let msg = RoomMessage::MemberAnnounce {
             sender_fingerprint: our_fp,
             wrapped_session_key: wrapped,
             display_name,
             sender_ed25519_pubkey: Some(B64.encode(self.identity.public_bytes())),
+            sender_mlkem_pubkey,
+            mlkem_ciphertext,
         };
         // huddle 0.7.11: MemberAnnounce is now signed end-to-end. The
         // envelope's Ed25519 pubkey is the canonical TOFU pin for this
@@ -3284,6 +3412,8 @@ impl AppHandle {
                 wrapped_session_key,
                 display_name,
                 sender_ed25519_pubkey,
+                sender_mlkem_pubkey,
+                mlkem_ciphertext,
             } => {
                 if sender_fingerprint == our_fp {
                     return;
@@ -3411,42 +3541,41 @@ impl AppHandle {
                     room.info.encrypted && wrapped_session_key.is_some()
                 };
 
-                // huddle 0.7.1: for Direct rooms, the passphrase_key is
-                // derived from ECDH between our identity key and the
-                // partner's. The partner's pubkey may arrive in *this*
-                // MemberAnnounce — so we lazily compute the key now,
-                // before the unwrap path runs. Idempotent: if we
-                // already have the key, this is a no-op.
-                if matches!(
+                // huddle 1.3: for Direct rooms, derive the DM wrap key now —
+                // hybrid (X25519 + ML-KEM-768) when the partner published an
+                // ML-KEM key, else classical X25519. The partner's pubkey(s)
+                // and — when we are the responder — the KEM ciphertext arrive
+                // in *this* MemberAnnounce, so we compute the key before the
+                // unwrap path runs. `ensure_dm_key` is idempotent and locks the
+                // key in on first success.
+                let is_direct_room = matches!(
                     self.active_rooms
                         .lock()
                         .unwrap()
                         .get(room_id)
-                        .map(|r| (r.info.kind, r.passphrase_key.is_none())),
-                    Some((RoomKind::Direct, true))
-                ) {
-                    if let Some(pubkey_b64) = sender_ed25519_pubkey.as_deref() {
-                        if let Some(key) =
-                            self.derive_dm_key_from_pubkey_b64(room_id, pubkey_b64)
-                        {
-                            let mut rooms = self.active_rooms.lock().unwrap();
-                            if let Some(room) = rooms.get_mut(room_id) {
-                                room.passphrase_key = Some(key);
-                            }
-                            drop(rooms);
-                            // We just got the key — re-broadcast our
-                            // MemberAnnounce so the partner gets our
-                            // wrapped session key. Fire-and-forget;
-                            // failures are logged.
-                            let app = self.clone();
-                            let rid = room_id.to_string();
-                            tokio::spawn(async move {
-                                if let Err(e) = app.broadcast_member_announce(&rid).await {
-                                    warn!(%e, "re-broadcast DM announce after key derivation");
-                                }
-                            });
+                        .map(|r| r.info.kind),
+                    Some(RoomKind::Direct)
+                );
+                if is_direct_room
+                    && self.ensure_dm_key(
+                        room_id,
+                        &sender_fingerprint,
+                        sender_ed25519_pubkey.as_deref(),
+                        sender_mlkem_pubkey.as_deref(),
+                        mlkem_ciphertext.as_deref(),
+                    )
+                {
+                    // We just established the DM wrap key — re-broadcast our
+                    // MemberAnnounce so the partner gets our wrapped session key
+                    // (and, if we are the initiator, the KEM ciphertext).
+                    // Fire-and-forget; failures are logged.
+                    let app = self.clone();
+                    let rid = room_id.to_string();
+                    tokio::spawn(async move {
+                        if let Err(e) = app.broadcast_member_announce(&rid).await {
+                            warn!(%e, "re-broadcast DM announce after key derivation");
                         }
-                    }
+                    });
                 }
 
                 if need_inbound {
@@ -5043,6 +5172,7 @@ impl AppHandle {
                 typers: HashMap::new(),
                 read_only: true,
                 issued_codes: Vec::new(),
+                dm_kem_ciphertext: None,
             },
         );
         self.network.subscribe_room(room_id.to_string()).await;

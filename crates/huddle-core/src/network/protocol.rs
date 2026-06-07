@@ -94,8 +94,11 @@ pub struct SignedRoomMessage {
 pub enum WireMessage {
     /// Unsigned — equivalent to the old wire format. Used for messages
     /// whose authenticity isn't security-critical: `Plain`, `Typing`,
-    /// `MemberAnnounce` (the wrapped key in encrypted rooms is itself
-    /// AEAD-authenticated), `FileChunk`, etc.
+    /// `FileChunk`, etc. NOTE: `MemberAnnounce` moved to the **signed**
+    /// envelope in 0.7.11 (see `broadcast_member_announce`), so its
+    /// fingerprint pin can't be hijacked — and, as of 1.3, so its
+    /// ML-KEM key + ciphertext can't be stripped by a relay to force a
+    /// post-quantum downgrade without breaking the signature.
     Plain(RoomMessage),
     /// App-level Ed25519-signed envelope.
     Signed(SignedRoomMessage),
@@ -184,6 +187,23 @@ pub enum RoomMessage {
         /// signed messages can't be verified until it re-announces.
         #[serde(default)]
         sender_ed25519_pubkey: Option<String>,
+        /// huddle 1.3: base64 of the sender's 1184-byte ML-KEM-768
+        /// encapsulation (public) key, for hybrid post-quantum DM key
+        /// agreement. Populated only on **Direct** room announces. Its
+        /// presence is how the peer signals PQ capability: a DM goes hybrid
+        /// iff the partner published this. `#[serde(default, skip)]` keeps
+        /// pre-1.3 peers (and all group announces) byte-compatible — the
+        /// field simply doesn't appear. Carried inside the *signed*
+        /// `MemberAnnounce` envelope, so the relay can't strip it to force a
+        /// downgrade without breaking the signature.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sender_mlkem_pubkey: Option<String>,
+        /// huddle 1.3: base64 of the 1088-byte ML-KEM-768 ciphertext sent by
+        /// the DM **initiator** (the lower-fingerprint peer) to the responder,
+        /// who decapsulates it to recover the shared post-quantum secret. Only
+        /// the initiator sets this; the responder's announces omit it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mlkem_ciphertext: Option<String>,
     },
     /// A request from a recently-joined member: "I need session keys".
     /// Existing members respond with MemberAnnounce.
@@ -416,6 +436,8 @@ mod tests {
                 wrapped_session_key: Some("base64data".into()),
                 display_name: Some("Daisy".into()),
                 sender_ed25519_pubkey: Some("AAA=".into()),
+                sender_mlkem_pubkey: Some("BBB=".into()),
+                mlkem_ciphertext: Some("CCC=".into()),
             },
             RoomMessage::Plain {
                 sender_fingerprint: "fp".into(),

@@ -2,7 +2,9 @@ use ed25519_dalek::{Signer, SigningKey};
 use libp2p::identity::{self, Keypair};
 use libp2p::PeerId;
 use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
 
+use crate::crypto::pqc::{self, PqKeypair};
 use crate::error::{HuddleError, Result};
 
 pub struct Identity {
@@ -71,6 +73,23 @@ impl Identity {
     /// at the application layer (gossipsub only proves transport-level).
     pub fn sign(&self, msg: &[u8]) -> [u8; 64] {
         self.signing_key.sign(msg).to_bytes()
+    }
+
+    /// huddle 1.3: this identity's ML-KEM-768 keypair, **deterministically
+    /// derived** from the Ed25519 secret seed (see `crypto::pqc`). Computed on
+    /// demand — there is no extra key material on disk; the existing 32-byte
+    /// Ed25519 seed is the sole root secret, so every pre-1.3 identity gains a
+    /// post-quantum keypair for free with no migration.
+    pub fn pq_keypair(&self) -> PqKeypair {
+        let seed = Zeroizing::new(self.signing_key.to_bytes());
+        PqKeypair::from_identity_seed(&seed)
+    }
+
+    /// huddle 1.3: our serialized ML-KEM-768 encapsulation (public) key, to be
+    /// published to peers (in `MemberAnnounce` / `ContactRequest`) so they can
+    /// encapsulate a hybrid DM key to us. Stable across restarts.
+    pub fn mlkem_public_bytes(&self) -> [u8; pqc::MLKEM_EK_LEN] {
+        self.pq_keypair().encapsulation_key_bytes()
     }
 }
 
@@ -172,6 +191,36 @@ mod tests {
         let id = Identity::generate().unwrap();
         let pid = id.peer_id();
         assert!(!pid.to_string().is_empty());
+    }
+
+    #[test]
+    fn mlkem_pubkey_is_stable_across_reload() {
+        // huddle 1.3: the ML-KEM keypair is derived from the Ed25519 seed, so
+        // reloading the same identity must reproduce the same public key — no
+        // persistence, no migration, stable across restarts.
+        let bytes = Identity::generate().unwrap().secret_bytes();
+        let a = Identity::from_secret_bytes(bytes).unwrap();
+        let b = Identity::from_secret_bytes(bytes).unwrap();
+        assert_eq!(a.mlkem_public_bytes(), b.mlkem_public_bytes());
+        assert_eq!(a.mlkem_public_bytes().len(), pqc::MLKEM_EK_LEN);
+    }
+
+    #[test]
+    fn mlkem_pubkey_differs_per_identity() {
+        let a = Identity::generate().unwrap();
+        let b = Identity::generate().unwrap();
+        assert_ne!(a.mlkem_public_bytes(), b.mlkem_public_bytes());
+    }
+
+    #[test]
+    fn mlkem_keypair_round_trips_against_self() {
+        // Encapsulate to our own published ek, then decapsulate — sanity that
+        // the deterministically-derived keypair is internally consistent.
+        let id = Identity::generate().unwrap();
+        let ek = id.mlkem_public_bytes();
+        let (ct, ss_send) = pqc::encapsulate_deterministic(&ek, &[1u8; pqc::SS_LEN]).unwrap();
+        let ss_recv = id.pq_keypair().decapsulate(&ct).unwrap();
+        assert_eq!(*ss_send, *ss_recv);
     }
 
     #[test]

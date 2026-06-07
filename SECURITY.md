@@ -1,6 +1,6 @@
 # Security
 
-This document describes huddle's security model as of **1.2.5**: what is
+This document describes huddle's security model as of **1.3.0**: what is
 protected, how, and — just as importantly — what is *not*. Read the
 "Known limitations / by-design tradeoffs" section before trusting huddle
 with anything that matters.
@@ -31,12 +31,17 @@ own careful review.
   with ChaCha20-Poly1305 under an **Argon2id**-derived key
   (m=64 MiB, t=3, p=4) bound to a per-room salt; for code-join rooms it
   is wrapped under an ECDH-derived key between owner and joiner.
-- **Direct messages** — a 32-byte room key derived by **X25519 ECDH**
-  between the two parties' long-term Ed25519 identities (converted to
-  Montgomery form), expanded with **HKDF-SHA256** and bound to the
-  canonical DM room id via the `info` parameter. Both peers derive the
-  same key with no shared passphrase and no extra round trip. Message
-  payloads are then Megolm-encrypted as in group rooms.
+- **Direct messages** — a 32-byte room key. Since **1.3.0** this is a
+  **hybrid post-quantum** key when both peers are on 1.3+: a classical
+  **X25519 ECDH** secret (between the two parties' long-term Ed25519
+  identities, converted to Montgomery form) and an **ML-KEM-768** (FIPS
+  203) encapsulated secret are concatenated and run through **HKDF-SHA256**,
+  bound to the canonical DM room id and the KEM ciphertext. The key is
+  secure as long as *either* primitive holds, so recorded DMs resist a
+  future quantum computer (see "1.3 changes" and "harvest-now-decrypt-later"
+  below). Against a pre-1.3 peer it transparently falls back to the
+  classical X25519-only key. Either way both peers derive the same key and
+  message payloads are then Megolm-encrypted as in group rooms.
 - **File attachments** in encrypted rooms — bytes are
   ChaCha20-Poly1305-encrypted under a fresh per-file key that is itself
   Megolm-wrapped in the file offer.
@@ -153,6 +158,63 @@ own careful review.
   identity proof remains the owner's *signed* contact-request/announce, so a
   misbehaving relay can't substitute an identity undetected.
 
+## 1.3 changes — post-quantum hybrid DM key agreement
+
+- **Hybrid X25519 + ML-KEM-768 DM keys.** The direct-message wrap key is now
+  derived from two independent shared secrets — a classical **X25519 ECDH** and
+  a post-quantum **ML-KEM-768** (FIPS 203, RustCrypto `ml-kem`) encapsulation —
+  combined with **HKDF-SHA256**:
+  `HKDF(salt = "huddle-hybrid-kem-v1"; ikm = ss_x25519 ‖ ss_mlkem; info = kem_ct ‖ room_id)`.
+  Because both secrets feed the same KDF as input keying material, the output is
+  a secure key if **either** primitive is unbroken, and it is never weaker than
+  the previous classical-only key. This is the construction Signal standardized
+  as PQXDH, scoped to huddle's static DM model.
+- **What this defends: "harvest now, decrypt later".** A well-resourced
+  adversary can record E2E ciphertext today and decrypt it years later once a
+  cryptographically-relevant quantum computer can break X25519 (via Shor's
+  algorithm). The ML-KEM half removes that: recovering the DM key would *also*
+  require breaking ML-KEM (a lattice problem with no known quantum break). The
+  symmetric message cipher (Megolm = AES-256 + HMAC-SHA-256) and file cipher
+  (ChaCha20-Poly1305) were already quantum-resistant — only the *key agreement*
+  was classical, and that is the gap this closes.
+- **Deterministic keypair, zero migration.** Each identity's ML-KEM keypair is
+  derived from its existing Ed25519 seed via a domain-separated HKDF
+  (`from_seed`), so every pre-1.3 identity gains a post-quantum key with no new
+  on-disk material and no migration. The public encapsulation key is published
+  in `MemberAnnounce`; peers cannot compute it from the Ed25519 *public* key
+  alone, so it must be exchanged (it does not weaken the identity).
+- **Deterministic encapsulation, no per-DM state.** The lower-fingerprint peer
+  is the **initiator**: it encapsulates a secret to the responder's ML-KEM key
+  using a message `m = HKDF(initiator_seed; partner_ek ‖ room_id)` and ships the
+  ciphertext in its signed announce; the higher-fingerprint peer decapsulates.
+  Seeding `m` from the initiator's long-term secret makes the ciphertext
+  reproducible (so no per-DM secret has to be stored) **without** weakening the
+  post-quantum guarantee: `m` is unknown to anyone lacking the initiator's seed,
+  so a quantum attacker who later recovers the X25519 secret still cannot
+  reconstruct the ML-KEM secret (that needs `m` or the responder's private key).
+- **Downgrade resistance.** The ML-KEM public key and ciphertext travel *inside*
+  the Ed25519-**signed** `MemberAnnounce` envelope, so a malicious relay cannot
+  strip them to force a classical downgrade without invalidating the signature.
+  A DM uses the hybrid key iff the partner published an ML-KEM key; both peers
+  publish theirs, so the two sides always agree (both hybrid, or — against a
+  pre-1.3 peer — both classical). The decision is locked in on first derivation,
+  never silently flipped mid-conversation. The one residual is that capability
+  is learned at first contact rather than pinned out-of-band: a *malicious
+  endpoint* (the peer you are actually talking to) could withhold its own ML-KEM
+  key to keep the DM classical — but that only weakens that peer's own traffic
+  and is not something an external attacker or the relay can do. Pinning a
+  peer's PQ-capability on first sight (TOFU) is a possible future hardening.
+- **Not changed (and why):** identity and message authenticity still use
+  classical **Ed25519** signatures, and Megolm's own per-message signing is
+  unchanged. Forging a signature requires a quantum computer operating *at the
+  time of the attack* — it is not a "harvest now" threat — and replacing the
+  identity scheme would break the relay auth, fingerprints, TOFU pinning, and
+  the connect-code system. Post-quantum *signatures* (ML-DSA / SLH-DSA) are a
+  possible future step but are out of scope for the harvest-now-decrypt-later
+  fix. Group-room key delivery under a passphrase is already post-quantum
+  (Argon2id + ChaCha20-Poly1305 are symmetric); the ECDH-wrapped code-join path
+  remains classical for now.
+
 ## Known limitations / by-design tradeoffs
 
 These are honest, deliberate tradeoffs — not oversights:
@@ -170,8 +232,13 @@ These are honest, deliberate tradeoffs — not oversights:
 - **No forward secrecy yet.** DM and group room keys derive from
   long-term identity material (and persist), so a future identity-key
   compromise can unlock historical session keys for that party (Megolm
-  message keys still ratchet, but the wrap key does not). Per-DM
-  ephemeral ratchets (Double Ratchet-style) and DB rekey are on the
+  message keys still ratchet, but the wrap key does not). This is
+  orthogonal to the 1.3 post-quantum work: the hybrid DM key is stronger
+  against a *future quantum computer* but is still derived from long-term
+  keys, so it provides no forward secrecy against an *identity-seed*
+  compromise — and because the ML-KEM keypair is derived from that same
+  seed, a seed compromise exposes exactly what it did before, no more.
+  Per-DM ephemeral ratchets (Double Ratchet-style) and DB rekey are on the
   roadmap — see "Current limitations" in the README.
 - **Broadcast-event drop under load.** Internal event channels are
   bounded; under a heavy burst an event can be dropped. This is mitigated

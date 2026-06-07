@@ -20,7 +20,7 @@ third machine.
 - [ ] **First time only:** an onboarding card appears — press Enter
       to advance through the pages, then dismiss the last one
 - [ ] The Welcome pane appears with the sidebar on the left
-      (`huddle 1.2.5` banner up top)
+      (`huddle 1.3.0` banner up top)
 - [ ] In the sidebar's Profile section, your branded `HD-XXXX-XXXX-…`
       ID is visible. In the default (relay-only) mode the relay dot
       `●` shows next to your name once the onion link is up. With
@@ -487,6 +487,26 @@ move `~/Library/Application Support/huddle` (macOS) / `~/.local/share/huddle`
       opens instead of the native dialog. Type an absolute path and press
       Enter (or click Attach) to send it.
 - [ ] **GUI, persists.** Quit and relaunch the GUI — the toggle is still on.
+
+## 30. huddle 1.3.0 — post-quantum hybrid DM encryption
+
+- [ ] **Two 1.3 peers → hybrid DM works.** With both A and B on 1.3.0, start a
+      DM (A → B's `HD-…` ID), exchange a few messages each way. Messages send
+      and decrypt normally. There is **no visible change** — the post-quantum
+      hybrid key agreement is transparent; this confirms it didn't break DMs.
+- [ ] **Restart survives.** Quit and relaunch both. Reopen the DM, send a
+      message — it still works (the DM re-derives its hybrid key once the
+      partner re-announces; persisted history still decrypts).
+- [ ] **Backward compatible with a pre-1.3 peer.** Have one side run an older
+      build (≤1.2.5) and the other on 1.3.0, start a DM. It still works — the
+      1.3 side automatically falls back to the classical X25519 DM key. (A DM
+      goes hybrid only when *both* peers are 1.3+.)
+- [ ] **Logs (optional).** With `RUST_LOG=huddle=debug`, a DM between two 1.3
+      peers shows no `DM hybrid … failed` / `DM classical derivation failed`
+      warnings — derivation succeeds silently. A warning here would indicate a
+      malformed announce or a key-agreement failure.
+- [ ] **Group rooms unchanged.** Create/join an encrypted *group* room and send
+      messages — group behaviour and wire format are unchanged by 1.3.
 
 ## Troubleshooting
 
