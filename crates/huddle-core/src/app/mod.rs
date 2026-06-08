@@ -284,6 +284,14 @@ const TYPING_TTL_SECS: i64 = 3;
 const DISCOVERED_TTL_SECS: i64 = 45;
 const ANNOUNCE_INTERVAL_SECS: u64 = 15;
 
+/// huddle 1.3.1: bound the in-memory `sas_flows` map. Inbound `SasInit`
+/// inserts an entry keyed by the initiator-chosen `tx_id`, so without a sweep
+/// an authenticated peer streaming fresh tx_ids could grow it without limit.
+/// Abandoned flows are reaped after this TTL (well above any human-driven
+/// handshake), and a hard cap bounds a burst between sweeps.
+const SAS_FLOW_TTL_SECS: i64 = 300;
+const SAS_FLOWS_CAP: usize = 256;
+
 /// Phase G: in-flight SAS verification state, keyed by tx_id. Held in
 /// memory only; survives just long enough for the two-message
 /// handshake + the user pressing Match on both sides.
@@ -301,6 +309,9 @@ struct SasFlow {
     /// `both_done = true` and each calling `finish_sas` — pre-0.7.11
     /// that double-fired `SasVerified` and re-ran the DB writes.
     finalized: bool,
+    /// huddle 1.3.1: unix insert time, so the discovered-room pruner can reap
+    /// abandoned flows (TTL) and bound this otherwise-unbounded map.
+    created_at: i64,
 }
 
 /// huddle 0.8: the canonical centralized server, reachable only as a Tor
@@ -533,6 +544,12 @@ impl SendReadiness {
 /// Phase D follow-up: minimum seconds between two opportunistic
 /// `host_addrs` dials to the same announcer fingerprint.
 const HOST_ADDR_DIAL_BACKOFF_SECS: i64 = 300;
+
+/// huddle 1.3.1: hard cap on the `host_addr_dial_attempts` map. Its key is the
+/// unauthenticated `RoomAnnouncement.creator_fingerprint`, so a flood of
+/// distinct fingerprints could otherwise grow it without bound (mirrors
+/// `ROOM_SALT_CACHE`'s 4096 cap, populated in the same handler).
+const HOST_ADDR_DIAL_ATTEMPTS_CAP: usize = 4096;
 
 /// huddle 0.5: minimum ms between two `PeerIdentified`-triggered
 /// re-broadcasts of our own `ProfileUpdate` to the same peer
@@ -1339,10 +1356,17 @@ impl AppHandle {
     /// capability into SAS).
     ///
     /// ## Concurrency
-    /// Called from exactly one site on the single-threaded network event loop,
-    /// so the read-lock → out-of-lock DB read/derive → commit-under-lock
-    /// sequence cannot race another `ensure_dm_key`; the commit re-checks the
-    /// live state and is idempotent regardless.
+    /// In libp2p (`--mode mdns|direct`) builds on the multi-threaded runtime,
+    /// `process_network_event` — and thus this fn's single call site — is driven
+    /// by TWO concurrent tasks: the gossipsub loop (`spawn_event_processor`) and
+    /// the relay loop (`spawn_server_connection`). Because the relay mirrors the
+    /// same DM traffic, two `ensure_dm_key` calls for one Direct room CAN run
+    /// concurrently. Race-freedom does NOT come from single-threading; it comes
+    /// from the Phase-2 commit re-reading the LIVE `(passphrase_key,
+    /// dm_is_hybrid)` under the lock plus the strictly monotonic
+    /// `is_first || is_upgrade` rule (upgrade is classical→hybrid only). Every
+    /// interleaving converges to hybrid with no downgrade and at most one
+    /// `rotate_outbound` — so do not weaken the commit re-check.
     fn ensure_dm_key(
         &self,
         room_id: &str,
@@ -2797,10 +2821,12 @@ impl AppHandle {
             sender_mlkem_pubkey,
             mlkem_ciphertext,
         };
-        // huddle 0.7.11: MemberAnnounce is now signed end-to-end. The
-        // envelope's Ed25519 pubkey is the canonical TOFU pin for this
-        // fingerprint; the inner `sender_ed25519_pubkey` field stays
-        // present for back-compat parsing but is no longer authoritative.
+        // huddle 0.7.11: MemberAnnounce is now signed end-to-end. On the send
+        // path the inner `sender_ed25519_pubkey` equals the envelope's pubkey by
+        // construction (both are our identity key), and the receiver pins
+        // whatever pubkey the announce carries. The pin is made safe not by
+        // ignoring the inner field but by the receiver's `signer ==
+        // sender_fingerprint` gate, which lets a peer write only its own row.
         let env = crate::crypto::sign_message(&self.identity, &msg)?;
         let bytes = crate::network::protocol::encode_wire_signed(&env)?;
         self.network
@@ -3036,6 +3062,13 @@ impl AppHandle {
                         }
                     });
                 }
+                // huddle 1.3.1: reap abandoned SAS flows so an inbound-SasInit
+                // flood (or just unfinished handshakes) can't grow sas_flows
+                // without bound. Finalized flows are already removed promptly.
+                {
+                    let mut flows = handle.sas_flows.lock().unwrap();
+                    flows.retain(|_, f| now - f.created_at <= SAS_FLOW_TTL_SECS);
+                }
                 for id in to_drop {
                     let _ = handle.app_event_tx.send(AppEvent::RoomLost { room_id: id });
                 }
@@ -3097,10 +3130,17 @@ impl AppHandle {
                     let now = now_unix();
                     let should_dial = {
                         let mut attempts = self.host_addr_dial_attempts.lock().unwrap();
+                        // huddle 1.3.1: creator_fingerprint is unauthenticated, so
+                        // drop entries past the backoff window (they no longer
+                        // suppress a dial) and hard-cap inserts to bound a flood of
+                        // distinct fingerprints from growing the map without limit.
+                        attempts.retain(|_fp, last| now - *last < HOST_ADDR_DIAL_BACKOFF_SECS);
                         match attempts.get(&ann.creator_fingerprint).copied() {
                             Some(last) if now - last < HOST_ADDR_DIAL_BACKOFF_SECS => false,
                             _ => {
-                                attempts.insert(ann.creator_fingerprint.clone(), now);
+                                if attempts.len() < HOST_ADDR_DIAL_ATTEMPTS_CAP {
+                                    attempts.insert(ann.creator_fingerprint.clone(), now);
+                                }
                                 true
                             }
                         }
@@ -3648,8 +3688,14 @@ impl AppHandle {
                 // victim's first announce on a room and pin a fabricated
                 // ed25519 pubkey under the victim's fingerprint, so honest
                 // peers would later reject the real victim's signed
-                // messages. Now the inner `sender_ed25519_pubkey` is
-                // ignored — the envelope's pubkey is the authoritative one.
+                // messages. The hijack is closed by the `signer ==
+                // sender_fingerprint` check below: a peer can only write its
+                // OWN room_members row. The inner `sender_ed25519_pubkey` is
+                // still persisted as the TOFU pin (below) and used for DM key
+                // derivation; for honest peers it equals the envelope pubkey,
+                // and a peer that sets inner != envelope only poisons its own
+                // pin and is then locked out by the TOFU check on its future
+                // signed messages.
                 let signer = match verified_signer {
                     Some(fp) => fp,
                     None => {
@@ -3812,18 +3858,36 @@ impl AppHandle {
                             // We are the responder and lack the KEM ciphertext —
                             // ask the initiator to re-announce it (its
                             // SessionKeyRequest handler re-broadcasts a full
-                            // MemberAnnounce carrying the ciphertext).
-                            let app = self.clone();
-                            let rid = room_id.to_string();
-                            let our = our_fp.clone();
-                            tokio::spawn(async move {
-                                let req = RoomMessage::SessionKeyRequest {
-                                    requester_fingerprint: our,
-                                };
-                                if let Ok(bytes) = encode_wire(&req) {
-                                    app.network.publish_room_message(rid, bytes).await;
+                            // MemberAnnounce carrying the ciphertext). huddle 1.3.1:
+                            // debounce per room (shared `key_request_cooldown`, like
+                            // the decrypt-miss heal) so a stalled handshake's
+                            // ciphertext-less re-announces can't drive an
+                            // un-throttled request↔announce ping-pong; the bounded
+                            // ticker nudge still guarantees convergence.
+                            let now = now_unix();
+                            let due = {
+                                let mut cd = self.key_request_cooldown.lock().unwrap();
+                                let last = cd.get(room_id).copied().unwrap_or(0);
+                                if now - last >= KEY_REQUEST_COOLDOWN_SECS {
+                                    cd.insert(room_id.to_string(), now);
+                                    true
+                                } else {
+                                    false
                                 }
-                            });
+                            };
+                            if due {
+                                let app = self.clone();
+                                let rid = room_id.to_string();
+                                let our = our_fp.clone();
+                                tokio::spawn(async move {
+                                    let req = RoomMessage::SessionKeyRequest {
+                                        requester_fingerprint: our,
+                                    };
+                                    if let Ok(bytes) = encode_wire(&req) {
+                                        app.network.publish_room_message(rid, bytes).await;
+                                    }
+                                });
+                            }
                         }
                         DmKeyOutcome::Noop => {}
                     }
@@ -3833,7 +3897,16 @@ impl AppHandle {
                     let wrapped = wrapped_session_key.unwrap();
                     let result = {
                         let mut rooms = self.active_rooms.lock().unwrap();
-                        let room = rooms.get_mut(room_id).unwrap();
+                        // huddle 1.3.1: the active_rooms lock was released after
+                        // `need_inbound` was computed, so the room may have been
+                        // concurrently removed (e.g. a UI-thread `leave_room`)
+                        // before we re-acquire here. Guard like every sibling arm
+                        // instead of `.unwrap()` so a concurrent leave can't panic
+                        // (and permanently halt) the inbound message pipeline.
+                        let room = match rooms.get_mut(room_id) {
+                            Some(r) => r,
+                            None => return,
+                        };
                         let passphrase_key = match &room.passphrase_key {
                             Some(k) => k,
                             None => {
@@ -4272,6 +4345,16 @@ impl AppHandle {
                         return;
                     }
                 };
+                // huddle 1.3.1: bound sas_flows against an inbound SasInit flood
+                // (the tx_id key is attacker-chosen). Drop new flows once at cap;
+                // existing tx_ids still progress, and the TTL sweep reaps stale ones.
+                {
+                    let flows = self.sas_flows.lock().unwrap();
+                    if flows.len() >= SAS_FLOWS_CAP && !flows.contains_key(&tx_id) {
+                        warn!(%tx_id, "sas_flows at cap; dropping inbound SasInit");
+                        return;
+                    }
+                }
                 let (_, our_secret, our_pub) = crate::crypto::sas::new_session();
                 let sas_code = match crate::crypto::sas::derive_sas_code(
                     &our_secret,
@@ -4294,6 +4377,7 @@ impl AppHandle {
                         our_confirmed: false,
                         their_confirmed: false,
                         finalized: false,
+                        created_at: now_unix(),
                     },
                 );
                 // Respond with our pubkey so the initiator can compute
@@ -5512,6 +5596,7 @@ impl AppHandle {
                 our_confirmed: false,
                 their_confirmed: false,
                 finalized: false,
+                created_at: now_unix(),
             },
         );
         self.network

@@ -206,7 +206,7 @@ per-OS app directory:
 
 ```
 +----------------------------------------------------------------------+
-| huddle 1.3.1  ·  745e-fe8a-…  ·  relay ●               12:34 UTC     |
+| huddle 1.3.2  ·  745e-fe8a-…  ·  relay ●               12:34 UTC     |
 +------------------------+---------------------------------------------+
 | ▾ Profile              | # general                                   |
 |   alice  HD-AAAA-…  ●  |   4 members · encrypted                     |
@@ -647,6 +647,31 @@ native dialog for a path-entry box.
   two parties (Megolm message keys still ratchet, but the wrap key
   doesn't). Per-DM ephemeral ratchets (Double Ratchet-style) are a
   candidate follow-up.
+
+## What's new in 1.3.2 — bug-fix & hardening pass
+
+A focused fixes release on top of 1.3.1 (no wire-format change; fully compatible
+with 1.3.x and pre-1.3 peers), from a multi-agent audit of the whole tree.
+
+- **`huddle app` reliably finds your checkout.** It builds the GUI from a source
+  clone; previously it only located the clone when this binary was itself built
+  from one (`cargo install --path`) or you ran it from inside the repo — so a
+  crates.io install (`cargo install huddle`) could fail with "couldn't find the
+  huddle source checkout." It now also searches common clone locations under your
+  home directory (and still honours `HUDDLE_SRC`).
+- **GUI Quit / Restart actually close the window.** Confirming "Quit" tore down
+  the connection but left the window open until you clicked the OS close button a
+  second time; "Restart" could leave two windows. Both now close immediately.
+- **A failed send no longer eats your message.** If a message can't be sent after
+  the composer cleared, the text is restored instead of silently lost.
+- **Relay DoS hardening.** The relay now applies its pre-auth timeout to the
+  earliest connection phase (closing a slowloris hole) and caps inbound
+  WebSocket frames at 512 KiB instead of tungstenite's 64 MiB default.
+- **Robustness.** Guarded a panic in the inbound-message path that a concurrent
+  room-leave could trigger; bounded two in-memory maps against a malicious-peer
+  flood; debounced a DM key-request loop on a stalled handshake.
+- **Docs.** Corrected the SAS code's overstated Matrix-interop claim, a couple of
+  stale invite-keybinding hints (it's Shift+I / Alt+I), and several comments.
 
 ## What's new in 1.3.1 — post-quantum downgrade hardening + DM handshake liveness
 

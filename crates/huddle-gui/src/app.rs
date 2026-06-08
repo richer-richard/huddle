@@ -242,7 +242,12 @@ impl Ready {
         ui.ctx().request_repaint_after(Duration::from_millis(500));
 
         // Lifecycle: go-dark farewell → exit; window-close → confirm first.
-        if self.vm.should_exit() {
+        // huddle 1.3.1: `request_close` (set by the Quit / Restart actions, which
+        // run in `apply` just above) is a standalone close reason. Previously it
+        // was only honored inside the `close_requested` block, so confirming Quit
+        // tore down the network but left the window open until the user clicked
+        // the OS close button a second time; Restart spawned a second window.
+        if self.vm.should_exit() || self.request_close {
             return true;
         }
         if close_requested {

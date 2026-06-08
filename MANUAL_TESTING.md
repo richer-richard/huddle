@@ -20,7 +20,7 @@ third machine.
 - [ ] **First time only:** an onboarding card appears — press Enter
       to advance through the pages, then dismiss the last one
 - [ ] The Welcome pane appears with the sidebar on the left
-      (`huddle 1.3.1` banner up top)
+      (`huddle 1.3.2` banner up top)
 - [ ] In the sidebar's Profile section, your branded `HD-XXXX-XXXX-…`
       ID is visible. In the default (relay-only) mode the relay dot
       `●` shows next to your name once the onion link is up. With
@@ -515,8 +515,11 @@ move `~/Library/Application Support/huddle` (macOS) / `~/.local/share/huddle`
       it still works, derived hybrid (the ML-KEM pin persisted in the DB, so the
       DM does not silently fall back to classical).
 - [ ] **Rollout upgrade heals without restart.** Start a DM with one side on
-      ≤1.3.0 (or pre-1.3) so it keys classical; then upgrade that side to 1.3.1
-      while the chat is open. Within ~15s the DM converges to hybrid and keeps
+      pre-1.3 (≤1.2.5, which advertises no ML-KEM key) so it keys classical; then
+      upgrade that side to 1.3.1 while the chat is open. (Note: a 1.3.0 peer is
+      already PQ-capable, so a 1.3.1↔1.3.0 DM keys hybrid from the first announce
+      and never sits classical — only a genuinely pre-1.3 peer triggers the
+      classical→hybrid upgrade path this step validates.) Within ~15s the DM converges to hybrid and keeps
       working — no manual restart. (With `RUST_LOG=huddle=info` the upgrading
       side logs `DM upgraded classical→hybrid (post-quantum)`.)
 - [ ] **Stalled handshake self-heals.** On a flaky link, a freshly-opened hybrid

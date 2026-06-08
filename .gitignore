@@ -3,6 +3,9 @@
 # local planning notes (kept out of git)
 plan.md
 
+# local agent/session state (Claude Code, etc.)
+.claude/
+
 # local SQLite database (runtime state, not for git)
 huddle-server.db
 huddle-server.db-wal

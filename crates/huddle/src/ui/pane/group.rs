@@ -1,6 +1,6 @@
 //! Group pane — N-way room chat. Header shows name + member count +
 //! encryption + verified-only-join. Optional right-margin member list
-//! when width permits (toggleable via Ctrl+I).
+//! when width permits (toggleable via Alt+M).
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Modifier;
@@ -153,15 +153,16 @@ fn render_member_margin(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme, 
     }
     // huddle 0.7.7: visible affordance for the invite picker. Sits
     // pinned at the bottom of the member margin so users discover the
-    // in-band invite flow without already knowing `Ctrl+I`. The label
-    // doubles as the keybinding hint — pressing Ctrl+I anywhere in the
-    // group fires `OpenInvitePicker`.
+    // in-band invite flow without already knowing `Alt+I`. The label
+    // doubles as the keybinding hint — pressing Alt+I anywhere in the
+    // group fires `OpenInvitePicker`. (Ctrl+I collapses to Tab in every
+    // terminal, so the chord was moved off it in 0.7.11.)
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
         Span::styled("+ Add member", theme.warn_style()),
     ]));
     lines.push(Line::from(vec![
-        Span::styled(" Ctrl+I", theme.dim()),
+        Span::styled(" Alt+I", theme.dim()),
         Span::styled(" picker  ", theme.dim()),
     ]));
     lines.push(Line::from(vec![

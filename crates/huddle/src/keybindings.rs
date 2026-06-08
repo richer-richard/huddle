@@ -328,7 +328,7 @@ pub const BINDINGS: &[Binding] = &[
         palette_label: Some("generate join code"),
     },
     Binding {
-        keys: "Ctrl+Shift+I",
+        keys: "Shift+I",
         context: Context::RoomChat,
         description: "generate an invite link for this room",
         palette_label: Some("generate invite for this room"),

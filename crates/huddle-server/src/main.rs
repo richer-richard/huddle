@@ -267,10 +267,30 @@ async fn main() -> Result<()> {
 /// peeking (not consuming) the first bytes of the request.
 async fn handle_conn(stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
     let mut buf = [0u8; 1024];
-    let n = stream.peek(&mut buf).await?;
+    // huddle 1.3.1: bound the pre-WebSocket phase with the same PRE_AUTH_TIMEOUT
+    // that guards the post-upgrade auth handshake, so the documented idle-pre-auth
+    // DoS defense actually covers the earliest phase. Without this, a client that
+    // opens TCP and sends nothing parks forever in `peek`, and one that dribbles a
+    // partial upgrade parks forever in `accept_async` — a slowloris that holds a
+    // task + FD entirely outside the auth-deadline window.
+    let dur = std::time::Duration::from_secs(PRE_AUTH_TIMEOUT_SECS);
+    let n = tokio::time::timeout(dur, stream.peek(&mut buf)).await??;
     let head = String::from_utf8_lossy(&buf[..n]);
     if head.to_ascii_lowercase().contains("upgrade: websocket") {
-        let ws = tokio_tungstenite::accept_async(stream).await?;
+        // huddle 1.3.1: cap the inbound message/frame size at the WS layer so an
+        // oversized frame is rejected before it is buffered, copied, and parsed.
+        // tungstenite's default ceiling is 64 MiB, ~256x the MAX_PAYLOAD_B64 guard
+        // (which only runs post-parse, per-variant), so it was not a real memory
+        // bound. 512 KiB leaves headroom over MAX_PAYLOAD_B64 (256 KiB) + the JSON
+        // envelope while making the WS layer the actual per-connection ceiling.
+        let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+            max_message_size: Some(512 * 1024),
+            max_frame_size: Some(512 * 1024),
+            ..Default::default()
+        };
+        let ws =
+            tokio::time::timeout(dur, tokio_tungstenite::accept_async_with_config(stream, Some(config)))
+                .await??;
         serve_ws(ws, shared).await
     } else {
         // Plain HTTP. `/health` keeps the JSON probe contract; every other

@@ -26,15 +26,19 @@
 //! ephemeral key into the exchange ends up with a *different* SAS code
 //! than the legitimate peer would compute, so the OOB comparison fails.
 //!
-//! ## SAS table — Matrix MSC 2241 alignment (huddle 0.3.x follow-up)
+//! ## SAS table — a huddle-internal scheme (NOT Matrix wire-compatible)
 //!
-//! Previously the emoji table was a 64-entry "in spirit" derivative;
-//! it has been realigned to the canonical 49-entry Matrix MSC 2241
-//! table so any future cross-client SAS interop just works. The
-//! derivation now uses 7 emoji (42 bits / 6 = 7 chunks, each mod 49)
-//! and 3 four-digit decimal groups (39 bits / 13 = 3 chunks, each
-//! offset +1000 so values land in 1000..9192), exactly as MSC 2241
-//! specifies.
+//! huddle uses its own 49-emoji subset of the Matrix MSC 2241 list under a
+//! huddle-specific HKDF info string (`b"huddle-sas-v1"`) and maps 6-bit chunks
+//! into 0..49 by **rejection sampling** (see `derive_emoji_indices_rejection`).
+//! This does **not** interoperate with Matrix SAS: canonical MSC 2241 uses a
+//! 64-entry table indexed directly by each 6-bit chunk (no modulus, no
+//! rejection sampling) under its own info string, so a Matrix client would
+//! derive entirely different emoji. The derivation produces 7 emoji (42 bits /
+//! 6 = 7 chunks) and 3 four-digit decimal groups (39 bits / 13 = 3 chunks, each
+//! offset +1000 so values land in 1000..=9191); the decimal shape matches the
+//! MSC 2241 decimal SAS, but the emoji scheme is huddle↔huddle only. Since both
+//! peers run identical deterministic code, MITM detection is unaffected.
 
 use hkdf::Hkdf;
 use rand::RngCore;
@@ -98,10 +102,11 @@ pub fn new_session() -> ([u8; TX_ID_LEN], StaticSecret, PublicKey) {
 /// independently and must end up with the same answer for OOB
 /// comparison to succeed.
 ///
-/// Matches the MSC 2241 derivation: HKDF-SHA256 with `tx_id` as salt
-/// and `b"huddle-sas-v1"` as info, expanded to 11 bytes. First 6 bytes
-/// → 7 6-bit chunks (mod 49) → emoji indices. Next 5 bytes → 3 13-bit
-/// chunks (+ 1000) → 3 four-digit decimal groups.
+/// Matches the MSC 2241 SAS *shape* (not wire-compatible — see the module
+/// doc): HKDF-SHA256 with `tx_id` as salt and `b"huddle-sas-v1"` as info,
+/// expanded to 11 bytes. First 6 bytes → 7 6-bit chunks, rejection-sampled
+/// into 0..49 → emoji indices. Next 5 bytes → 3 13-bit chunks (+ 1000) → 3
+/// four-digit decimal groups.
 pub fn derive_sas_code(
     our_secret: &StaticSecret,
     their_public: &PublicKey,
@@ -162,8 +167,9 @@ pub fn derive_sas_code(
     })
 }
 
-/// The canonical 49-emoji table from Matrix MSC 2241, English labels.
-/// Indices 0-48; the derivation above maps 6-bit HKDF chunks mod 49.
+/// huddle's 49-emoji subset of the Matrix MSC 2241 list, English labels.
+/// Indices 0-48; the derivation above rejection-samples 6-bit HKDF chunks
+/// into 0..49 (not Matrix's direct 6-bit indexing — see the module doc).
 pub const SAS_EMOJI: [(&str, &str); 49] = [
     ("🐶", "dog"),
     ("🐱", "cat"),

@@ -81,7 +81,7 @@ pub const ONBOARDING_PAGES: &[OnboardingPage] = &[
             "for sharing access without leaking your passphrase, use",
             "  ^J  generate a 10-min single-use join code",
             "  ^V→s  SAS-verify a member's fingerprint",
-            "  ^I  produce an invite link (passphrase still OOB)",
+            "  Shift+I  produce an invite link (passphrase still OOB)",
         ],
         min_version: "0.0.0",
     },
@@ -3429,6 +3429,14 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
                 return Ok(false);
             }
             if let Err(e) = app.handle.send_room_message(&room_id, &body).await {
+                // huddle 1.3.1: a send failure after readiness passed (read-only
+                // room, crypto/DB error, …) must not silently eat the composed
+                // text — restore it, mirroring the readiness branch above.
+                if let Some(r) = app.active_room_mut() {
+                    if r.input.is_empty() {
+                        r.input = body; // give the text back, unsent
+                    }
+                }
                 app.modal = Modal::Error(format!("send failed: {e}"));
             }
             Ok(false)

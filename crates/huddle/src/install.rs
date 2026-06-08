@@ -158,6 +158,35 @@ fn find_workspace() -> Option<PathBuf> {
             return Some(ws.to_path_buf());
         }
     }
+    // huddle 1.3.2: last-resort search of common clone locations under $HOME.
+    // The `CARGO_MANIFEST_DIR` fallback above only resolves to a real workspace
+    // when this binary was built from a clone (e.g. `cargo install --path`); a
+    // binary installed from crates.io (`cargo install huddle`) bakes a registry
+    // path that is NOT a workspace, so without this `huddle app` failed for
+    // anyone who hadn't cd'd into a clone or set HUDDLE_SRC. Find their checkout.
+    if let Some(home) = dirs::home_dir() {
+        for rel in [
+            "GitHub/huddle",
+            "github/huddle",
+            "Github/huddle",
+            "huddle",
+            "src/huddle",
+            "code/huddle",
+            "Code/huddle",
+            "Developer/huddle",
+            "dev/huddle",
+            "projects/huddle",
+            "Projects/huddle",
+            "repos/huddle",
+            "Documents/huddle",
+            "Documents/GitHub/huddle",
+        ] {
+            let cand = home.join(rel);
+            if is_workspace(&cand) {
+                return Some(cand);
+            }
+        }
+    }
     None
 }
 
