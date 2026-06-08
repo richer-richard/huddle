@@ -206,7 +206,7 @@ per-OS app directory:
 
 ```
 +----------------------------------------------------------------------+
-| huddle 1.3.2  ·  745e-fe8a-…  ·  relay ●               12:34 UTC     |
+| huddle 1.3.3  ·  745e-fe8a-…  ·  relay ●               12:34 UTC     |
 +------------------------+---------------------------------------------+
 | ▾ Profile              | # general                                   |
 |   alice  HD-AAAA-…  ●  |   4 members · encrypted                     |
@@ -647,6 +647,29 @@ native dialog for a path-entry box.
   two parties (Megolm message keys still ratchet, but the wrap key
   doesn't). Per-DM ephemeral ratchets (Double Ratchet-style) are a
   candidate follow-up.
+
+## What's new in 1.3.3 — hardening follow-up (audit of 1.3.2)
+
+A small fixes release on top of 1.3.2 (no wire-format change; fully compatible
+with 1.3.x and pre-1.3 peers), from a multi-agent audit of the 1.3.2 changes.
+
+- **Closed a dial-amplification regression.** 1.3.2 capped the opportunistic
+  host-address dial map, but once the cap was reached it still dialed without
+  recording the attempt — so the per-announcer backoff stopped engaging and a
+  flood of bogus room announcements could be turned into repeated outbound dials
+  to an attacker-chosen address. The relay/peer now refuses the dial when it
+  can't record the backoff, so both memory and dials stay bounded.
+- **SAS verification can't be starved by one peer.** The in-memory SAS-handshake
+  map now has a per-partner sub-cap (in addition to the global cap), so a single
+  peer can no longer fill it and block everyone else's verification.
+- **Slow SAS comparisons no longer time out mid-handshake.** The SAS flow TTL is
+  now measured from last activity (and raised to 15 min), so taking your time
+  reading the emoji/decimal codes out loud won't drop the handshake.
+- **Tighter relay pre-auth bound.** The pre-WebSocket phase (peek + accept) now
+  shares one timeout instead of two, so a stalled connection can't be held for a
+  multiple of the documented pre-auth budget.
+- **Cleanup.** Removed a dead branch in the GUI close path left by the 1.3.2
+  refactor (no behavior change).
 
 ## What's new in 1.3.2 — bug-fix & hardening pass
 

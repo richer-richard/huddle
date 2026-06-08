@@ -273,8 +273,15 @@ async fn handle_conn(stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
     // opens TCP and sends nothing parks forever in `peek`, and one that dribbles a
     // partial upgrade parks forever in `accept_async` — a slowloris that holds a
     // task + FD entirely outside the auth-deadline window.
+    //
+    // huddle 1.3.3: peek and accept share ONE deadline (`timeout_at`) instead of
+    // each getting a fresh PRE_AUTH_TIMEOUT, so the whole pre-WS phase is a single
+    // ~PRE_AUTH_TIMEOUT window — not 2x — before serve_ws's own auth deadline takes
+    // over. A slowloris can no longer chain per-phase timers to pin a connection
+    // for a multiple of the documented budget.
     let dur = std::time::Duration::from_secs(PRE_AUTH_TIMEOUT_SECS);
-    let n = tokio::time::timeout(dur, stream.peek(&mut buf)).await??;
+    let pre_ws_deadline = tokio::time::Instant::now() + dur;
+    let n = tokio::time::timeout_at(pre_ws_deadline, stream.peek(&mut buf)).await??;
     let head = String::from_utf8_lossy(&buf[..n]);
     if head.to_ascii_lowercase().contains("upgrade: websocket") {
         // huddle 1.3.1: cap the inbound message/frame size at the WS layer so an
@@ -288,9 +295,11 @@ async fn handle_conn(stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
             max_frame_size: Some(512 * 1024),
             ..Default::default()
         };
-        let ws =
-            tokio::time::timeout(dur, tokio_tungstenite::accept_async_with_config(stream, Some(config)))
-                .await??;
+        let ws = tokio::time::timeout_at(
+            pre_ws_deadline,
+            tokio_tungstenite::accept_async_with_config(stream, Some(config)),
+        )
+        .await??;
         serve_ws(ws, shared).await
     } else {
         // Plain HTTP. `/health` keeps the JSON probe contract; every other

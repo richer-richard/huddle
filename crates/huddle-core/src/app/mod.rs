@@ -287,10 +287,25 @@ const ANNOUNCE_INTERVAL_SECS: u64 = 15;
 /// huddle 1.3.1: bound the in-memory `sas_flows` map. Inbound `SasInit`
 /// inserts an entry keyed by the initiator-chosen `tx_id`, so without a sweep
 /// an authenticated peer streaming fresh tx_ids could grow it without limit.
-/// Abandoned flows are reaped after this TTL (well above any human-driven
-/// handshake), and a hard cap bounds a burst between sweeps.
-const SAS_FLOW_TTL_SECS: i64 = 300;
+/// Abandoned flows are reaped after this TTL, a global hard cap bounds total
+/// memory, and a per-peer sub-cap stops one peer from starving everyone else.
+///
+/// huddle 1.3.3: the TTL is anchored to ~code-visible time, not flow start, so a
+/// slow out-of-band comparison won't reap a live handshake — a real SAS stalls on
+/// humans reading emoji/decimal to each other over voice, which can take minutes.
+/// The initiator's flow is refreshed when the `SasResponse` arrives (moving its
+/// clock off "SasInit sent" and onto "both keys known"); the responder's flow is
+/// created at the same instant it displays the code, so its clock already starts
+/// there and needs no refresh. The cap, not a tight TTL, is the real memory
+/// bound, so 15 min is safe.
+const SAS_FLOW_TTL_SECS: i64 = 900;
 const SAS_FLOWS_CAP: usize = 256;
+/// huddle 1.3.3: per-partner sub-cap. `sas_flows` is one global map keyed by the
+/// attacker-chosen `tx_id`, so without this a single authenticated co-member
+/// could fill all `SAS_FLOWS_CAP` slots with distinct tx_ids and block every
+/// other peer's SAS verification node-wide until the TTL sweep. Capping in-flight
+/// flows per partner fingerprint confines a flooder to its own share.
+const SAS_FLOWS_PER_PEER: usize = 8;
 
 /// Phase G: in-flight SAS verification state, keyed by tx_id. Held in
 /// memory only; survives just long enough for the two-message
@@ -3065,6 +3080,8 @@ impl AppHandle {
                 // huddle 1.3.1: reap abandoned SAS flows so an inbound-SasInit
                 // flood (or just unfinished handshakes) can't grow sas_flows
                 // without bound. Finalized flows are already removed promptly.
+                // huddle 1.3.3: `created_at` is refreshed on progress, so this is
+                // an idle-since-last-activity TTL — a slow but live handshake survives.
                 {
                     let mut flows = handle.sas_flows.lock().unwrap();
                     flows.retain(|_, f| now - f.created_at <= SAS_FLOW_TTL_SECS);
@@ -3140,8 +3157,21 @@ impl AppHandle {
                             _ => {
                                 if attempts.len() < HOST_ADDR_DIAL_ATTEMPTS_CAP {
                                     attempts.insert(ann.creator_fingerprint.clone(), now);
+                                    true
+                                } else {
+                                    // huddle 1.3.3: at cap we cannot record this
+                                    // attempt, so dialing here would bypass the
+                                    // per-fingerprint backoff entirely — every later
+                                    // announce for an unrecordable fingerprint would
+                                    // re-dial its (unauthenticated) host_addrs. An
+                                    // attacker can keep the map saturated with bogus
+                                    // creator_fingerprints, so refuse the dial rather
+                                    // than amplify it into an outbound-connection
+                                    // storm against an attacker-chosen address.
+                                    // Legit saturation (4096 distinct live announcers
+                                    // within the 300s backoff window) is implausible.
+                                    false
                                 }
-                                true
                             }
                         }
                     };
@@ -4348,11 +4378,24 @@ impl AppHandle {
                 // huddle 1.3.1: bound sas_flows against an inbound SasInit flood
                 // (the tx_id key is attacker-chosen). Drop new flows once at cap;
                 // existing tx_ids still progress, and the TTL sweep reaps stale ones.
+                // huddle 1.3.3: also enforce a per-partner sub-cap so one peer
+                // streaming distinct tx_ids can't fill the global pool and starve
+                // everyone else's SAS verification node-wide.
                 {
                     let flows = self.sas_flows.lock().unwrap();
-                    if flows.len() >= SAS_FLOWS_CAP && !flows.contains_key(&tx_id) {
-                        warn!(%tx_id, "sas_flows at cap; dropping inbound SasInit");
-                        return;
+                    if !flows.contains_key(&tx_id) {
+                        if flows.len() >= SAS_FLOWS_CAP {
+                            warn!(%tx_id, "sas_flows at global cap; dropping inbound SasInit");
+                            return;
+                        }
+                        let from_peer = flows
+                            .values()
+                            .filter(|f| f.partner_fingerprint == signer)
+                            .count();
+                        if from_peer >= SAS_FLOWS_PER_PEER {
+                            warn!(%signer, "sas_flows per-peer cap; dropping inbound SasInit");
+                            return;
+                        }
                     }
                 }
                 let (_, our_secret, our_pub) = crate::crypto::sas::new_session();
@@ -4456,6 +4499,10 @@ impl AppHandle {
                         }
                     };
                     flow.sas_code = Some(code.clone());
+                    // huddle 1.3.3: refresh the TTL clock on real progress so the
+                    // reaper measures idle-since-last-activity, not age-since-start
+                    // — a live handshake mid out-of-band comparison won't be reaped.
+                    flow.created_at = now_unix();
                     code
                 };
                 let _ = self.app_event_tx.send(AppEvent::SasCodeReady {

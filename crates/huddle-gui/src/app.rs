@@ -250,10 +250,11 @@ impl Ready {
         if self.vm.should_exit() || self.request_close {
             return true;
         }
+        // huddle 1.3.3: `request_close` is already handled by the standalone
+        // early return above, so reaching here means it is false — the inner
+        // re-check it used to need was removed as dead code. An OS-initiated
+        // close (the window's X) lands here and gets the confirm prompt.
         if close_requested {
-            if self.request_close {
-                return true;
-            }
             if !matches!(self.vm.modal, Modal::QuitConfirm) {
                 self.vm.replace_modal_if_idle(Modal::QuitConfirm);
             }
