@@ -301,6 +301,11 @@ pub struct StoredRoomMember {
     /// by re-announcements so OwnerGrant is the only way to promote
     /// after the fact.
     pub role: String,
+    /// huddle 1.3.1: base64 ML-KEM-768 encapsulation key, learned from a
+    /// signed `MemberAnnounce.sender_mlkem_pubkey` (Direct rooms only). The
+    /// durable post-quantum-capability pin — see `lookup_peer_mlkem_pubkey`.
+    /// `None` for pre-1.3 peers and group members.
+    pub mlkem_pubkey: Option<String>,
 }
 
 /// Insert a member, or update in place on (room_id, fingerprint) collision.
@@ -314,15 +319,16 @@ pub struct StoredRoomMember {
 pub fn upsert_room_member(db: &Db, member: &StoredRoomMember) -> Result<()> {
     let conn = db.lock().unwrap();
     conn.execute(
-        "INSERT INTO room_members (room_id, peer_id, fingerprint, last_seen, verified, ed25519_pubkey, role)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        "INSERT INTO room_members (room_id, peer_id, fingerprint, last_seen, verified, ed25519_pubkey, role, mlkem_pubkey)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(room_id, fingerprint) DO UPDATE SET
             last_seen = excluded.last_seen,
             peer_id = CASE
                 WHEN excluded.peer_id != '' THEN excluded.peer_id
                 ELSE room_members.peer_id
             END,
-            ed25519_pubkey = COALESCE(excluded.ed25519_pubkey, room_members.ed25519_pubkey)",
+            ed25519_pubkey = COALESCE(excluded.ed25519_pubkey, room_members.ed25519_pubkey),
+            mlkem_pubkey = COALESCE(excluded.mlkem_pubkey, room_members.mlkem_pubkey)",
         params![
             member.room_id,
             member.peer_id,
@@ -331,6 +337,7 @@ pub fn upsert_room_member(db: &Db, member: &StoredRoomMember) -> Result<()> {
             member.verified as i64,
             member.ed25519_pubkey,
             member.role,
+            member.mlkem_pubkey,
         ],
     )?;
     Ok(())
@@ -351,10 +358,28 @@ pub fn lookup_peer_ed25519_pubkey(db: &Db, fingerprint: &str) -> Result<Option<S
     Ok(rows.next().and_then(|r| r.ok()).flatten())
 }
 
+/// huddle 1.3.1: find an ML-KEM-768 encapsulation key for a fingerprint
+/// across all rooms. Mirrors `lookup_peer_ed25519_pubkey`: a peer's ML-KEM
+/// key is global (deterministically derived from their identity seed), so any
+/// non-null row works. A `Some` result means we have durably observed this
+/// peer's post-quantum capability — the DM key agreement then **refuses the
+/// classical fallback** for them, defeating a relay replaying a captured
+/// pre-1.3 (classical-only) announce to force a quantum-unsafe downgrade.
+pub fn lookup_peer_mlkem_pubkey(db: &Db, fingerprint: &str) -> Result<Option<String>> {
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare(
+        "SELECT mlkem_pubkey FROM room_members
+         WHERE fingerprint = ?1 AND mlkem_pubkey IS NOT NULL
+         LIMIT 1",
+    )?;
+    let mut rows = stmt.query_map(params![fingerprint], |row| row.get::<_, Option<String>>(0))?;
+    Ok(rows.next().and_then(|r| r.ok()).flatten())
+}
+
 pub fn list_room_members(db: &Db, room_id: &str) -> Result<Vec<StoredRoomMember>> {
     let conn = db.lock().unwrap();
     let mut stmt = conn.prepare(
-        "SELECT room_id, peer_id, fingerprint, last_seen, verified, ed25519_pubkey, role FROM room_members WHERE room_id = ?1",
+        "SELECT room_id, peer_id, fingerprint, last_seen, verified, ed25519_pubkey, role, mlkem_pubkey FROM room_members WHERE room_id = ?1",
     )?;
     let rows = stmt.query_map(params![room_id], |row| {
         Ok(StoredRoomMember {
@@ -365,6 +390,7 @@ pub fn list_room_members(db: &Db, room_id: &str) -> Result<Vec<StoredRoomMember>
             verified: row.get::<_, i64>(4).unwrap_or(0) != 0,
             ed25519_pubkey: row.get(5).ok().flatten(),
             role: row.get(6).unwrap_or_else(|_| "member".to_string()),
+            mlkem_pubkey: row.get(7).ok().flatten(),
         })
     })?;
     Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -538,6 +564,27 @@ pub fn save_megolm_session(db: &Db, session: &StoredMegolmSession) -> Result<()>
             session.is_outbound as i64,
             session.created_at,
         ],
+    )?;
+    Ok(())
+}
+
+/// huddle 1.3.1: delete our persisted **outbound** Megolm session row(s) for a
+/// room. Used by `RoomCrypto::rotate_outbound` when a DM is upgraded
+/// classical→hybrid: the old outbound session key was shared wrapped under the
+/// quantum-breakable classical key, so it must be retired. Deleting the row
+/// (rather than leaving it) also prevents `RoomCrypto::load` from
+/// nondeterministically reloading the retired session after a restart, since
+/// the new session has a different `session_id` (the PK includes it).
+pub fn delete_outbound_megolm_sessions(
+    db: &Db,
+    room_id: &str,
+    our_fingerprint: &str,
+) -> Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "DELETE FROM room_megolm_sessions
+         WHERE room_id = ?1 AND sender_fingerprint = ?2 AND is_outbound = 1",
+        params![room_id, our_fingerprint],
     )?;
     Ok(())
 }
@@ -1537,6 +1584,7 @@ mod tests {
                 verified: false,
                 ed25519_pubkey: None,
                 role: "member".into(),
+                mlkem_pubkey: None,
             },
         )
         .unwrap();
@@ -1544,6 +1592,88 @@ mod tests {
         assert_eq!(members.len(), 1);
         assert_eq!(members[0].fingerprint, "fp-x");
         assert!(!members[0].verified);
+    }
+
+    #[test]
+    fn mlkem_pin_persists_and_survives_a_null_reannounce() {
+        // huddle 1.3.1: the post-quantum capability pin. Once we store a peer's
+        // ML-KEM key, `lookup_peer_mlkem_pubkey` finds it, and a later announce
+        // that omits the field (e.g. a relay replaying an old classical announce)
+        // must NOT erase it (COALESCE-preserve, exactly like ed25519_pubkey).
+        let db = open_db_in_memory().unwrap();
+        let room = make_room("r");
+        insert_room(&db, &room).unwrap();
+        assert!(lookup_peer_mlkem_pubkey(&db, "fp-pq").unwrap().is_none());
+
+        upsert_room_member(
+            &db,
+            &StoredRoomMember {
+                room_id: room.id.clone(),
+                peer_id: String::new(),
+                fingerprint: "fp-pq".into(),
+                last_seen: Some(1),
+                verified: false,
+                ed25519_pubkey: Some("ed".into()),
+                role: "member".into(),
+                mlkem_pubkey: Some("EK-BASE64".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            lookup_peer_mlkem_pubkey(&db, "fp-pq").unwrap().as_deref(),
+            Some("EK-BASE64")
+        );
+
+        // Replay of a classical (no-ek) announce must not clear the pin.
+        upsert_room_member(
+            &db,
+            &StoredRoomMember {
+                room_id: room.id.clone(),
+                peer_id: String::new(),
+                fingerprint: "fp-pq".into(),
+                last_seen: Some(2),
+                verified: false,
+                ed25519_pubkey: Some("ed".into()),
+                role: "member".into(),
+                mlkem_pubkey: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            lookup_peer_mlkem_pubkey(&db, "fp-pq").unwrap().as_deref(),
+            Some("EK-BASE64"),
+            "a later announce without the ML-KEM field must not erase the PQ pin"
+        );
+    }
+
+    #[test]
+    fn delete_outbound_megolm_removes_only_outbound() {
+        // huddle 1.3.1: rotate_outbound deletes our outbound row(s) but leaves
+        // every inbound session intact.
+        let db = open_db_in_memory().unwrap();
+        let room = make_room("r");
+        insert_room(&db, &room).unwrap();
+        let save = |fp: &str, sid: &str, outbound: bool| {
+            save_megolm_session(
+                &db,
+                &StoredMegolmSession {
+                    room_id: room.id.clone(),
+                    sender_fingerprint: fp.into(),
+                    session_id: sid.into(),
+                    session_data: b"x".to_vec(),
+                    is_outbound: outbound,
+                    created_at: 1,
+                },
+            )
+            .unwrap();
+        };
+        save("me", "out-1", true);
+        save("peer", "in-1", false);
+        delete_outbound_megolm_sessions(&db, &room.id, "me").unwrap();
+        let rows = load_megolm_sessions_for_room(&db, &room.id).unwrap();
+        assert_eq!(rows.len(), 1, "only the inbound row should remain");
+        assert!(!rows[0].is_outbound);
+        assert_eq!(rows[0].session_id, "in-1");
     }
 
     #[test]
@@ -1561,6 +1691,7 @@ mod tests {
                 verified: false,
                 ed25519_pubkey: None,
                 role: "member".into(),
+                mlkem_pubkey: None,
             },
         )
         .unwrap();

@@ -206,7 +206,7 @@ per-OS app directory:
 
 ```
 +----------------------------------------------------------------------+
-| huddle 1.3.0  ·  745e-fe8a-…  ·  relay ●               12:34 UTC     |
+| huddle 1.3.1  ·  745e-fe8a-…  ·  relay ●               12:34 UTC     |
 +------------------------+---------------------------------------------+
 | ▾ Profile              | # general                                   |
 |   alice  HD-AAAA-…  ●  |   4 members · encrypted                     |
@@ -556,10 +556,17 @@ key with ChaCha20-Poly1305 under an Argon2id key derived from
 `(passphrase, salt)` and broadcast that for every existing member to
 pick up. For group rooms entered via code, ECDH between owner and
 joiner gives a wrap key that delivers only the owner's session — the
-joiner's own outbound goes unwrapped. For DMs (huddle 0.7.1+), the
-wrap key comes from an Ed25519→X25519 ECDH between the two parties'
-identity keys, expanded with HKDF-SHA256 bound to the canonical room
-ID — both peers independently derive the same 32-byte wrap key.
+joiner's own outbound goes unwrapped. For DMs (huddle 0.7.1+), the wrap
+key is derived from the two parties' long-term identity keys, expanded
+with HKDF-SHA256 bound to the canonical room ID — both peers
+independently derive the same 32-byte wrap key. As of **huddle 1.3** this
+DM agreement is **hybrid post-quantum**: a classical Ed25519→X25519 ECDH
+secret is combined (via HKDF) with an ML-KEM-768 (FIPS 203) secret, so
+the wrap key holds as long as *either* primitive does; a pre-1.3 peer
+that publishes no ML-KEM key falls back to classical X25519. huddle 1.3.1
+pins a peer's post-quantum capability once seen, so the hybrid path can't
+be replayed back down to classical. See `SECURITY.md` for the full
+construction and threat model.
 
 **App-level signing** — every protocol message whose authenticity
 matters (`OwnerGrant`, `BanMember`, `RotateRoomKey`, SAS handshake,
@@ -640,6 +647,32 @@ native dialog for a path-entry box.
   two parties (Megolm message keys still ratchet, but the wrap key
   doesn't). Per-DM ephemeral ratchets (Double Ratchet-style) are a
   candidate follow-up.
+
+## What's new in 1.3.1 — post-quantum downgrade hardening + DM handshake liveness
+
+- **PQ-capability pinning closes a downgrade hole.** 1.3.0 stopped a relay from
+  *stripping* the ML-KEM fields (they're signed), but a relay could still
+  *replay* a peer's captured pre-1.3 (classical-only) announce to push the DM
+  back onto the quantum-breakable classical key — reopening the very
+  harvest-now-decrypt-later gap 1.3 closes. 1.3.1 **pins** a peer's
+  post-quantum capability the first time it's seen (persisted across restarts)
+  and then **refuses the classical fallback** for that peer, so a replayed
+  classical announce is ignored.
+- **Self-healing classical→hybrid upgrade.** If a DM ever ends up keyed
+  classical (rollout timing, or a replay that won an initial race), it's
+  upgraded to hybrid the moment the partner's capability is observed — no
+  restart needed — and the upgrade **rotates the outbound Megolm session** so
+  every message sent *after* the upgrade uses a key never exposed classically.
+  (Rotation is forward-only: anything already sent during the brief classical
+  window stays exposed — it bounds the window, it can't rewrite the past.)
+  Upgrades are one-way; a hybrid DM is never downgraded.
+- **Sturdier hybrid handshake.** The responder now explicitly asks for the
+  KEM ciphertext if it's missing, and a bounded background nudge re-prompts a
+  stalled handshake — so a single lost announce no longer leaves a DM wedged
+  until restart.
+- No wire-format change; fully compatible with 1.3.0 and pre-1.3 peers. See
+  `SECURITY.md` for the updated threat model (including the documented
+  first-contact residual).
 
 ## What's new in 1.3.0 — post-quantum hybrid DM encryption (X25519 + ML-KEM-768)
 

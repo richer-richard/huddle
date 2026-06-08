@@ -1,6 +1,6 @@
 # Security
 
-This document describes huddle's security model as of **1.3.0**: what is
+This document describes huddle's security model as of **1.3.1**: what is
 protected, how, and — just as importantly — what is *not*. Read the
 "Known limitations / by-design tradeoffs" section before trusting huddle
 with anything that matters.
@@ -147,8 +147,12 @@ own careful review.
   valid first-contact requests and first key exchanges. The Ed25519 signature
   still proves the sender's identity, and re-applying these messages is
   idempotent (re-adding a known member / re-showing a pending request is a
-  no-op), so dropping the window for them does not enable a meaningful replay.
-  Every other signed type keeps the strict window.
+  no-op). Every other signed type keeps the strict window. The one replay that
+  is **not** a no-op is a captured pre-1.3 (classical-only) `MemberAnnounce`
+  replayed to force a post-quantum downgrade — see "1.3 changes → Downgrade
+  resistance" below, where the PQ-capability pin neutralizes it for any peer
+  whose ML-KEM key has ever been observed (with a documented first-contact
+  residual).
 - **Connect codes carry no authority (1.2.1).** A connect code is a short
   (40-bit, 5-minute) handle the relay maps to an identity *only* so a peer can
   look up your fingerprint and send you a contact request — which you still
@@ -179,8 +183,10 @@ own careful review.
   was classical, and that is the gap this closes.
 - **Deterministic keypair, zero migration.** Each identity's ML-KEM keypair is
   derived from its existing Ed25519 seed via a domain-separated HKDF
-  (`from_seed`), so every pre-1.3 identity gains a post-quantum key with no new
-  on-disk material and no migration. The public encapsulation key is published
+  (`PqKeypair::from_identity_seed`, which expands the seed and then hands the
+  64-byte result to ml-kem's `DecapsulationKey::from_seed`), so every pre-1.3
+  identity gains a post-quantum key with no new on-disk material and no
+  migration. The public encapsulation key is published
   in `MemberAnnounce`; peers cannot compute it from the Ed25519 *public* key
   alone, so it must be exchanged (it does not weaken the identity).
 - **Deterministic encapsulation, no per-DM state.** The lower-fingerprint peer
@@ -192,18 +198,41 @@ own careful review.
   post-quantum guarantee: `m` is unknown to anyone lacking the initiator's seed,
   so a quantum attacker who later recovers the X25519 secret still cannot
   reconstruct the ML-KEM secret (that needs `m` or the responder's private key).
-- **Downgrade resistance.** The ML-KEM public key and ciphertext travel *inside*
-  the Ed25519-**signed** `MemberAnnounce` envelope, so a malicious relay cannot
-  strip them to force a classical downgrade without invalidating the signature.
-  A DM uses the hybrid key iff the partner published an ML-KEM key; both peers
-  publish theirs, so the two sides always agree (both hybrid, or — against a
-  pre-1.3 peer — both classical). The decision is locked in on first derivation,
-  never silently flipped mid-conversation. The one residual is that capability
-  is learned at first contact rather than pinned out-of-band: a *malicious
-  endpoint* (the peer you are actually talking to) could withhold its own ML-KEM
-  key to keep the DM classical — but that only weakens that peer's own traffic
-  and is not something an external attacker or the relay can do. Pinning a
-  peer's PQ-capability on first sight (TOFU) is a possible future hardening.
+- **Downgrade resistance (hardened in 1.3.1).** The ML-KEM public key and
+  ciphertext travel *inside* the Ed25519-**signed** `MemberAnnounce` envelope, so
+  a malicious relay cannot *strip* them to force a classical downgrade without
+  invalidating the signature. But a captured pre-1.3 (classical-only) announce is
+  itself validly signed and — like all `MemberAnnounce`es — exempt from the
+  replay window, so a relay could *replay* it to push a peer onto the classical
+  path. 1.3.1 closes that with **PQ-capability pinning**: the first time we see a
+  peer's ML-KEM key in a signed announce we persist it (`room_members.mlkem_pubkey`),
+  and from then on we **refuse the classical fallback** for that peer — a replayed
+  classical announce is ignored. The pin survives restarts (the in-memory wrap key
+  does not), and a DM that was momentarily keyed classical (rollout timing, or a
+  replay that won an initial race) is **upgraded** to hybrid the moment any
+  capability is observed; the upgrade also **rotates our outbound Megolm session**,
+  retiring the session key that had been shared wrapped under the classical key.
+  Rotation is **forward-only**: every message sent *after* the upgrade uses a key
+  never exposed classically, but any messages already sent during the transient
+  classical window were encrypted under the retired session and **remain
+  HNDL-exposed** — rotation cannot retroactively protect them (it bounds the
+  exposure to that window, it does not erase it). The decision is one-way:
+  classical→hybrid only, never the reverse.
+  - **Residual (documented).** On a peer we have *never* pinned — true first
+    contact, or the one-time 1.3.0→1.3.1 window before they re-announce — a relay
+    that both replays a captured classical announce **and** suppresses every
+    genuine hybrid announce can still force an initial classical lock. The only
+    bound on this state is that the upgrade+rotate fires the instant any genuine
+    hybrid announce gets through (a peer already keyed classical against an
+    un-pinned partner can still decrypt that partner's classical traffic, so the
+    decrypt-miss key-request heal does not probe it; capability is only ever
+    learned from a `MemberAnnounce` that carries the ML-KEM key). It is not
+    eliminable without an out-of-band capability anchor — binding PQ capability
+    into SAS / the verified-peers store is the planned real fix.
+  - A *malicious endpoint* (the peer you are actually talking to) can still
+    withhold its own ML-KEM key to keep the DM classical, but that only weakens
+    that peer's own traffic. A deliberate same-identity 1.3→pre-1.3 binary
+    downgrade is refused (fail-closed) rather than silently accepted.
 - **Not changed (and why):** identity and message authenticity still use
   classical **Ed25519** signatures, and Megolm's own per-message signing is
   unchanged. Forging a signature requires a quantum computer operating *at the

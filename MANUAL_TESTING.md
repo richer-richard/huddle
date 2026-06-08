@@ -20,7 +20,7 @@ third machine.
 - [ ] **First time only:** an onboarding card appears — press Enter
       to advance through the pages, then dismiss the last one
 - [ ] The Welcome pane appears with the sidebar on the left
-      (`huddle 1.3.0` banner up top)
+      (`huddle 1.3.1` banner up top)
 - [ ] In the sidebar's Profile section, your branded `HD-XXXX-XXXX-…`
       ID is visible. In the default (relay-only) mode the relay dot
       `●` shows next to your name once the onion link is up. With
@@ -507,6 +507,28 @@ move `~/Library/Application Support/huddle` (macOS) / `~/.local/share/huddle`
       malformed announce or a key-agreement failure.
 - [ ] **Group rooms unchanged.** Create/join an encrypted *group* room and send
       messages — group behaviour and wire format are unchanged by 1.3.
+
+## 31. huddle 1.3.1 — post-quantum downgrade hardening + handshake liveness
+
+- [ ] **Pin survives restart (no downgrade).** With A and B both on 1.3.1, run a
+      hybrid DM, then quit and relaunch both. Reopen the DM and send a message —
+      it still works, derived hybrid (the ML-KEM pin persisted in the DB, so the
+      DM does not silently fall back to classical).
+- [ ] **Rollout upgrade heals without restart.** Start a DM with one side on
+      ≤1.3.0 (or pre-1.3) so it keys classical; then upgrade that side to 1.3.1
+      while the chat is open. Within ~15s the DM converges to hybrid and keeps
+      working — no manual restart. (With `RUST_LOG=huddle=info` the upgrading
+      side logs `DM upgraded classical→hybrid (post-quantum)`.)
+- [ ] **Stalled handshake self-heals.** On a flaky link, a freshly-opened hybrid
+      DM still establishes within a couple of announce intervals (the responder
+      asks for the KEM ciphertext and a bounded retry re-prompts) rather than
+      hanging until a restart.
+- [ ] **Pre-1.3 peer still works (not bricked).** A 1.3.1 ↔ pre-1.3 DM still
+      completes over the classical fallback (a peer that never advertises ML-KEM
+      is treated as genuinely non-PQ).
+- [ ] **Logs (optional).** `RUST_LOG=huddle=debug` shows no `DM hybrid … failed`
+      warnings for a healthy hybrid DM; an unexpected `outbound rotate failed`
+      would point at a storage problem during an upgrade.
 
 ## Troubleshooting
 

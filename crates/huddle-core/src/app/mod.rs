@@ -170,7 +170,100 @@ struct ActiveRoom {
     /// in memory only — it is deterministic and re-derived after a restart
     /// once the partner re-announces their ML-KEM key.
     dm_kem_ciphertext: Option<String>,
+    /// huddle 1.3.1: `true` once this Direct room's wrap key is the **hybrid**
+    /// (X25519 + ML-KEM-768) key. Gates the one-way classical→hybrid upgrade in
+    /// `ensure_dm_key`: a classical-locked DM is upgraded to hybrid the moment
+    /// the partner's post-quantum capability is observed, but a hybrid key is
+    /// never downgraded. In-memory only; re-established from the persisted
+    /// `room_members.mlkem_pubkey` pin after a restart. `false` for groups and
+    /// classical DMs.
+    dm_is_hybrid: bool,
+    /// huddle 1.3.1: bounded retry counter for the ticker-driven
+    /// `SessionKeyRequest` nudge that heals a DM whose hybrid handshake stalled
+    /// (e.g. the initiator's single ciphertext-bearing announce was lost). Capped
+    /// at `DM_KEY_RETRY_MAX` so we never spam an unreachable partner's mailbox;
+    /// reset to 0 once the room reaches its desired keyed state.
+    dm_key_retry: u8,
 }
+
+/// huddle 1.3.1: outcome of `ensure_dm_key` — tells the caller how to react.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DmKeyOutcome {
+    /// We newly set (or upgraded to) the DM wrap key — re-broadcast our
+    /// `MemberAnnounce` so the partner gets our wrapped session key (and, when
+    /// we are the initiator, the KEM ciphertext).
+    ReBroadcast,
+    /// We are the responder, the partner is PQ-capable, but we don't yet have
+    /// the KEM ciphertext — ask the initiator (via `SessionKeyRequest`) to
+    /// re-announce it so we can decapsulate.
+    RequestCiphertext,
+    /// Nothing to do (already settled, can't derive yet, or not applicable).
+    Noop,
+}
+
+/// huddle 1.3.1: which derivation `ensure_dm_key` should perform. Factored out
+/// as a **pure** function so the security-critical decision (refuse classical
+/// for a PQ-pinned peer; one-way classical→hybrid upgrade; never downgrade) is
+/// directly unit-testable without standing up an `AppHandle`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DmKeyAction {
+    /// Derive a classical X25519 wrap key (partner has never shown PQ capability).
+    Classical,
+    /// We are the initiator: encapsulate a fresh ML-KEM secret → hybrid key + ct.
+    HybridInitiator,
+    /// We are the responder and hold the initiator's ciphertext: decapsulate → hybrid.
+    HybridResponder,
+    /// Responder, PQ-capable partner, but no ciphertext yet — ask for it.
+    RequestCiphertext,
+    /// Nothing to derive (settled hybrid, or steady classical with a non-PQ peer).
+    Noop,
+}
+
+/// huddle 1.3.1: the pure DM-key decision. `partner_pq_capable` folds together
+/// "this announce carried an ML-KEM key" and "we have a persisted pin", so this
+/// is the single place the downgrade/upgrade policy lives:
+///   * a settled hybrid DM is never touched (no downgrade);
+///   * a PQ-capable partner always yields a hybrid action (classical is refused),
+///     even if the DM is currently keyed classical (→ upgrade);
+///   * a non-PQ partner yields classical only on first keying; once keyed it's a no-op.
+fn plan_dm_key(
+    already_keyed: bool,
+    already_hybrid: bool,
+    partner_pq_capable: bool,
+    we_are_initiator: bool,
+    have_ciphertext: bool,
+) -> DmKeyAction {
+    if already_keyed && already_hybrid {
+        return DmKeyAction::Noop; // settled hybrid — final
+    }
+    if partner_pq_capable {
+        // Hybrid only — never fall back to / stay on classical for a PQ peer.
+        if we_are_initiator {
+            DmKeyAction::HybridInitiator
+        } else if have_ciphertext {
+            DmKeyAction::HybridResponder
+        } else {
+            DmKeyAction::RequestCiphertext
+        }
+    } else if already_keyed {
+        DmKeyAction::Noop // steady classical with a genuine non-PQ peer
+    } else {
+        DmKeyAction::Classical
+    }
+}
+
+/// huddle 1.3.1: hard cap on ticker-driven `SessionKeyRequest` nudges for a
+/// stalled DM handshake (~`DM_KEY_RETRY_MAX * ANNOUNCE_INTERVAL_SECS`). Bounds
+/// mailbox impact for an offline partner; the partner's own re-announce on
+/// reconnect remains the long-term healing path.
+const DM_KEY_RETRY_MAX: u8 = 10;
+
+/// huddle 1.3.1: minimum seconds between decrypt-miss `SessionKeyRequest`
+/// heals per room — debounces a burst of undecryptable messages into one
+/// request. The request makes peers re-broadcast their `MemberAnnounce`
+/// (re-delivering the session key), so this is self-terminating: once we
+/// receive the missing key, decrypts succeed and no more requests fire.
+const KEY_REQUEST_COOLDOWN_SECS: i64 = 15;
 
 impl Drop for ActiveRoom {
     /// huddle 1.3: wipe the DM/group **wrap key** (the classical or hybrid
@@ -300,6 +393,10 @@ pub struct AppHandle {
     /// arrives carrying `host_addrs` — we re-dial the same announcer
     /// at most once per `HOST_ADDR_DIAL_BACKOFF_SECS`.
     host_addr_dial_attempts: Arc<Mutex<HashMap<String, i64>>>,
+    /// huddle 1.3.1: per-room cooldown (room_id → last unix) for the
+    /// decrypt-miss `SessionKeyRequest` heal — a burst of undecryptable
+    /// messages triggers at most one key request per `KEY_REQUEST_COOLDOWN_SECS`.
+    key_request_cooldown: Arc<Mutex<HashMap<String, i64>>>,
     /// huddle 0.5: per-peer last-broadcast timestamp (ms) for our own
     /// `ProfileUpdate`. The `PeerIdentified` handler re-broadcasts our
     /// current username to a newly-identified peer so they learn it
@@ -638,6 +735,7 @@ impl AppHandle {
             nat_reachable_addrs: Arc::new(Mutex::new(HashSet::new())),
             relay_circuit_addrs: Arc::new(Mutex::new(HashSet::new())),
             host_addr_dial_attempts: Arc::new(Mutex::new(HashMap::new())),
+            key_request_cooldown: Arc::new(Mutex::new(HashMap::new())),
             last_profile_broadcast_at_ms: Arc::new(Mutex::new(HashMap::new())),
             pending_auto_dm_addrs: Arc::new(Mutex::new(HashSet::new())),
             app_event_tx,
@@ -1008,6 +1106,7 @@ impl AppHandle {
                 verified: true, // we trust ourselves
                 ed25519_pubkey: Some(B64.encode(self.identity.public_bytes())),
                 role: "owner".into(),
+                mlkem_pubkey: None, // our own row; we pin partners, not ourselves
             },
         )?;
 
@@ -1022,6 +1121,8 @@ impl AppHandle {
                 read_only: false,
                 issued_codes: Vec::new(),
                 dm_kem_ciphertext: None,
+                dm_is_hybrid: false,
+                dm_key_retry: 0,
             },
         );
 
@@ -1137,6 +1238,7 @@ impl AppHandle {
                 verified: true,
                 ed25519_pubkey: Some(B64.encode(self.identity.public_bytes())),
                 role: "member".into(),
+                mlkem_pubkey: None, // our own row
             },
         )?;
 
@@ -1171,6 +1273,8 @@ impl AppHandle {
                 read_only: false,
                 issued_codes: Vec::new(),
                 dm_kem_ciphertext: None,
+                dm_is_hybrid: false,
+                dm_key_retry: 0,
             },
         );
 
@@ -1192,26 +1296,53 @@ impl AppHandle {
         Ok(room_id)
     }
 
-    /// huddle 1.3: (re)derive the DM wrap key for a Direct room from a
-    /// partner `MemberAnnounce`, choosing the **hybrid** (X25519 + ML-KEM-768)
-    /// path when the partner published an ML-KEM key, else the classical
-    /// X25519 path. Returns `true` if a wrap key was newly set — the caller
-    /// then re-broadcasts our announce so it carries our (now wrappable)
-    /// session key and, when we are the initiator, the KEM ciphertext.
+    /// huddle 1.3 / hardened in 1.3.1: (re)derive the DM wrap key for a Direct
+    /// room from a partner `MemberAnnounce`, choosing the **hybrid**
+    /// (X25519 + ML-KEM-768) path when the partner is post-quantum capable,
+    /// else the classical X25519 path.
     ///
-    /// The key is **locked in** on first derivation; we never silently switch
-    /// between classical and hybrid mid-DM (that would desync the wrap key
-    /// between the two peers). Capability is detected symmetrically — a DM goes
-    /// hybrid iff the partner's announce carried an ML-KEM key, and both peers
-    /// always publish theirs, so the two sides reach the same decision. The
-    /// lower-fingerprint peer is the **initiator** (encapsulates a fresh KEM
+    /// ## Post-quantum capability pinning (1.3.1)
+    /// A peer is "PQ-capable" if their ML-KEM key is present **on this announce
+    /// or persisted** (`room_members.mlkem_pubkey`, set the first time we ever
+    /// saw it in a signed announce). Once pinned, we **refuse the classical
+    /// fallback** for that peer — so an untrusted relay cannot replay a captured
+    /// pre-1.3 (classical-only, validly-signed) announce to force a
+    /// quantum-unsafe downgrade, and the pin survives restarts even though the
+    /// in-memory wrap key does not.
+    ///
+    /// ## Lock-in, one-way upgrade, never downgrade
+    /// The first key derived is locked in. We **never** downgrade hybrid →
+    /// classical. We **do** perform a one-way classical → hybrid **upgrade**:
+    /// if a DM was locked classical (partner looked pre-1.3, or a replayed
+    /// classical announce won the race) and we later observe the partner's PQ
+    /// capability, we re-derive the hybrid key and **rotate our outbound Megolm
+    /// session** (`rotate_outbound`) so the session key previously shared
+    /// wrapped under the classical key is retired — closing the HNDL window the
+    /// classical phase opened. This also heals a rollout split-brain without a
+    /// restart.
+    ///
+    /// The lower-fingerprint peer is the **initiator** (encapsulates a fresh KEM
     /// secret and ships the ciphertext); the higher-fingerprint peer is the
-    /// **responder** (decapsulates it) and waits for that ciphertext rather
-    /// than falling back to a classical key it would later have to abandon.
+    /// **responder** (decapsulates it) and asks for that ciphertext
+    /// (`RequestCiphertext`) rather than falling back to a classical key.
     ///
-    /// Because the ML-KEM key + ciphertext ride *inside* the signed
-    /// `MemberAnnounce` envelope, a malicious relay cannot strip them to force
-    /// a classical downgrade without invalidating the signature.
+    /// ## Residual (documented, not fully closable without a wire/out-of-band change)
+    /// On a peer we have **never** pinned (true first contact, or the one-time
+    /// 1.3.0→1.3.1 window before the partner re-announces), a relay that both
+    /// replays a captured pre-1.3 announce **and** suppresses every genuine
+    /// hybrid announce can still force an initial classical lock. The only bound
+    /// on it is the upgrade+rotate above (the moment any genuine hybrid announce
+    /// gets through); the bounded `SessionKeyRequest` retry does NOT cover this
+    /// state (a classical-keyed room with an un-pinned partner is not nudged, and
+    /// classical traffic decrypts fine so the decrypt-miss heal never fires). A
+    /// real fix needs an out-of-band capability anchor (e.g. binding PQ
+    /// capability into SAS).
+    ///
+    /// ## Concurrency
+    /// Called from exactly one site on the single-threaded network event loop,
+    /// so the read-lock → out-of-lock DB read/derive → commit-under-lock
+    /// sequence cannot race another `ensure_dm_key`; the commit re-checks the
+    /// live state and is idempotent regardless.
     fn ensure_dm_key(
         &self,
         room_id: &str,
@@ -1219,16 +1350,15 @@ impl AppHandle {
         partner_ed_b64: Option<&str>,
         partner_mlkem_b64: Option<&str>,
         ciphertext_b64: Option<&str>,
-    ) -> bool {
-        // Already keyed (or room gone)? Lock the first key in; don't re-derive.
-        {
+    ) -> DmKeyOutcome {
+        // Phase 1: snapshot current key state.
+        let (already_keyed, already_hybrid) = {
             let rooms = self.active_rooms.lock().unwrap();
             match rooms.get(room_id) {
-                Some(r) if r.passphrase_key.is_some() => return false,
-                Some(_) => {}
-                None => return false,
+                Some(r) => (r.passphrase_key.is_some(), r.dm_is_hybrid),
+                None => return DmKeyOutcome::Noop,
             }
-        }
+        };
         // The partner's Ed25519 pubkey is required for either path.
         let partner_ed = match partner_ed_b64 {
             Some(b64) => match B64.decode(b64).ok() {
@@ -1237,50 +1367,73 @@ impl AppHandle {
                     a.copy_from_slice(&b);
                     a
                 }
-                _ => return false,
+                _ => return DmKeyOutcome::Noop,
             },
-            None => return false,
+            None => return DmKeyOutcome::Noop,
         };
+
+        // PQ capability is sticky: this announce's ML-KEM key OR a previously
+        // pinned one (persisted in room_members). Prefer the (freshly signed)
+        // announce value; fall back to the durable pin.
+        let stored_ek = repo::lookup_peer_mlkem_pubkey(&self.db, partner_fp)
+            .ok()
+            .flatten();
+        let ek_b64: Option<String> = partner_mlkem_b64.map(|s| s.to_string()).or(stored_ek);
+        let partner_pq_capable = ek_b64.is_some();
         let we_are_initiator = self.identity.fingerprint() < partner_fp;
+
+        // The whole downgrade/upgrade policy lives in this pure decision.
+        let action = plan_dm_key(
+            already_keyed,
+            already_hybrid,
+            partner_pq_capable,
+            we_are_initiator,
+            ciphertext_b64.is_some(),
+        );
+        match action {
+            DmKeyAction::Noop => return DmKeyOutcome::Noop,
+            DmKeyAction::RequestCiphertext => return DmKeyOutcome::RequestCiphertext,
+            DmKeyAction::Classical
+            | DmKeyAction::HybridInitiator
+            | DmKeyAction::HybridResponder => {}
+        }
+
         // huddle 1.1.4: wipe our copy of the identity secret on drop.
         let our_seed = zeroize::Zeroizing::new(self.identity.secret_bytes());
 
-        // (wrap_key, optional ciphertext to publish). `None` => can't derive yet.
-        let derived: Option<([u8; KEY_LEN], Option<String>)> =
-            if let Some(ek_b64) = partner_mlkem_b64 {
-                // Partner is PQ-capable → hybrid ONLY; never downgrade to classical.
-                let ek = match B64.decode(ek_b64).ok() {
+        // Derive (no lock held), per the chosen action. `is_hybrid` records
+        // which key we built so the commit can enforce never-downgrade.
+        let (key, ct_b64, is_hybrid): ([u8; KEY_LEN], Option<String>, bool) = match action {
+            DmKeyAction::HybridInitiator | DmKeyAction::HybridResponder => {
+                // PQ-capable partner → hybrid ONLY; classical is refused.
+                let ek = match ek_b64.as_deref().and_then(|s| B64.decode(s).ok()) {
                     Some(b) if b.len() == crate::crypto::pqc::MLKEM_EK_LEN => b,
                     _ => {
                         warn!(%partner_fp, "DM hybrid: malformed ML-KEM pubkey");
-                        return false;
+                        return DmKeyOutcome::Noop;
                     }
                 };
-                if we_are_initiator {
+                if let DmKeyAction::HybridInitiator = action {
                     match crate::crypto::dm::derive_dm_key_hybrid_initiator(
                         &our_seed,
                         &partner_ed,
                         &ek,
                         room_id,
                     ) {
-                        Ok((key, ct)) => Some((key, Some(B64.encode(ct)))),
+                        Ok((key, ct)) => (key, Some(B64.encode(ct)), true),
                         Err(e) => {
                             warn!(%e, %partner_fp, "DM hybrid initiator derivation failed");
-                            return false;
+                            return DmKeyOutcome::Noop;
                         }
                     }
                 } else {
-                    // Responder: we need the initiator's ciphertext to decapsulate.
-                    let ct = match ciphertext_b64 {
-                        Some(c) => match B64.decode(c).ok() {
-                            Some(b) => b,
-                            None => {
-                                warn!(%partner_fp, "DM hybrid: malformed ML-KEM ciphertext");
-                                return false;
-                            }
-                        },
-                        // No ciphertext yet — wait for the initiator's next announce.
-                        None => return false,
+                    // Responder: decode the initiator's ciphertext and decapsulate.
+                    let ct = match ciphertext_b64.and_then(|c| B64.decode(c).ok()) {
+                        Some(b) => b,
+                        None => {
+                            warn!(%partner_fp, "DM hybrid: malformed ML-KEM ciphertext");
+                            return DmKeyOutcome::Noop;
+                        }
                     };
                     match crate::crypto::dm::derive_dm_key_hybrid_responder(
                         &self.identity.pq_keypair(),
@@ -1289,39 +1442,59 @@ impl AppHandle {
                         &ct,
                         room_id,
                     ) {
-                        Ok(key) => Some((key, None)),
+                        Ok(key) => (key, None, true),
                         Err(e) => {
                             warn!(%e, %partner_fp, "DM hybrid responder derivation failed");
-                            return false;
+                            return DmKeyOutcome::Noop;
                         }
                     }
                 }
-            } else {
-                // Partner published no ML-KEM key (pre-1.3 peer) → classical X25519.
+            }
+            DmKeyAction::Classical => {
                 match crate::crypto::dm::derive_dm_key(&our_seed, &partner_ed, room_id) {
-                    Ok(key) => Some((key, None)),
+                    Ok(key) => (key, None, false),
                     Err(e) => {
                         warn!(%e, %partner_fp, "DM classical derivation failed");
-                        return false;
+                        return DmKeyOutcome::Noop;
                     }
                 }
-            };
-
-        let (key, ct_b64) = match derived {
-            Some(d) => d,
-            None => return false,
-        };
-        let mut rooms = self.active_rooms.lock().unwrap();
-        match rooms.get_mut(room_id) {
-            // Re-check under the lock: a concurrent announce may have keyed it.
-            Some(room) if room.passphrase_key.is_none() => {
-                room.passphrase_key = Some(key);
-                if ct_b64.is_some() {
-                    room.dm_kem_ciphertext = ct_b64;
-                }
-                true
             }
-            _ => false,
+            // Noop / RequestCiphertext already returned above.
+            DmKeyAction::Noop | DmKeyAction::RequestCiphertext => unreachable!(),
+        };
+
+        // Phase 2: commit under the lock, re-checking the LIVE state.
+        let mut rooms = self.active_rooms.lock().unwrap();
+        let room = match rooms.get_mut(room_id) {
+            Some(r) => r,
+            None => return DmKeyOutcome::Noop,
+        };
+        let live_keyed = room.passphrase_key.is_some();
+        let live_hybrid = room.dm_is_hybrid;
+        if live_keyed && live_hybrid {
+            return DmKeyOutcome::Noop; // raced to hybrid
+        }
+        let is_first = !live_keyed;
+        // Upgrade ONLY classical → hybrid; never the reverse.
+        let is_upgrade = live_keyed && is_hybrid && !live_hybrid;
+        if is_first || is_upgrade {
+            room.passphrase_key = Some(key);
+            room.dm_is_hybrid = is_hybrid;
+            if ct_b64.is_some() {
+                room.dm_kem_ciphertext = ct_b64;
+            }
+            if is_upgrade {
+                // Retire the classically-wrapped outbound session key (HNDL).
+                if let Some(c) = room.crypto.as_mut() {
+                    if let Err(e) = c.rotate_outbound() {
+                        warn!(%e, %room_id, "DM classical→hybrid upgrade: outbound rotate failed");
+                    }
+                }
+                info!(%room_id, %partner_fp, "DM upgraded classical→hybrid (post-quantum)");
+            }
+            DmKeyOutcome::ReBroadcast
+        } else {
+            DmKeyOutcome::Noop
         }
     }
 
@@ -1402,6 +1575,8 @@ impl AppHandle {
                 read_only: false,
                 issued_codes: Vec::new(),
                 dm_kem_ciphertext: None,
+                dm_is_hybrid: false,
+                dm_key_retry: 0,
             },
         );
 
@@ -1534,6 +1709,8 @@ impl AppHandle {
                 read_only: false,
                 issued_codes: Vec::new(),
                 dm_kem_ciphertext: None,
+                dm_is_hybrid: false,
+                dm_key_retry: 0,
             },
         );
         // No longer "restorable" now that we've rejoined.
@@ -1647,6 +1824,8 @@ impl AppHandle {
                     read_only: false,
                     issued_codes: Vec::new(),
                     dm_kem_ciphertext: None,
+                    dm_is_hybrid: false,
+                    dm_key_retry: 0,
                 },
             );
             self.network.subscribe_room(info.id.clone()).await;
@@ -2774,20 +2953,64 @@ impl AppHandle {
     fn spawn_announcement_ticker(&self) {
         let handle = self.clone();
         tokio::spawn(async move {
+            let our_fp = handle.identity.fingerprint().to_string();
             let mut interval =
                 tokio::time::interval(Duration::from_secs(ANNOUNCE_INTERVAL_SECS));
             interval.tick().await; // skip the immediate tick
             loop {
                 interval.tick().await;
-                let snapshot: Vec<(StoredRoom, u32)> = {
-                    let active = handle.active_rooms.lock().unwrap();
-                    active
+                // huddle 1.3.1: alongside the room re-announce, find Direct rooms
+                // whose hybrid handshake hasn't converged (no wrap key yet, or
+                // keyed classical while the partner is PQ-capable = upgrade
+                // pending) and, while they still have retry budget, emit a
+                // bounded `SessionKeyRequest` nudge. This heals a stalled
+                // handshake (e.g. the initiator's single ciphertext-bearing
+                // announce was lost) without a periodic full MemberAnnounce; the
+                // hard cap keeps an unreachable partner's mailbox from filling.
+                let (snapshot, dm_nudges): (Vec<(StoredRoom, u32)>, Vec<String>) = {
+                    let mut active = handle.active_rooms.lock().unwrap();
+                    let snap: Vec<(StoredRoom, u32)> = active
                         .values()
                         .map(|r| (r.info.clone(), r.members.len() as u32))
-                        .collect()
+                        .collect();
+                    let mut nudges = Vec::new();
+                    for room in active.values_mut() {
+                        if room.info.kind != RoomKind::Direct || !room.info.encrypted {
+                            continue;
+                        }
+                        let keyed = room.passphrase_key.is_some();
+                        let partner = room.members.iter().find(|m| m.as_str() != our_fp).cloned();
+                        let pq_capable = match &partner {
+                            Some(p) => repo::lookup_peer_mlkem_pubkey(&handle.db, p)
+                                .ok()
+                                .flatten()
+                                .is_some(),
+                            None => false,
+                        };
+                        // Converged = hybrid keyed, or classical keyed with a
+                        // genuinely non-PQ partner. Anything else needs a nudge.
+                        let needs_nudge = !keyed || (!room.dm_is_hybrid && pq_capable);
+                        if needs_nudge {
+                            if room.dm_key_retry < DM_KEY_RETRY_MAX {
+                                room.dm_key_retry = room.dm_key_retry.saturating_add(1);
+                                nudges.push(room.info.id.clone());
+                            }
+                        } else {
+                            room.dm_key_retry = 0;
+                        }
+                    }
+                    (snap, nudges)
                 };
                 for (info, member_count) in snapshot {
                     handle.announce_room_now(&info, member_count).await;
+                }
+                for rid in dm_nudges {
+                    let req = RoomMessage::SessionKeyRequest {
+                        requester_fingerprint: our_fp.clone(),
+                    };
+                    if let Ok(bytes) = encode_wire(&req) {
+                        handle.network.publish_room_message(rid, bytes).await;
+                    }
                 }
             }
         });
@@ -3528,6 +3751,13 @@ impl AppHandle {
                             // new fingerprint is a 'member' until an
                             // OwnerGrant lands.
                             role: "member".into(),
+                            // huddle 1.3.1: persist the partner's ML-KEM key
+                            // (Direct announces only) as the durable
+                            // post-quantum-capability pin. COALESCE-preserved,
+                            // so a later announce that omits it can't erase the
+                            // pin and a relay can't replay an old classical
+                            // announce to downgrade us. `None` for groups.
+                            mlkem_pubkey: sender_mlkem_pubkey.clone(),
                         },
                     );
                     if let Some(name) = display_name.as_deref() {
@@ -3541,13 +3771,14 @@ impl AppHandle {
                     room.info.encrypted && wrapped_session_key.is_some()
                 };
 
-                // huddle 1.3: for Direct rooms, derive the DM wrap key now —
-                // hybrid (X25519 + ML-KEM-768) when the partner published an
-                // ML-KEM key, else classical X25519. The partner's pubkey(s)
-                // and — when we are the responder — the KEM ciphertext arrive
-                // in *this* MemberAnnounce, so we compute the key before the
-                // unwrap path runs. `ensure_dm_key` is idempotent and locks the
-                // key in on first success.
+                // huddle 1.3 / 1.3.1: for Direct rooms, (re)derive the DM wrap
+                // key now — hybrid (X25519 + ML-KEM-768) when the partner is
+                // post-quantum capable (announce or persisted pin), else
+                // classical X25519. The partner's pubkey(s) and — when we are
+                // the responder — the KEM ciphertext arrive in *this*
+                // MemberAnnounce, so we compute the key before the unwrap path
+                // runs. `ensure_dm_key` is idempotent, pins PQ capability, and
+                // performs the one-way classical→hybrid upgrade.
                 let is_direct_room = matches!(
                     self.active_rooms
                         .lock()
@@ -3556,26 +3787,46 @@ impl AppHandle {
                         .map(|r| r.info.kind),
                     Some(RoomKind::Direct)
                 );
-                if is_direct_room
-                    && self.ensure_dm_key(
+                if is_direct_room {
+                    match self.ensure_dm_key(
                         room_id,
                         &sender_fingerprint,
                         sender_ed25519_pubkey.as_deref(),
                         sender_mlkem_pubkey.as_deref(),
                         mlkem_ciphertext.as_deref(),
-                    )
-                {
-                    // We just established the DM wrap key — re-broadcast our
-                    // MemberAnnounce so the partner gets our wrapped session key
-                    // (and, if we are the initiator, the KEM ciphertext).
-                    // Fire-and-forget; failures are logged.
-                    let app = self.clone();
-                    let rid = room_id.to_string();
-                    tokio::spawn(async move {
-                        if let Err(e) = app.broadcast_member_announce(&rid).await {
-                            warn!(%e, "re-broadcast DM announce after key derivation");
+                    ) {
+                        DmKeyOutcome::ReBroadcast => {
+                            // We just established (or upgraded) the DM wrap key —
+                            // re-broadcast our MemberAnnounce so the partner gets
+                            // our wrapped session key (and, if we are the
+                            // initiator, the KEM ciphertext). Fire-and-forget.
+                            let app = self.clone();
+                            let rid = room_id.to_string();
+                            tokio::spawn(async move {
+                                if let Err(e) = app.broadcast_member_announce(&rid).await {
+                                    warn!(%e, "re-broadcast DM announce after key derivation");
+                                }
+                            });
                         }
-                    });
+                        DmKeyOutcome::RequestCiphertext => {
+                            // We are the responder and lack the KEM ciphertext —
+                            // ask the initiator to re-announce it (its
+                            // SessionKeyRequest handler re-broadcasts a full
+                            // MemberAnnounce carrying the ciphertext).
+                            let app = self.clone();
+                            let rid = room_id.to_string();
+                            let our = our_fp.clone();
+                            tokio::spawn(async move {
+                                let req = RoomMessage::SessionKeyRequest {
+                                    requester_fingerprint: our,
+                                };
+                                if let Ok(bytes) = encode_wire(&req) {
+                                    app.network.publish_room_message(rid, bytes).await;
+                                }
+                            });
+                        }
+                        DmKeyOutcome::Noop => {}
+                    }
                 }
 
                 if need_inbound {
@@ -3683,6 +3934,44 @@ impl AppHandle {
                     }
                     Err(e) => {
                         debug!(%e, "decrypt failed (probably missing session key)");
+                        // huddle 1.3.1: a *missing inbound session* (as opposed to a
+                        // genuine decryption error) means the sender is encrypting
+                        // under a session key we never received — a late join, a key
+                        // rotation, or (new in 1.3.1) a classical→hybrid upgrade that
+                        // rotated the sender's outbound session and whose single
+                        // re-announce was lost. Ask for keys: the `SessionKeyRequest`
+                        // makes peers re-broadcast their `MemberAnnounce`, which
+                        // re-delivers the current session key. Debounced per room so a
+                        // burst of undecryptable messages sends at most one request,
+                        // and self-terminating (decrypts succeed once the key lands).
+                        if e.to_string()
+                            .contains(crate::crypto::megolm::MISSING_INBOUND_SESSION_ERR)
+                        {
+                            let now = now_unix();
+                            let due = {
+                                let mut cd = self.key_request_cooldown.lock().unwrap();
+                                let last = cd.get(room_id).copied().unwrap_or(0);
+                                if now - last >= KEY_REQUEST_COOLDOWN_SECS {
+                                    cd.insert(room_id.to_string(), now);
+                                    true
+                                } else {
+                                    false
+                                }
+                            };
+                            if due {
+                                let app = self.clone();
+                                let rid = room_id.to_string();
+                                let our = our_fp.clone();
+                                tokio::spawn(async move {
+                                    let req = RoomMessage::SessionKeyRequest {
+                                        requester_fingerprint: our,
+                                    };
+                                    if let Ok(bytes) = encode_wire(&req) {
+                                        app.network.publish_room_message(rid, bytes).await;
+                                    }
+                                });
+                            }
+                        }
                     }
                 }
             }
@@ -4693,6 +4982,7 @@ impl AppHandle {
                     verified,
                     ed25519_pubkey: None,
                     role: "member".into(),
+                    mlkem_pubkey: None,
                 },
             )?;
         }
@@ -5173,6 +5463,8 @@ impl AppHandle {
                 read_only: true,
                 issued_codes: Vec::new(),
                 dm_kem_ciphertext: None,
+                dm_is_hybrid: false,
+                dm_key_retry: 0,
             },
         );
         self.network.subscribe_room(room_id.to_string()).await;
@@ -5946,6 +6238,107 @@ mod attach_path_tests {
         assert_eq!(expand_tilde_with("~bob/f", home), PathBuf::from("~bob/f"));
         // No $HOME → no expansion.
         assert_eq!(expand_tilde_with("~/f", None), PathBuf::from("~/f"));
+    }
+}
+
+#[cfg(test)]
+mod dm_key_plan_tests {
+    //! huddle 1.3.1: the post-quantum downgrade/upgrade policy is concentrated
+    //! in the pure `plan_dm_key`. These tests pin the security-critical
+    //! invariants without needing an `AppHandle`.
+    use super::{plan_dm_key, DmKeyAction};
+
+    #[test]
+    fn settled_hybrid_is_never_touched() {
+        // Once hybrid, no input can produce a re-derivation/downgrade.
+        for &pq in &[true, false] {
+            for &init in &[true, false] {
+                for &ct in &[true, false] {
+                    assert_eq!(
+                        plan_dm_key(true, true, pq, init, ct),
+                        DmKeyAction::Noop,
+                        "settled hybrid must stay Noop (pq={pq}, init={init}, ct={ct})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pq_capable_partner_never_yields_classical() {
+        // The core anti-downgrade invariant: a PQ-capable partner (announce ek
+        // or persisted pin) must NEVER produce a classical derivation, in any
+        // key state — including when currently keyed classical (→ upgrade).
+        for &keyed in &[true, false] {
+            // already_hybrid=true is covered above; here the DM is at most classical.
+            for &init in &[true, false] {
+                for &ct in &[true, false] {
+                    let a = plan_dm_key(keyed, false, true, init, ct);
+                    assert_ne!(a, DmKeyAction::Classical, "PQ peer must not go classical");
+                    assert_ne!(a, DmKeyAction::Noop, "PQ peer must act (derive/upgrade/request)");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fresh_pq_handshake_roles() {
+        // Not keyed yet, partner PQ-capable.
+        assert_eq!(
+            plan_dm_key(false, false, true, true, false),
+            DmKeyAction::HybridInitiator,
+            "initiator encapsulates even without a ciphertext"
+        );
+        assert_eq!(
+            plan_dm_key(false, false, true, false, true),
+            DmKeyAction::HybridResponder,
+            "responder with the ciphertext decapsulates"
+        );
+        assert_eq!(
+            plan_dm_key(false, false, true, false, false),
+            DmKeyAction::RequestCiphertext,
+            "responder without the ciphertext asks for it"
+        );
+    }
+
+    #[test]
+    fn classical_locked_upgrades_when_partner_is_pq() {
+        // Split-brain / replay heal: a classical-locked DM upgrades to hybrid
+        // the moment the partner's PQ capability is observed.
+        assert_eq!(
+            plan_dm_key(true, false, true, true, false),
+            DmKeyAction::HybridInitiator,
+            "classical-locked initiator upgrades"
+        );
+        assert_eq!(
+            plan_dm_key(true, false, true, false, true),
+            DmKeyAction::HybridResponder,
+            "classical-locked responder upgrades once it has the ciphertext"
+        );
+        assert_eq!(
+            plan_dm_key(true, false, true, false, false),
+            DmKeyAction::RequestCiphertext,
+            "classical-locked responder asks for the ciphertext to upgrade"
+        );
+    }
+
+    #[test]
+    fn genuine_pre_1_3_peer_uses_classical_once_then_settles() {
+        // Non-PQ partner: classical on first keying, then steady (no churn).
+        assert_eq!(
+            plan_dm_key(false, false, false, true, false),
+            DmKeyAction::Classical,
+            "non-PQ partner, not keyed → classical"
+        );
+        assert_eq!(
+            plan_dm_key(false, false, false, false, false),
+            DmKeyAction::Classical
+        );
+        assert_eq!(
+            plan_dm_key(true, false, false, true, false),
+            DmKeyAction::Noop,
+            "non-PQ partner already classical-keyed → no-op (no rederivation)"
+        );
     }
 }
 

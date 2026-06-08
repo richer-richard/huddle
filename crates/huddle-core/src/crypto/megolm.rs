@@ -22,6 +22,12 @@ use crate::storage::repo::{self, StoredMegolmSession};
 
 use crate::storage::Db;
 
+/// huddle 1.3.1: marker substring in the "missing inbound session" decrypt
+/// error. The app layer matches on it (in the `Encrypted` handler) to trigger a
+/// `SessionKeyRequest` heal, so the two must stay in sync — this const is the
+/// single source of truth rather than a duplicated string literal.
+pub const MISSING_INBOUND_SESSION_ERR: &str = "no inbound megolm session";
+
 /// Per-room Megolm crypto: one outbound session (ours) + many inbound (others').
 pub struct RoomCrypto {
     room_id: String,
@@ -138,7 +144,7 @@ impl RoomCrypto {
         let key = (sender_fingerprint.to_string(), session_id.to_string());
         let session = self.inbound.get_mut(&key).ok_or_else(|| {
             HuddleError::Session(format!(
-                "no inbound megolm session for {sender_fingerprint} / {session_id}"
+                "{MISSING_INBOUND_SESSION_ERR} for {sender_fingerprint} / {session_id}"
             ))
         })?;
         let msg = MegolmMessage::from_bytes(ciphertext)
@@ -191,6 +197,28 @@ impl RoomCrypto {
 
         self.inbound
             .insert((sender_fingerprint.to_string(), session_id), session);
+        Ok(())
+    }
+
+    /// huddle 1.3.1: rotate ONLY our outbound session, preserving every
+    /// inbound session. Used when a Direct room's wrap key is upgraded
+    /// classical→hybrid: the previous outbound session key was shared wrapped
+    /// under the quantum-breakable classical key, so an attacker who harvested
+    /// that wrapped copy could (post-quantum) recover it and, because Megolm
+    /// forward-derives all later ratchet keys from it, decrypt the entire
+    /// session. Minting a fresh outbound session and retiring the old one
+    /// closes that window — future messages use a key only ever shared wrapped
+    /// under the hybrid PQ key.
+    ///
+    /// We DELETE the old outbound row before persisting the new one (the new
+    /// session has a different `session_id`, which is part of the megolm-table
+    /// PK, so a plain re-persist would leave a duplicate outbound row and
+    /// `load` could nondeterministically restore the retired session). Unlike
+    /// `new_for_room`, the in-memory `inbound` map is left intact.
+    pub fn rotate_outbound(&mut self) -> Result<()> {
+        repo::delete_outbound_megolm_sessions(&self.db, &self.room_id, &self.our_fingerprint)?;
+        self.outbound = GroupSession::new(SessionConfig::version_1());
+        self.persist_outbound()?;
         Ok(())
     }
 
@@ -328,6 +356,59 @@ mod tests {
     }
 
     #[test]
+    fn rotate_outbound_mints_new_session_preserves_inbound_and_dedups_row() {
+        // huddle 1.3.1: classical→hybrid upgrade rotates ONLY the outbound
+        // session — the old (classically-wrapped) key is retired, inbound
+        // sessions survive, and exactly one outbound row remains so a reload
+        // can't restore the retired session.
+        let db_alice = open_db_in_memory().unwrap();
+        let db_bob = open_db_in_memory().unwrap();
+        let room_id = setup_room(&db_alice, "r", "alice-fp");
+        setup_room(&db_bob, "r", "alice-fp");
+
+        let mut alice =
+            RoomCrypto::new_for_room(db_alice.clone(), room_id.clone(), "alice-fp".into(), [0u8; 32])
+                .unwrap();
+        let mut bob =
+            RoomCrypto::new_for_room(db_bob.clone(), room_id.clone(), "bob-fp".into(), [0u8; 32]).unwrap();
+
+        // Alice holds an inbound session from Bob and can decrypt his messages.
+        alice
+            .add_inbound_session("bob-fp", &bob.our_session_key_b64())
+            .unwrap();
+        let (sid1, ct1) = bob.encrypt(b"before rotate").unwrap();
+        assert_eq!(alice.decrypt("bob-fp", &sid1, &ct1).unwrap(), b"before rotate");
+
+        let old_outbound = alice.our_session_id();
+
+        // Rotate Alice's outbound session.
+        alice.rotate_outbound().unwrap();
+        let new_outbound = alice.our_session_id();
+        assert_ne!(old_outbound, new_outbound, "rotate must mint a fresh outbound session");
+
+        // Inbound from Bob is preserved — Alice still decrypts his next message.
+        let (sid2, ct2) = bob.encrypt(b"after rotate").unwrap();
+        assert_eq!(
+            alice.decrypt("bob-fp", &sid2, &ct2).unwrap(),
+            b"after rotate",
+            "rotate_outbound must NOT discard inbound sessions"
+        );
+
+        // Exactly one outbound row persists (old one deleted), and it is the new session.
+        let rows = repo::load_megolm_sessions_for_room(&db_alice, &room_id).unwrap();
+        let outbound: Vec<_> = rows.iter().filter(|s| s.is_outbound).collect();
+        assert_eq!(outbound.len(), 1, "exactly one outbound row after rotate");
+        assert_eq!(outbound[0].session_id, new_outbound);
+
+        // Reload deterministically restores the NEW outbound session.
+        drop(alice);
+        let reloaded = RoomCrypto::load(db_alice.clone(), room_id.clone(), "alice-fp".into(), [0u8; 32])
+            .unwrap()
+            .expect("outbound session present");
+        assert_eq!(reloaded.our_session_id(), new_outbound);
+    }
+
+    #[test]
     fn decrypt_unknown_sender_errors() {
         let db = open_db_in_memory().unwrap();
         let room_id = setup_room(&db, "r", "me-fp");
@@ -335,5 +416,13 @@ mod tests {
             RoomCrypto::new_for_room(db.clone(), room_id.clone(), "me-fp".into(), [0u8; 32]).unwrap();
         let err = crypto.decrypt("unknown-fp", "session-id", b"junk");
         assert!(err.is_err());
+        // huddle 1.3.1: the app's decrypt-miss key-request heal matches on this
+        // marker, so a missing-session error MUST carry it. Locks the contract.
+        assert!(
+            err.unwrap_err()
+                .to_string()
+                .contains(MISSING_INBOUND_SESSION_ERR),
+            "missing-session error must contain MISSING_INBOUND_SESSION_ERR"
+        );
     }
 }

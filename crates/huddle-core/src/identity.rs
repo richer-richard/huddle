@@ -85,9 +85,11 @@ impl Identity {
         PqKeypair::from_identity_seed(&seed)
     }
 
-    /// huddle 1.3: our serialized ML-KEM-768 encapsulation (public) key, to be
-    /// published to peers (in `MemberAnnounce` / `ContactRequest`) so they can
-    /// encapsulate a hybrid DM key to us. Stable across restarts.
+    /// huddle 1.3: our serialized ML-KEM-768 encapsulation (public) key,
+    /// published to peers in the signed `MemberAnnounce` on Direct rooms so they
+    /// can encapsulate a hybrid DM key to us (and persist it as our PQ-capability
+    /// pin). Stable across restarts. (Not carried in `ContactRequest`, which has
+    /// no ML-KEM field — capability is always learned from a `MemberAnnounce`.)
     pub fn mlkem_public_bytes(&self) -> [u8; pqc::MLKEM_EK_LEN] {
         self.pq_keypair().encapsulation_key_bytes()
     }

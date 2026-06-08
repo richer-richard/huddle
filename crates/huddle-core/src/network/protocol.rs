@@ -191,11 +191,15 @@ pub enum RoomMessage {
         /// encapsulation (public) key, for hybrid post-quantum DM key
         /// agreement. Populated only on **Direct** room announces. Its
         /// presence is how the peer signals PQ capability: a DM goes hybrid
-        /// iff the partner published this. `#[serde(default, skip)]` keeps
-        /// pre-1.3 peers (and all group announces) byte-compatible — the
-        /// field simply doesn't appear. Carried inside the *signed*
-        /// `MemberAnnounce` envelope, so the relay can't strip it to force a
-        /// downgrade without breaking the signature.
+        /// iff the partner published this (or we have it pinned from a prior
+        /// announce — see `app::ensure_dm_key`). `#[serde(default,
+        /// skip_serializing_if = "Option::is_none")]` keeps pre-1.3 peers (and
+        /// all group announces) byte-compatible — when `None` the field simply
+        /// doesn't appear, and a missing field decodes back to `None`. (Do NOT
+        /// "simplify" this to serde's bare `skip`: that would drop the field on
+        /// the wire unconditionally and silently disable the whole PQ path.)
+        /// Carried inside the *signed* `MemberAnnounce` envelope, so the relay
+        /// can't strip it to force a downgrade without breaking the signature.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sender_mlkem_pubkey: Option<String>,
         /// huddle 1.3: base64 of the 1088-byte ML-KEM-768 ciphertext sent by

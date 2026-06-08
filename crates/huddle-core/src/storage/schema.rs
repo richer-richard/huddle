@@ -226,4 +226,14 @@ pub const MIGRATIONS: &[&str] = &[
     );",
     "CREATE INDEX IF NOT EXISTS idx_pending_contact_requests_received
        ON pending_contact_requests(received_at);",
+    // huddle 1.3.1: cache a member's ML-KEM-768 encapsulation (public) key,
+    // learned from `MemberAnnounce.sender_mlkem_pubkey` (Direct rooms only).
+    // This is the durable, cross-restart anchor for **post-quantum capability
+    // pinning**: once we have ever seen a peer's ML-KEM key in a signed
+    // announce, we refuse to fall back to a classical-only DM wrap key for
+    // them — so a malicious relay can't replay a captured pre-1.3 (classical)
+    // announce to force a quantum-unsafe downgrade. COALESCE-preserved on
+    // re-announce exactly like `ed25519_pubkey`, so a later announce that omits
+    // the field can't erase the pin. NULL for pre-1.3 peers and group members.
+    "ALTER TABLE room_members ADD COLUMN mlkem_pubkey TEXT;",
 ];
