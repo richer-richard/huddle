@@ -619,3 +619,56 @@ async fn clearnet_relay_setting_round_trips() {
 
     handle.shutdown().await;
 }
+
+/// huddle 2.0.0 (F10): `send_reaction` only fires for a message we actually
+/// hold. A reaction to an unknown `client_msg_id` is rejected (no orphan row,
+/// no broadcast); a reaction to a real message is stored. Single Direct-mode
+/// node — no mDNS, so this is deterministic and won't fight other tests.
+#[tokio::test]
+async fn send_reaction_rejects_unknown_target() {
+    let _ = tracing_subscriber::fmt()
+        .with_test_writer()
+        .with_env_filter("huddle=debug,warn")
+        .try_init();
+
+    let (handle, _events, _addr) = spawn_direct_node().await;
+
+    let room_id = handle
+        .start_room("react-room", false, None, RoomKind::Group)
+        .await
+        .unwrap();
+
+    // Reacting to a target that isn't in the room is an error and stores
+    // nothing locally.
+    let bogus = handle
+        .send_reaction(&room_id, "00000000-0000-4000-8000-000000000000", "👍", false)
+        .await;
+    assert!(bogus.is_err(), "reaction to unknown target must be rejected");
+    assert!(
+        handle.room_reactions(&room_id).is_empty(),
+        "rejected reaction must not leave an orphan row"
+    );
+
+    // Send a real message, grab its client_msg_id, and react to it.
+    handle
+        .send_room_message(&room_id, "react to me")
+        .await
+        .unwrap();
+    let target = handle
+        .room_messages(&room_id, 10)
+        .unwrap()
+        .into_iter()
+        .find_map(|m| m.client_msg_id)
+        .expect("our own message carries a client_msg_id");
+    handle
+        .send_reaction(&room_id, &target, "👍", false)
+        .await
+        .expect("reaction to a real message succeeds");
+
+    let stored = handle.room_reactions(&room_id);
+    assert_eq!(stored.len(), 1, "exactly one reaction stored");
+    assert_eq!(stored[0].target_client_msg_id, target);
+    assert_eq!(stored[0].emoji, "👍");
+
+    handle.shutdown().await;
+}

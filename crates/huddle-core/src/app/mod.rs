@@ -2239,6 +2239,13 @@ impl AppHandle {
         removed: bool,
     ) -> Result<()> {
         let our_fp = self.identity.fingerprint().to_string();
+        // huddle 2.0.0 (F10): only react to a message we actually hold in this
+        // room. Without this guard a stray `client_msg_id` would store an
+        // orphan reaction locally and broadcast a signed `Reaction` that every
+        // peer drops anyway — inbound reactions are validated the same way (see
+        // the `RoomMessage::Reaction` handler). Mirrors `edit_message`.
+        repo::find_message_by_client_id(&self.db, room_id, target_msg_id)?
+            .ok_or_else(|| HuddleError::Other("reaction target message not found".into()))?;
         let msg = RoomMessage::Reaction {
             sender_fingerprint: our_fp.clone(),
             target_msg_id: target_msg_id.to_string(),
