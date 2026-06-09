@@ -1,4 +1,4 @@
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::warn;
@@ -803,6 +803,17 @@ fn row_to_room_message(row: &rusqlite::Row) -> rusqlite::Result<StoredRoomMessag
 /// stable UUID v4) and `reply_to` (the id of the message being replied to) are
 /// both set at insert time; pass `None`/`None` for plain non-reply messages and
 /// for inbound pre-2.0 messages that carry no id.
+///
+/// huddle 2.0.0 (F2 dedup): the write is `INSERT OR IGNORE`, so two concurrent
+/// identical deliveries (same room + sender + client_msg_id) can never create
+/// duplicate rows — the partial UNIQUE index `idx_room_messages_dedup` turns the
+/// second write into a no-op. `INSERT OR IGNORE` only suppresses *that*
+/// constraint; messages with a NULL `client_msg_id` (every pre-2.0 message, and
+/// outbound/plain sends without an id) aren't covered by the partial index and
+/// always insert exactly as before. Returns the id of the persisted row — the
+/// freshly inserted one, or, when a duplicate was deduped, the id of the row
+/// already present for that (room, sender, client_msg_id), so the caller always
+/// gets a stable handle instead of a stale `last_insert_rowid()`.
 pub fn insert_room_message(
     db: &Db,
     room_id: &str,
@@ -815,7 +826,7 @@ pub fn insert_room_message(
 ) -> Result<i64> {
     let conn = db.lock().unwrap();
     conn.execute(
-        "INSERT INTO room_messages
+        "INSERT OR IGNORE INTO room_messages
             (room_id, sender_fingerprint, direction, body, sent_at, client_msg_id, reply_to)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
@@ -828,7 +839,21 @@ pub fn insert_room_message(
             reply_to
         ],
     )?;
-    Ok(conn.last_insert_rowid())
+    if conn.changes() > 0 {
+        return Ok(conn.last_insert_rowid());
+    }
+    // The insert was a deduped no-op (only possible for a non-NULL client_msg_id,
+    // since NULL rows aren't covered by idx_room_messages_dedup). Return the id of
+    // the row that already won the race rather than a stale last_insert_rowid().
+    let existing = conn
+        .query_row(
+            "SELECT id FROM room_messages
+             WHERE room_id = ?1 AND sender_fingerprint = ?2 AND client_msg_id = ?3",
+            params![room_id, sender_fingerprint, client_msg_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(existing.unwrap_or_else(|| conn.last_insert_rowid()))
 }
 
 /// LIKE-based message search within a room. Case-insensitive. The query
@@ -2710,6 +2735,71 @@ mod tests {
         assert!(find_message_by_client_id(&db, &room.id, "uuid-missing")
             .unwrap()
             .is_none());
+    }
+
+    // F2 dedup: count rows in room_messages for a (room, sender, client_msg_id).
+    fn count_msgs_with_client_id(db: &Db, room_id: &str, sender: &str, cid: &str) -> i64 {
+        db.lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM room_messages
+                 WHERE room_id = ?1 AND sender_fingerprint = ?2 AND client_msg_id = ?3",
+                params![room_id, sender, cid],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn duplicate_client_id_insert_is_idempotent() {
+        // huddle 2.0.0 (F2 dedup): two concurrent identical deliveries (same
+        // room + sender + client_msg_id) must collapse to one row via the partial
+        // UNIQUE index + INSERT OR IGNORE — and the second call must return the
+        // first row's id, not a stale last_insert_rowid().
+        let db = open_db_in_memory().unwrap();
+        let room = make_room("r");
+        insert_room(&db, &room).unwrap();
+
+        let id1 =
+            insert_room_message(&db, &room.id, "fp", "in", "hello", 100, Some("dup-1"), None)
+                .unwrap();
+        // A re-delivery with the same id (even a different body) is a no-op.
+        let id2 = insert_room_message(
+            &db,
+            &room.id,
+            "fp",
+            "in",
+            "hello-replayed",
+            101,
+            Some("dup-1"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(id1, id2, "deduped insert must return the surviving row's id");
+        assert_eq!(
+            count_msgs_with_client_id(&db, &room.id, "fp", "dup-1"),
+            1,
+            "the replay must not create a second row"
+        );
+        // The first write wins; the ignored replay can't overwrite the body.
+        let m = find_message_by_client_id(&db, &room.id, "dup-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(m.body, "hello");
+
+        // The partial index is keyed by sender, so a *different* sender reusing
+        // the same client_msg_id is a distinct row (not deduped).
+        insert_room_message(&db, &room.id, "fp2", "in", "mine too", 102, Some("dup-1"), None)
+            .unwrap();
+        assert_eq!(count_msgs_with_client_id(&db, &room.id, "fp2", "dup-1"), 1);
+
+        // NULL client_msg_id rows are exempt from the partial index: two such
+        // inserts stay distinct (pre-2.0 messages must never be deduped).
+        let n1 = insert_room_message(&db, &room.id, "fp", "in", "legacy a", 103, None, None)
+            .unwrap();
+        let n2 = insert_room_message(&db, &room.id, "fp", "in", "legacy b", 104, None, None)
+            .unwrap();
+        assert_ne!(n1, n2, "NULL-id messages must each get their own row");
     }
 
     #[test]

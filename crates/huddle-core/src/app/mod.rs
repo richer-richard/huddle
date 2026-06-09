@@ -4706,14 +4706,29 @@ impl AppHandle {
                         // Record BEFORE the insert so the seen-set is authoritative
                         // even if a later step fails; INSERT OR IGNORE on the
                         // composite PK keeps this idempotent under any race.
-                        let _ = repo::record_content_seen(
+                        if let Err(e) = repo::record_content_seen(
                             &self.db,
                             room_id,
                             &sender_fingerprint,
                             &session_id,
                             message_index,
                             sent_at,
-                        );
+                        ) {
+                            // A genuine DB error here (a constraint hit is INSERT OR
+                            // IGNORE's silent no-op and returns Ok, not Err) means this
+                            // index isn't durably marked seen, so a later resend could
+                            // pass check_content_replay_seen again. We deliberately do
+                            // NOT drop the message — fail-open, matching the seen-set
+                            // *check* above — because the partial UNIQUE index on
+                            // room_messages now makes the duplicate insert an idempotent
+                            // no-op, so the worst case is a redundant AppEvent, not a
+                            // duplicate row. Surface it instead of swallowing with let _.
+                            warn!(
+                                %e, %room_id, %sender_fingerprint, %session_id, message_index,
+                                "F2: failed to record content-replay seen-set entry; \
+                                 relying on room_messages dedup to stay idempotent"
+                            );
+                        }
                         let _ = repo::insert_room_message(
                             &self.db,
                             room_id,

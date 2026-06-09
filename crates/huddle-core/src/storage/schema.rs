@@ -346,4 +346,20 @@ pub const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX IF NOT EXISTS idx_room_reactions_target
         ON room_reactions(room_id, target_client_msg_id);",
+    // huddle 2.0.0 (F2 dedup): make duplicate content inserts idempotent at the
+    // storage layer. Two concurrent copies of the same RoomMessage::Encrypted
+    // (same room + sender + client_msg_id) can each pass check_content_replay_seen
+    // *before* either records the seen-set entry, then both reach
+    // insert_room_message — and with no constraint that produced two duplicate
+    // rows with an identical client_msg_id. A PARTIAL UNIQUE index lets
+    // `INSERT OR IGNORE` collapse the second write into a silent no-op, closing
+    // the check→record→insert race. It is PARTIAL (WHERE client_msg_id IS NOT
+    // NULL) so the many legitimate NULL rows — every pre-2.0 message and any 2.0
+    // message a sender minted no id for — are exempt and never collide with each
+    // other. Keyed by (room, sender, client_msg_id): the same logical message
+    // from one sender is one row, while two senders that happen to mint the same
+    // UUID stay distinct. Additive + local-only; old NULL rows can't violate it.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_room_messages_dedup
+        ON room_messages(room_id, sender_fingerprint, client_msg_id)
+        WHERE client_msg_id IS NOT NULL;",
 ];
