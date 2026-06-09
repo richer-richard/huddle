@@ -430,9 +430,8 @@ pub fn set_member_role(db: &Db, room_id: &str, fingerprint: &str, role: &str) ->
 /// that an incoming `OwnerGrant` / `BanMember` came from a current owner.
 pub fn list_room_owners(db: &Db, room_id: &str) -> Result<Vec<String>> {
     let conn = db.lock().unwrap();
-    let mut stmt = conn.prepare(
-        "SELECT fingerprint FROM room_members WHERE room_id = ?1 AND role = 'owner'",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT fingerprint FROM room_members WHERE room_id = ?1 AND role = 'owner'")?;
     let rows = stmt.query_map(params![room_id], |row| row.get::<_, String>(0))?;
     Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
 }
@@ -608,10 +607,7 @@ pub fn delete_outbound_megolm_sessions(
     Ok(())
 }
 
-pub fn load_megolm_sessions_for_room(
-    db: &Db,
-    room_id: &str,
-) -> Result<Vec<StoredMegolmSession>> {
+pub fn load_megolm_sessions_for_room(db: &Db, room_id: &str) -> Result<Vec<StoredMegolmSession>> {
     let conn = db.lock().unwrap();
     let mut stmt = conn.prepare(
         "SELECT room_id, sender_fingerprint, session_id, session_data, is_outbound, created_at
@@ -738,7 +734,12 @@ pub fn check_content_replay_seen(
         "SELECT COUNT(*) FROM content_replay_seen
          WHERE room_id = ?1 AND sender_fingerprint = ?2
            AND session_id = ?3 AND message_index = ?4",
-        params![room_id, sender_fingerprint, session_id, message_index as i64],
+        params![
+            room_id,
+            sender_fingerprint,
+            session_id,
+            message_index as i64
+        ],
         |row| row.get(0),
     )?;
     Ok(count > 0)
@@ -801,12 +802,7 @@ pub fn content_seen_index_bounds(
         "SELECT MIN(message_index), MAX(message_index) FROM content_replay_seen
          WHERE room_id = ?1 AND sender_fingerprint = ?2 AND session_id = ?3",
         params![room_id, sender_fingerprint, session_id],
-        |row| {
-            Ok((
-                row.get::<_, Option<i64>>(0)?,
-                row.get::<_, Option<i64>>(1)?,
-            ))
-        },
+        |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, Option<i64>>(1)?)),
     )?;
     match bounds {
         (Some(min), Some(max)) => Ok(Some((min as u32, max as u32))),
@@ -1107,7 +1103,13 @@ pub fn add_reaction(
          VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(room_id, target_client_msg_id, sender_fingerprint, emoji)
             DO UPDATE SET reacted_at = excluded.reacted_at",
-        params![room_id, target_client_msg_id, sender_fingerprint, emoji, reacted_at],
+        params![
+            room_id,
+            target_client_msg_id,
+            sender_fingerprint,
+            emoji,
+            reacted_at
+        ],
     )?;
     Ok(())
 }
@@ -1301,7 +1303,10 @@ pub fn list_known_peers(db: &Db) -> Result<Vec<KnownPeer>> {
 
 pub fn forget_known_peer(db: &Db, address: &str) -> Result<()> {
     let conn = db.lock().unwrap();
-    conn.execute("DELETE FROM known_peers WHERE address = ?1", params![address])?;
+    conn.execute(
+        "DELETE FROM known_peers WHERE address = ?1",
+        params![address],
+    )?;
     Ok(())
 }
 
@@ -1406,7 +1411,10 @@ pub fn list_contacts(db: &Db) -> Result<Vec<Contact>> {
 
 pub fn delete_contact(db: &Db, fingerprint: &str) -> Result<()> {
     let conn = db.lock().unwrap();
-    conn.execute("DELETE FROM contacts WHERE fingerprint = ?1", params![fingerprint])?;
+    conn.execute(
+        "DELETE FROM contacts WHERE fingerprint = ?1",
+        params![fingerprint],
+    )?;
     Ok(())
 }
 
@@ -1600,9 +1608,7 @@ pub fn block_peer(db: &Db, fingerprint: &str, now: i64) -> Result<()> {
 pub fn get_setting(db: &Db, key: &str) -> Result<Option<String>> {
     let conn = db.lock().unwrap();
     let mut stmt = conn.prepare("SELECT value FROM app_settings WHERE key = ?1")?;
-    let row = stmt
-        .query_row(params![key], |r| r.get::<_, String>(0))
-        .ok();
+    let row = stmt.query_row(params![key], |r| r.get::<_, String>(0)).ok();
     Ok(row)
 }
 
@@ -1745,10 +1751,7 @@ pub fn is_onboarding_seen(db: &Db) -> Result<bool> {
 
 pub fn mark_onboarding_seen(db: &Db) -> Result<()> {
     let conn = db.lock().unwrap();
-    conn.execute(
-        "UPDATE identity SET onboarding_seen = 1 WHERE id = 1",
-        [],
-    )?;
+    conn.execute("UPDATE identity SET onboarding_seen = 1 WHERE id = 1", [])?;
     Ok(())
 }
 
@@ -1769,8 +1772,10 @@ pub fn set_last_seen_onboarding_version(db: &Db, version: &str) -> Result<()> {
 /// the user hasn't been asked yet; `Some(true)` enables the background
 /// poll; `Some(false)` disables it.
 pub fn get_update_check_enabled(db: &Db) -> Result<Option<bool>> {
-    Ok(get_setting(db, "update_check_enabled")?
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true")))
+    Ok(
+        get_setting(db, "update_check_enabled")?
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true")),
+    )
 }
 
 pub fn set_update_check_enabled(db: &Db, enabled: bool) -> Result<()> {
@@ -1796,9 +1801,8 @@ pub fn is_peer_blocked(db: &Db, fingerprint: &str) -> Result<bool> {
 /// Settings modal's "blocked peers" pane to render the unblock action.
 pub fn list_blocked_peers(db: &Db) -> Result<Vec<String>> {
     let conn = db.lock().unwrap();
-    let mut stmt = conn.prepare(
-        "SELECT fingerprint FROM blocked_peers ORDER BY blocked_at DESC",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT fingerprint FROM blocked_peers ORDER BY blocked_at DESC")?;
     let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
     Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
 }
@@ -1847,9 +1851,7 @@ pub fn upsert_peer_profile(
 /// `username = None` (explicit anonymous) — caller renders `[anonymous]`.
 pub fn get_peer_username(db: &Db, fingerprint: &str) -> Result<Option<String>> {
     let conn = db.lock().unwrap();
-    let mut stmt = conn.prepare(
-        "SELECT username FROM peer_profiles WHERE fingerprint = ?1",
-    )?;
+    let mut stmt = conn.prepare("SELECT username FROM peer_profiles WHERE fingerprint = ?1")?;
     let mut rows = stmt.query(params![fingerprint])?;
     if let Some(row) = rows.next()? {
         Ok(row.get::<_, Option<String>>(0)?)
@@ -1864,9 +1866,7 @@ pub fn get_peer_username(db: &Db, fingerprint: &str) -> Result<Option<String>> {
 /// the user to disambiguate via HD- ID when this returns > 1.
 pub fn find_peers_by_username(db: &Db, username: &str) -> Result<Vec<String>> {
     let conn = db.lock().unwrap();
-    let mut stmt = conn.prepare(
-        "SELECT fingerprint FROM peer_profiles WHERE username = ?1",
-    )?;
+    let mut stmt = conn.prepare("SELECT fingerprint FROM peer_profiles WHERE username = ?1")?;
     let rows = stmt.query_map(params![username], |row| row.get::<_, String>(0))?;
     let mut out = Vec::new();
     for r in rows {
@@ -2462,10 +2462,28 @@ mod tests {
         let db = open_db_in_memory().unwrap();
         let room = make_room("r");
         insert_room(&db, &room).unwrap();
-        insert_room_message(&db, &room.id, "fp", "in", "literal percent: 50%", 100, None, None)
-            .unwrap();
-        insert_room_message(&db, &room.id, "fp", "in", "no special chars here", 101, None, None)
-            .unwrap();
+        insert_room_message(
+            &db,
+            &room.id,
+            "fp",
+            "in",
+            "literal percent: 50%",
+            100,
+            None,
+            None,
+        )
+        .unwrap();
+        insert_room_message(
+            &db,
+            &room.id,
+            "fp",
+            "in",
+            "no special chars here",
+            101,
+            None,
+            None,
+        )
+        .unwrap();
 
         // "%" must match a literal "%", not act as a wildcard-matches-all.
         let pct = search_room_messages(&db, &room.id, "%", 10).unwrap();
@@ -2643,10 +2661,28 @@ mod tests {
         let room = make_room("r");
         insert_room(&db, &room).unwrap();
         insert_room_message(&db, &room.id, "fp", "in", "hello world", 100, None, None).unwrap();
-        insert_room_message(&db, &room.id, "fp", "in", "a helicopter flew", 101, None, None)
-            .unwrap();
-        insert_room_message(&db, &room.id, "fp", "in", "totally unrelated", 102, None, None)
-            .unwrap();
+        insert_room_message(
+            &db,
+            &room.id,
+            "fp",
+            "in",
+            "a helicopter flew",
+            101,
+            None,
+            None,
+        )
+        .unwrap();
+        insert_room_message(
+            &db,
+            &room.id,
+            "fp",
+            "in",
+            "totally unrelated",
+            102,
+            None,
+            None,
+        )
+        .unwrap();
 
         // Single token.
         let hits = search_room_messages_fts(&db, &room.id, "hello", 10).unwrap();
@@ -2680,8 +2716,17 @@ mod tests {
         let db = open_db_in_memory().unwrap();
         let room = make_room("r");
         insert_room(&db, &room).unwrap();
-        insert_room_message(&db, &room.id, "fp", "in", "original text", 100, Some("m1"), None)
-            .unwrap();
+        insert_room_message(
+            &db,
+            &room.id,
+            "fp",
+            "in",
+            "original text",
+            100,
+            Some("m1"),
+            None,
+        )
+        .unwrap();
         assert_eq!(
             search_room_messages_fts(&db, &room.id, "original", 10)
                 .unwrap()
@@ -2713,8 +2758,17 @@ mod tests {
         let db = open_db_in_memory().unwrap();
         let room = make_room("r");
         insert_room(&db, &room).unwrap();
-        insert_room_message(&db, &room.id, "fp", "in", "needle in haystack", 100, None, None)
-            .unwrap();
+        insert_room_message(
+            &db,
+            &room.id,
+            "fp",
+            "in",
+            "needle in haystack",
+            100,
+            None,
+            None,
+        )
+        .unwrap();
 
         // Drop the FTS table + triggers to simulate a SQLCipher build without
         // FTS5; the function must transparently fall back to the LIKE path.
@@ -2743,7 +2797,10 @@ mod tests {
         // Off by default.
         assert_eq!(get_room_disappearing_ttl(&db, &room.id).unwrap(), None);
         set_room_disappearing_ttl(&db, &room.id, Some(3600)).unwrap();
-        assert_eq!(get_room_disappearing_ttl(&db, &room.id).unwrap(), Some(3600));
+        assert_eq!(
+            get_room_disappearing_ttl(&db, &room.id).unwrap(),
+            Some(3600)
+        );
         // None clears back to off.
         set_room_disappearing_ttl(&db, &room.id, None).unwrap();
         assert_eq!(get_room_disappearing_ttl(&db, &room.id).unwrap(), None);
@@ -2826,9 +2883,8 @@ mod tests {
         let room = make_room("r");
         insert_room(&db, &room).unwrap();
 
-        let id1 =
-            insert_room_message(&db, &room.id, "fp", "in", "hello", 100, Some("dup-1"), None)
-                .unwrap();
+        let id1 = insert_room_message(&db, &room.id, "fp", "in", "hello", 100, Some("dup-1"), None)
+            .unwrap();
         // A re-delivery with the same id (even a different body) is a no-op.
         let id2 = insert_room_message(
             &db,
@@ -2841,7 +2897,10 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(id1, id2, "deduped insert must return the surviving row's id");
+        assert_eq!(
+            id1, id2,
+            "deduped insert must return the surviving row's id"
+        );
         assert_eq!(
             count_msgs_with_client_id(&db, &room.id, "fp", "dup-1"),
             1,
@@ -2855,16 +2914,25 @@ mod tests {
 
         // The partial index is keyed by sender, so a *different* sender reusing
         // the same client_msg_id is a distinct row (not deduped).
-        insert_room_message(&db, &room.id, "fp2", "in", "mine too", 102, Some("dup-1"), None)
-            .unwrap();
+        insert_room_message(
+            &db,
+            &room.id,
+            "fp2",
+            "in",
+            "mine too",
+            102,
+            Some("dup-1"),
+            None,
+        )
+        .unwrap();
         assert_eq!(count_msgs_with_client_id(&db, &room.id, "fp2", "dup-1"), 1);
 
         // NULL client_msg_id rows are exempt from the partial index: two such
         // inserts stay distinct (pre-2.0 messages must never be deduped).
-        let n1 = insert_room_message(&db, &room.id, "fp", "in", "legacy a", 103, None, None)
-            .unwrap();
-        let n2 = insert_room_message(&db, &room.id, "fp", "in", "legacy b", 104, None, None)
-            .unwrap();
+        let n1 =
+            insert_room_message(&db, &room.id, "fp", "in", "legacy a", 103, None, None).unwrap();
+        let n2 =
+            insert_room_message(&db, &room.id, "fp", "in", "legacy b", 104, None, None).unwrap();
         assert_ne!(n1, n2, "NULL-id messages must each get their own row");
     }
 
@@ -2943,7 +3011,10 @@ mod tests {
         let m = find_message_by_client_id(&db, &room.id, "m1")
             .unwrap()
             .unwrap();
-        assert_eq!(m.body, "", "delete must blank the body so plaintext is gone");
+        assert_eq!(
+            m.body, "",
+            "delete must blank the body so plaintext is gone"
+        );
         assert_eq!(m.deleted_at, Some(200));
 
         // Idempotent: re-deleting is a no-op.
@@ -2976,7 +3047,10 @@ mod tests {
         let room = make_room("r");
         insert_room(&db, &room).unwrap();
 
-        assert_eq!(get_megolm_rotation_state(&db, &room.id, "me-fp").unwrap(), None);
+        assert_eq!(
+            get_megolm_rotation_state(&db, &room.id, "me-fp").unwrap(),
+            None
+        );
 
         set_megolm_rotation_state(&db, &room.id, "me-fp", 7, 1000).unwrap();
         assert_eq!(

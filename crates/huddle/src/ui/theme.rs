@@ -136,7 +136,9 @@ impl Theme {
     }
 
     pub fn accent_bold(&self) -> Style {
-        Style::default().fg(self.accent).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(self.accent)
+            .add_modifier(Modifier::BOLD)
     }
     pub fn text_style(&self) -> Style {
         Style::default().fg(self.text)
@@ -145,7 +147,9 @@ impl Theme {
         Style::default().fg(self.text_dim)
     }
     pub fn ok(&self) -> Style {
-        Style::default().fg(self.success).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(self.success)
+            .add_modifier(Modifier::BOLD)
     }
     pub fn warn_style(&self) -> Style {
         Style::default().fg(self.warn).add_modifier(Modifier::BOLD)

@@ -6,8 +6,8 @@ use crate::app::{
     ConfirmDeleteState, ConfirmInviteState, DialPeerState, EmojiPickerState, ExportSeedState,
     ExportStep, InboundDialState, JoinRoomState, JoinWithCodeState, MemberActionKind,
     MemberActionState, PassField, PasteInviteState, RotateRoomState, SafetyNumberChangedState,
-    SasStage, SasState, SearchState, ShowInviteState, ShowJoinCodeState, StartField, StartRoomState,
-    VerifyState, ATTACH_VISIBLE_ROWS, REACTION_EMOJIS,
+    SasStage, SasState, SearchState, ShowInviteState, ShowJoinCodeState, StartField,
+    StartRoomState, VerifyState, ATTACH_VISIBLE_ROWS, REACTION_EMOJIS,
 };
 use crate::ui::centered_rect;
 
@@ -63,7 +63,10 @@ fn field_line(label: &str, value: &str, focused: bool, mask: bool) -> Line<'stat
         Style::default().fg(Color::White)
     };
     Line::from(vec![
-        Span::styled(format!(" {:<11}", label), Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!(" {:<11}", label),
+            Style::default().fg(Color::DarkGray),
+        ),
         Span::styled(value_str, value_style),
     ])
 }
@@ -73,7 +76,9 @@ fn encrypted_line(s: &StartRoomState) -> Line<'static> {
     let label = if s.encrypted { "yes" } else { "no" };
     let focused = matches!(s.focus, StartField::Encrypted);
     let style = if focused {
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::White)
     };
@@ -81,7 +86,11 @@ fn encrypted_line(s: &StartRoomState) -> Line<'static> {
         Span::styled(" encrypted   ", Style::default().fg(Color::DarkGray)),
         Span::styled(format!("{} {}", check, label), style),
         Span::styled(
-            if focused { "   (Enter/Space toggle)" } else { "" },
+            if focused {
+                "   (Enter/Space toggle)"
+            } else {
+                ""
+            },
             Style::default().fg(Color::DarkGray),
         ),
     ])
@@ -243,10 +252,7 @@ pub fn render_help(f: &mut Frame, scroll: u16) {
                     format!("  {:<width$}", b.keys, width = key_w),
                     Style::default().fg(Color::Yellow),
                 ),
-                Span::styled(
-                    b.description.to_string(),
-                    Style::default().fg(Color::White),
-                ),
+                Span::styled(b.description.to_string(), Style::default().fg(Color::White)),
             ]));
         }
         if count > 0 {
@@ -317,7 +323,9 @@ pub fn render_dial_peer(f: &mut Frame, s: &DialPeerState) {
         ]),
     ];
 
-    let para = Paragraph::new(lines).wrap(Wrap { trim: false }).block(block);
+    let para = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(block);
     f.render_widget(para, area);
 }
 
@@ -367,7 +375,9 @@ pub fn render_attach_path(f: &mut Frame, s: &AttachPathState) {
         ]),
     ];
 
-    let para = Paragraph::new(lines).wrap(Wrap { trim: false }).block(block);
+    let para = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(block);
     f.render_widget(para, area);
 }
 
@@ -380,7 +390,9 @@ pub fn render_rotate_room(f: &mut Frame, s: &RotateRoomState) {
         .padding(Padding::uniform(1))
         .title(Span::styled(
             " rotate room key ",
-            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
         ));
     let masked: String = s.passphrase.chars().map(|_| '•').collect();
     let lines = vec![
@@ -419,7 +431,9 @@ pub fn render_accept_rotation(f: &mut Frame, s: &AcceptRotationState) {
         .padding(Padding::uniform(1))
         .title(Span::styled(
             " key rotation requested ",
-            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
         ));
     let masked: String = s.passphrase.chars().map(|_| '•').collect();
     let lines = vec![
@@ -450,7 +464,10 @@ pub fn render_accept_rotation(f: &mut Frame, s: &AcceptRotationState) {
             Span::styled(" Enter", Style::default().fg(Color::Yellow)),
             Span::styled(" accept  ", Style::default().fg(Color::DarkGray)),
             Span::styled("Esc", Style::default().fg(Color::Yellow)),
-            Span::styled(" ignore (you'll stop seeing messages)", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                " ignore (you'll stop seeing messages)",
+                Style::default().fg(Color::DarkGray),
+            ),
         ]),
     ];
     f.render_widget(Paragraph::new(lines).block(block), area);
@@ -476,7 +493,9 @@ pub fn render_qr_identity(f: &mut Frame, app: &crate::app::TuiApp) {
         .padding(Padding::uniform(1))
         .title(Span::styled(
             " your identity ",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ));
 
     let mut lines: Vec<Line> = Vec::new();
@@ -567,7 +586,9 @@ pub fn render_search(f: &mut Frame, s: &SearchState) {
         .padding(Padding::uniform(1))
         .title(Span::styled(
             " search messages ",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ));
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(vec![
@@ -598,13 +619,7 @@ pub fn render_search(f: &mut Frame, s: &SearchState) {
         } else {
             0
         };
-        for (i, m) in s
-            .results
-            .iter()
-            .enumerate()
-            .skip(offset)
-            .take(visible)
-        {
+        for (i, m) in s.results.iter().enumerate().skip(offset).take(visible) {
             let is_focused = i == s.selected;
             let marker = if is_focused { "› " } else { "  " };
             let time = {
@@ -615,16 +630,15 @@ pub fn render_search(f: &mut Frame, s: &SearchState) {
             };
             let snippet: String = m.body.chars().take(60).collect();
             let style = if is_focused {
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::White)
             };
             lines.push(Line::from(vec![
                 Span::styled(format!("  {}", marker), Style::default().fg(Color::Yellow)),
-                Span::styled(
-                    format!("{}  ", time),
-                    Style::default().fg(Color::DarkGray),
-                ),
+                Span::styled(format!("{}  ", time), Style::default().fg(Color::DarkGray)),
                 Span::styled(snippet, style),
             ]));
         }
@@ -641,7 +655,12 @@ pub fn render_search(f: &mut Frame, s: &SearchState) {
         Span::styled("Esc", Style::default().fg(Color::Yellow)),
         Span::styled(" close", Style::default().fg(Color::DarkGray)),
     ]));
-    f.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: false }), area);
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false }),
+        area,
+    );
 }
 
 pub fn render_verify(f: &mut Frame, s: &VerifyState) {
@@ -653,14 +672,18 @@ pub fn render_verify(f: &mut Frame, s: &VerifyState) {
         .padding(Padding::uniform(1))
         .title(Span::styled(
             " verify members ",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ));
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(vec![
         Span::styled("  your id: ", Style::default().fg(Color::DarkGray)),
         Span::styled(
             super::display_id(&s.our_fingerprint),
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         ),
     ]));
     lines.push(Line::from(Span::styled(
@@ -676,12 +699,16 @@ pub fn render_verify(f: &mut Frame, s: &VerifyState) {
         let marker = if i == s.selected { "› " } else { "  " };
         let check = if *verified { "[✓] " } else { "[ ] " };
         let check_style = if *verified {
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::DarkGray)
         };
         let name_style = if i == s.selected {
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::White)
         };
@@ -700,7 +727,12 @@ pub fn render_verify(f: &mut Frame, s: &VerifyState) {
         Span::styled("Esc", Style::default().fg(Color::Yellow)),
         Span::styled(" close", Style::default().fg(Color::DarkGray)),
     ]));
-    f.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: false }), area);
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false }),
+        area,
+    );
 }
 
 /// Maximum indentation depth we render literally; deeper nodes keep this
@@ -732,7 +764,9 @@ pub fn render_attach_picker(f: &mut Frame, s: &AttachPickerState) {
         Span::styled("  in ", Style::default().fg(Color::DarkGray)),
         Span::styled(
             format!("{}", s.root.display()),
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
         ),
     ]));
     lines.push(Line::from(""));
@@ -768,7 +802,10 @@ pub fn render_attach_picker(f: &mut Frame, s: &AttachPickerState) {
             "· "
         };
         let suffix = if row.is_dir { "/" } else { "" };
-        let name = truncate_middle(&row.name, name_budget.saturating_sub(row.depth.min(ATTACH_MAX_INDENT) * 2));
+        let name = truncate_middle(
+            &row.name,
+            name_budget.saturating_sub(row.depth.min(ATTACH_MAX_INDENT) * 2),
+        );
         let annotation = if row.has_error {
             "  (no access)"
         } else if row.is_empty_dir {
@@ -778,7 +815,9 @@ pub fn render_attach_picker(f: &mut Frame, s: &AttachPickerState) {
         };
 
         let name_style = if is_focused {
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
         } else if row.has_error {
             Style::default().fg(Color::Red)
         } else if row.is_dir {
@@ -830,7 +869,9 @@ pub fn render_attach_picker(f: &mut Frame, s: &AttachPickerState) {
     footer.extend(hint("Esc", " cancel"));
     lines.push(Line::from(footer));
 
-    let para = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
+    let para = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false });
     f.render_widget(para, area);
 }
 
@@ -917,18 +958,16 @@ pub fn render_inbound_dial(f: &mut Frame, s: &InboundDialState) {
         )),
     ];
 
-    let para = Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Yellow))
-                .padding(Padding::uniform(1))
-                .title(Span::styled(
-                    " inbound connection ",
-                    Style::default().fg(Color::Yellow).bold(),
-                )),
-        );
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow))
+            .padding(Padding::uniform(1))
+            .title(Span::styled(
+                " inbound connection ",
+                Style::default().fg(Color::Yellow).bold(),
+            )),
+    );
     f.render_widget(para, area);
 }
 
@@ -997,18 +1036,16 @@ pub fn render_member_action(f: &mut Frame, s: &MemberActionState) {
         Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
     ]));
 
-    let para = Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(border_color))
-                .padding(Padding::uniform(1))
-                .title(Span::styled(
-                    title,
-                    Style::default().fg(border_color).bold(),
-                )),
-        );
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(border_color))
+            .padding(Padding::uniform(1))
+            .title(Span::styled(
+                title,
+                Style::default().fg(border_color).bold(),
+            )),
+    );
     f.render_widget(para, area);
 }
 
@@ -1073,7 +1110,10 @@ pub fn render_sas(f: &mut Frame, s: &SasState) {
             ]));
             lines.push(Line::from(""));
             lines.push(Line::from(vec![
-                Span::styled("  or compare decimal: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    "  or compare decimal: ",
+                    Style::default().fg(Color::DarkGray),
+                ),
                 Span::styled(decimal.clone(), Style::default().fg(Color::Cyan).bold()),
             ]));
             lines.push(Line::from(""));
@@ -1095,18 +1135,16 @@ pub fn render_sas(f: &mut Frame, s: &SasState) {
         }
     }
 
-    let para = Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Magenta))
-                .padding(Padding::uniform(1))
-                .title(Span::styled(
-                    " SAS verify ",
-                    Style::default().fg(Color::Magenta).bold(),
-                )),
-        );
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Magenta))
+            .padding(Padding::uniform(1))
+            .title(Span::styled(
+                " SAS verify ",
+                Style::default().fg(Color::Magenta).bold(),
+            )),
+    );
     f.render_widget(para, area);
 }
 
@@ -1122,11 +1160,17 @@ pub fn render_go_dark(f: &mut Frame, s: &crate::app::GoDarkState) {
         s.input.clone()
     };
     let (prompt_label, hint_below): (&str, String) = if s.requires_passphrase {
-        ("master passphrase: ", "Enter your master passphrase to wipe everything.".into())
+        (
+            "master passphrase: ",
+            "Enter your master passphrase to wipe everything.".into(),
+        )
     } else {
         (
             "type to confirm: ",
-            format!("Type `{}` (case sensitive) to wipe everything.", GO_DARK_CONFIRM_PHRASE),
+            format!(
+                "Type `{}` (case sensitive) to wipe everything.",
+                GO_DARK_CONFIRM_PHRASE
+            ),
         )
     };
     let mut lines: Vec<Line> = vec![
@@ -1169,10 +1213,7 @@ pub fn render_go_dark(f: &mut Frame, s: &crate::app::GoDarkState) {
         Line::from(vec![
             Span::styled("› ", Style::default().fg(Color::Yellow)),
             Span::styled(prompt_label, Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                displayed_input,
-                Style::default().fg(Color::Cyan).bold(),
-            ),
+            Span::styled(displayed_input, Style::default().fg(Color::Cyan).bold()),
         ]),
     ];
     // huddle 0.7.6: error renders prominently above the hint bar so the
@@ -1192,18 +1233,16 @@ pub fn render_go_dark(f: &mut Frame, s: &crate::app::GoDarkState) {
         Span::styled("Esc", Style::default().fg(Color::Yellow)),
         Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
     ]));
-    let para = Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Red))
-                .padding(Padding::uniform(1))
-                .title(Span::styled(
-                    " delete account (go dark) ",
-                    Style::default().fg(Color::Red).bold(),
-                )),
-        );
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Red))
+            .padding(Padding::uniform(1))
+            .title(Span::styled(
+                " delete account (go dark) ",
+                Style::default().fg(Color::Red).bold(),
+            )),
+    );
     f.render_widget(para, area);
 }
 
@@ -1211,11 +1250,7 @@ pub fn render_go_dark(f: &mut Frame, s: &crate::app::GoDarkState) {
 /// suggestions pulled from `known_peers` + `peer_profiles`. On confirm
 /// the action handler calls `start_direct(fp)`; on unresolvable input
 /// it morphs into `AddFriend` semantics (same modal recycled).
-pub fn render_compose_dm(
-    f: &mut Frame,
-    s: &crate::app::ComposeDmState,
-    app: &crate::app::TuiApp,
-) {
+pub fn render_compose_dm(f: &mut Frame, s: &crate::app::ComposeDmState, app: &crate::app::TuiApp) {
     let area = centered_rect(64, 16, f.area());
     f.render_widget(Clear, area);
     let displayed = if s.input.is_empty() {
@@ -1286,18 +1321,16 @@ pub fn render_compose_dm(
         Span::styled("Esc", Style::default().fg(Color::Yellow)),
         Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
     ]));
-    let para = Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan))
-                .padding(Padding::uniform(1))
-                .title(Span::styled(
-                    " compose DM ",
-                    Style::default().fg(Color::Cyan).bold(),
-                )),
-        );
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .padding(Padding::uniform(1))
+            .title(Span::styled(
+                " compose DM ",
+                Style::default().fg(Color::Cyan).bold(),
+            )),
+    );
     f.render_widget(para, area);
 }
 
@@ -1310,10 +1343,7 @@ pub fn render_add_friend(f: &mut Frame, s: &crate::app::AddFriendState) {
             Style::default().fg(Color::DarkGray),
         )
     } else {
-        Span::styled(
-            s.input.clone(),
-            Style::default().fg(Color::White).bold(),
-        )
+        Span::styled(s.input.clone(), Style::default().fg(Color::White).bold())
     };
     let lines = vec![
         Line::from(""),
@@ -1342,18 +1372,16 @@ pub fn render_add_friend(f: &mut Frame, s: &crate::app::AddFriendState) {
             Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
         ]),
     ];
-    let para = Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan))
-                .padding(Padding::uniform(1))
-                .title(Span::styled(
-                    " add friend ",
-                    Style::default().fg(Color::Cyan).bold(),
-                )),
-        );
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .padding(Padding::uniform(1))
+            .title(Span::styled(
+                " add friend ",
+                Style::default().fg(Color::Cyan).bold(),
+            )),
+    );
     f.render_widget(para, area);
 }
 
@@ -1404,18 +1432,16 @@ pub fn render_connect_code(f: &mut Frame, s: &crate::app::ConnectCodeState) {
             Span::styled(" close", Style::default().fg(Color::DarkGray)),
         ]),
     ];
-    let para = Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan))
-                .padding(Padding::uniform(1))
-                .title(Span::styled(
-                    " your connect code ",
-                    Style::default().fg(Color::Cyan).bold(),
-                )),
-        );
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .padding(Padding::uniform(1))
+            .title(Span::styled(
+                " your connect code ",
+                Style::default().fg(Color::Cyan).bold(),
+            )),
+    );
     f.render_widget(para, area);
 }
 
@@ -1428,10 +1454,7 @@ pub fn render_edit_username(f: &mut Frame, s: &crate::app::EditUsernameState) {
             Style::default().fg(Color::DarkGray),
         )
     } else {
-        Span::styled(
-            s.input.clone(),
-            Style::default().fg(Color::White).bold(),
-        )
+        Span::styled(s.input.clone(), Style::default().fg(Color::White).bold())
     };
     let lines = vec![
         Line::from(""),
@@ -1456,18 +1479,16 @@ pub fn render_edit_username(f: &mut Frame, s: &crate::app::EditUsernameState) {
             Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
         ]),
     ];
-    let para = Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan))
-                .padding(Padding::uniform(1))
-                .title(Span::styled(
-                    " edit username ",
-                    Style::default().fg(Color::Cyan).bold(),
-                )),
-        );
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .padding(Padding::uniform(1))
+            .title(Span::styled(
+                " edit username ",
+                Style::default().fg(Color::Cyan).bold(),
+            )),
+    );
     f.render_widget(para, area);
 }
 
@@ -1484,7 +1505,10 @@ pub fn render_show_join_code(f: &mut Frame, s: &ShowJoinCodeState) {
         Line::from(""),
         Line::from(vec![
             Span::styled("  room: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(s.room_name.clone(), Style::default().fg(Color::White).bold()),
+            Span::styled(
+                s.room_name.clone(),
+                Style::default().fg(Color::White).bold(),
+            ),
             Span::styled(
                 format!("  ({})", short_id),
                 Style::default().fg(Color::DarkGray),
@@ -1493,10 +1517,7 @@ pub fn render_show_join_code(f: &mut Frame, s: &ShowJoinCodeState) {
         Line::from(""),
         Line::from(vec![
             Span::raw("    "),
-            Span::styled(
-                s.code.clone(),
-                Style::default().fg(Color::Yellow).bold(),
-            ),
+            Span::styled(s.code.clone(), Style::default().fg(Color::Yellow).bold()),
         ]),
         Line::from(""),
         Line::from(Span::styled(
@@ -1513,18 +1534,16 @@ pub fn render_show_join_code(f: &mut Frame, s: &ShowJoinCodeState) {
             Style::default().fg(Color::DarkGray),
         )),
     ];
-    let para = Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan))
-                .padding(Padding::uniform(1))
-                .title(Span::styled(
-                    " join code ",
-                    Style::default().fg(Color::Cyan).bold(),
-                )),
-        );
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .padding(Padding::uniform(1))
+            .title(Span::styled(
+                " join code ",
+                Style::default().fg(Color::Cyan).bold(),
+            )),
+    );
     f.render_widget(para, area);
 }
 
@@ -1537,7 +1556,10 @@ pub fn render_join_with_code(f: &mut Frame, s: &JoinWithCodeState) {
         Line::from(""),
         Line::from(vec![
             Span::styled("  joining: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(s.room_name.clone(), Style::default().fg(Color::White).bold()),
+            Span::styled(
+                s.room_name.clone(),
+                Style::default().fg(Color::White).bold(),
+            ),
         ]),
         Line::from(""),
         Line::from(vec![
@@ -1564,18 +1586,16 @@ pub fn render_join_with_code(f: &mut Frame, s: &JoinWithCodeState) {
             Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
         ]),
     ];
-    let para = Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan))
-                .padding(Padding::uniform(1))
-                .title(Span::styled(
-                    " join with code ",
-                    Style::default().fg(Color::Cyan).bold(),
-                )),
-        );
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .padding(Padding::uniform(1))
+            .title(Span::styled(
+                " join with code ",
+                Style::default().fg(Color::Cyan).bold(),
+            )),
+    );
     f.render_widget(para, area);
 }
 
@@ -1612,18 +1632,16 @@ pub fn render_show_invite(f: &mut Frame, s: &ShowInviteState) {
         "  press any key to dismiss",
         Style::default().fg(Color::DarkGray),
     )));
-    let para = Paragraph::new(lines)
-        .wrap(Wrap { trim: true })
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan))
-                .padding(Padding::uniform(1))
-                .title(Span::styled(
-                    " invite link ",
-                    Style::default().fg(Color::Cyan).bold(),
-                )),
-        );
+    let para = Paragraph::new(lines).wrap(Wrap { trim: true }).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .padding(Padding::uniform(1))
+            .title(Span::styled(
+                " invite link ",
+                Style::default().fg(Color::Cyan).bold(),
+            )),
+    );
     f.render_widget(para, area);
 }
 
@@ -1651,18 +1669,16 @@ pub fn render_paste_invite(f: &mut Frame, s: &PasteInviteState) {
             Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
         ]),
     ];
-    let para = Paragraph::new(lines)
-        .wrap(Wrap { trim: true })
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan))
-                .padding(Padding::uniform(1))
-                .title(Span::styled(
-                    " paste invite ",
-                    Style::default().fg(Color::Cyan).bold(),
-                )),
-        );
+    let para = Paragraph::new(lines).wrap(Wrap { trim: true }).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .padding(Padding::uniform(1))
+            .title(Span::styled(
+                " paste invite ",
+                Style::default().fg(Color::Cyan).bold(),
+            )),
+    );
     f.render_widget(para, area);
 }
 
@@ -1681,7 +1697,10 @@ pub fn render_confirm_invite(f: &mut Frame, s: &ConfirmInviteState) {
     ]));
     lines.push(Line::from(vec![
         Span::styled("  dial: ", Style::default().fg(Color::DarkGray)),
-        Span::styled(s.invite.host_multiaddr.clone(), Style::default().fg(Color::White)),
+        Span::styled(
+            s.invite.host_multiaddr.clone(),
+            Style::default().fg(Color::White),
+        ),
     ]));
     if let Some(room) = &s.invite.room {
         lines.push(Line::from(""));
@@ -1689,7 +1708,11 @@ pub fn render_confirm_invite(f: &mut Frame, s: &ConfirmInviteState) {
             Span::styled("  room:        ", Style::default().fg(Color::DarkGray)),
             Span::styled(room.name.clone(), Style::default().fg(Color::White).bold()),
             Span::styled(
-                if room.encrypted { "  (encrypted)" } else { "  (public)" },
+                if room.encrypted {
+                    "  (encrypted)"
+                } else {
+                    "  (public)"
+                },
                 Style::default().fg(Color::DarkGray),
             ),
         ]));
@@ -1703,18 +1726,16 @@ pub fn render_confirm_invite(f: &mut Frame, s: &ConfirmInviteState) {
         Span::styled(" Esc", Style::default().fg(Color::Red)),
         Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
     ]));
-    let para = Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan))
-                .padding(Padding::uniform(1))
-                .title(Span::styled(
-                    " accept invite? ",
-                    Style::default().fg(Color::Cyan).bold(),
-                )),
-        );
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .padding(Padding::uniform(1))
+            .title(Span::styled(
+                " accept invite? ",
+                Style::default().fg(Color::Cyan).bold(),
+            )),
+    );
     f.render_widget(para, area);
 }
 
@@ -1799,18 +1820,16 @@ pub fn render_onboarding(f: &mut Frame, page_indices: &[usize], cursor: usize) {
         Style::default().fg(Color::DarkGray),
     )));
 
-    let para = Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan))
-                .padding(Padding::uniform(1))
-                .title(Span::styled(
-                    " welcome to huddle ",
-                    Style::default().fg(Color::Cyan).bold(),
-                )),
-        );
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .padding(Padding::uniform(1))
+            .title(Span::styled(
+                " welcome to huddle ",
+                Style::default().fg(Color::Cyan).bold(),
+            )),
+    );
     f.render_widget(para, area);
 }
 
@@ -1850,10 +1869,7 @@ pub fn render_status_history(f: &mut Frame, app: &crate::app::TuiApp, scroll: u1
         for entry in app.status_history.iter().rev() {
             let t = format_clock_time(entry.timestamp);
             lines.push(Line::from(vec![
-                Span::styled(
-                    format!("  {}  ", t),
-                    Style::default().fg(Color::DarkGray),
-                ),
+                Span::styled(format!("  {}  ", t), Style::default().fg(Color::DarkGray)),
                 Span::styled(entry.message.clone(), Style::default().fg(Color::White)),
             ]));
         }
@@ -1941,7 +1957,9 @@ pub fn render_command_palette(f: &mut Frame, s: &crate::app::CommandPaletteState
         " Enter run · ↑/↓ navigate · type to filter · Esc cancel",
         Style::default().fg(Color::DarkGray),
     )));
-    let para = Paragraph::new(lines).wrap(Wrap { trim: false }).block(block);
+    let para = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(block);
     f.render_widget(para, area);
 }
 
@@ -1986,18 +2004,16 @@ pub fn render_update_opt_in(f: &mut Frame) {
             Span::styled(" no thanks", Style::default().fg(Color::DarkGray)),
         ]),
     ];
-    let para = Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Yellow))
-                .padding(Padding::uniform(1))
-                .title(Span::styled(
-                    " update check ",
-                    Style::default().fg(Color::Yellow).bold(),
-                )),
-        );
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow))
+            .padding(Padding::uniform(1))
+            .title(Span::styled(
+                " update check ",
+                Style::default().fg(Color::Yellow).bold(),
+            )),
+    );
     f.render_widget(para, area);
 }
 
@@ -2040,10 +2056,7 @@ pub fn render_invite_picker(f: &mut Frame, s: &crate::app::InvitePickerState) {
     let visible = filtered_invite_candidates(s);
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(vec![
-        Span::styled(
-            "  invite to ",
-            Style::default().fg(Color::DarkGray),
-        ),
+        Span::styled("  invite to ", Style::default().fg(Color::DarkGray)),
         Span::styled(
             format!("#{}", s.room_name),
             Style::default().fg(Color::White).bold(),
@@ -2100,10 +2113,7 @@ pub fn render_invite_picker(f: &mut Frame, s: &crate::app::InvitePickerState) {
                 .username
                 .clone()
                 .unwrap_or_else(|| "[anonymous]".to_string());
-            let hd = format!(
-                "HD-{}",
-                crate::ui::short_fp(&c.fingerprint).to_uppercase()
-            );
+            let hd = format!("HD-{}", crate::ui::short_fp(&c.fingerprint).to_uppercase());
             let mut spans = vec![
                 Span::styled(cursor, Style::default().fg(Color::Yellow)),
                 Span::raw(" "),
@@ -2121,10 +2131,7 @@ pub fn render_invite_picker(f: &mut Frame, s: &crate::app::InvitePickerState) {
                 Span::styled(hd, Style::default().fg(Color::DarkGray)),
             ];
             if c.tier == InviteTier::Verified {
-                spans.push(Span::styled(
-                    "  ✓",
-                    Style::default().fg(Color::Green),
-                ));
+                spans.push(Span::styled("  ✓", Style::default().fg(Color::Green)));
             }
             lines.push(Line::from(spans));
         }
@@ -2158,18 +2165,16 @@ pub fn render_invite_picker(f: &mut Frame, s: &crate::app::InvitePickerState) {
         Style::default().fg(Color::DarkGray),
     )));
 
-    let para = Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan))
-                .padding(Padding::uniform(1))
-                .title(Span::styled(
-                    " invite peers ",
-                    Style::default().fg(Color::Cyan).bold(),
-                )),
-        );
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .padding(Padding::uniform(1))
+            .title(Span::styled(
+                " invite peers ",
+                Style::default().fg(Color::Cyan).bold(),
+            )),
+    );
     f.render_widget(para, area);
 }
 
@@ -2221,14 +2226,25 @@ pub fn render_safety_number_changed(f: &mut Frame, s: &SafetyNumberChangedState)
         Line::from(""),
         Line::from(vec![
             Span::styled("  old key  ", Style::default().fg(Color::DarkGray)),
-            Span::styled(short_key(&s.old_pubkey_b64), Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                short_key(&s.old_pubkey_b64),
+                Style::default().fg(Color::DarkGray),
+            ),
         ]),
         Line::from(vec![
             Span::styled("  new key  ", Style::default().fg(Color::DarkGray)),
-            Span::styled(short_key(&s.new_pubkey_b64), Style::default().fg(Color::Yellow)),
+            Span::styled(
+                short_key(&s.new_pubkey_b64),
+                Style::default().fg(Color::Yellow),
+            ),
         ]),
         Line::from(""),
-        opt("re-verify out-of-band (SAS)", "v", s.focus == 0, Color::Cyan),
+        opt(
+            "re-verify out-of-band (SAS)",
+            "v",
+            s.focus == 0,
+            Color::Cyan,
+        ),
         opt("block this peer", "b", s.focus == 1, Color::Red),
         Line::from(""),
         Line::from(vec![
@@ -2278,7 +2294,10 @@ pub fn render_change_passphrase(f: &mut Frame, s: &ChangePassphraseState) {
             Style::default().fg(Color::White)
         };
         Line::from(vec![
-            Span::styled(format!("  {:<14}", label), Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("  {:<14}", label),
+                Style::default().fg(Color::DarkGray),
+            ),
             Span::styled(format!("[ {}{} ]", masked, cursor), value_style),
         ])
     };
@@ -2461,7 +2480,9 @@ fn numbered_phrase(phrase: &str) -> Vec<Line<'static>> {
             ));
             spans.push(Span::styled(
                 format!("{:<12}", w),
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
             ));
         }
         out.push(Line::from(spans));
@@ -2481,7 +2502,9 @@ pub fn render_emoji_picker(f: &mut Frame, s: &EmojiPickerState) {
     for (i, e) in REACTION_EMOJIS.iter().enumerate() {
         let selected = i == s.selected;
         let style = if selected {
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD | Modifier::REVERSED)
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD | Modifier::REVERSED)
         } else {
             Style::default().fg(Color::White)
         };

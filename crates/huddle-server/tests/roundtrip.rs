@@ -60,7 +60,10 @@ async fn recv(ws: &mut Ws) -> Value {
 /// `hello`, and expect `ready`.
 async fn handshake(ws: &mut Ws, id: &Identity, rooms: &[&str]) {
     let ch = recv(ws).await;
-    assert_eq!(ch["type"], "challenge", "server must greet with a challenge");
+    assert_eq!(
+        ch["type"], "challenge",
+        "server must greet with a challenge"
+    );
     let nonce = B64.decode(ch["nonce_b64"].as_str().unwrap()).unwrap();
     let sig = id.sign(&relay_auth_msg(&nonce));
     send(
@@ -89,7 +92,9 @@ async fn online_fanout_and_offline_mailbox() {
     {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let mut s = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
-        s.write_all(b"GET /health HTTP/1.1\r\nHost: x\r\n\r\n").await.unwrap();
+        s.write_all(b"GET /health HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .unwrap();
         let mut buf = vec![0u8; 256];
         let n = s.read(&mut buf).await.unwrap();
         let resp = String::from_utf8_lossy(&buf[..n]);
@@ -216,7 +221,10 @@ async fn second_hello_cannot_steal_another_identitys_mailbox() {
     .await;
     let receipt = recv(&mut a).await;
     assert_eq!(receipt["type"], "sent");
-    assert_eq!(receipt["queued"], 1, "message should be queued for offline B");
+    assert_eq!(
+        receipt["queued"], 1,
+        "message should be queued for offline B"
+    );
 
     // Attacker C authenticates as itself, then sends a SECOND Hello CLAIMING
     // B's fingerprint (with C's own pubkey + a bogus signature). The relay must

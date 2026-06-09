@@ -26,7 +26,9 @@ pub fn render(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme) {
 
     let title = Paragraph::new(Line::from(vec![Span::styled(
         "Settings",
-        Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD),
     )]));
     f.render_widget(title, parts[0]);
 
@@ -233,7 +235,10 @@ fn render_network<'a>(app: &TuiApp, theme: &Theme) -> Vec<Line<'a>> {
             theme.dim(),
         )]));
         if app.listen_addresses.is_empty() {
-            lines.push(Line::from(vec![Span::styled("    (binding…)", theme.dim())]));
+            lines.push(Line::from(vec![Span::styled(
+                "    (binding…)",
+                theme.dim(),
+            )]));
         } else {
             for a in app.listen_addresses.iter().take(6) {
                 lines.push(Line::from(vec![Span::styled(
@@ -333,7 +338,12 @@ fn render_privacy<'a>(app: &TuiApp, theme: &Theme) -> Vec<Line<'a>> {
             None => "not asked yet".into(),
         },
     ));
-    lines.push(row(theme, "B", "blocked peers", format!("{}", blocked_count)));
+    lines.push(row(
+        theme,
+        "B",
+        "blocked peers",
+        format!("{}", blocked_count),
+    ));
     if blocked_count > 0 {
         lines.push(Line::from(vec![
             Span::styled("      ", theme.dim()),

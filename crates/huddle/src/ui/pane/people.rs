@@ -28,13 +28,19 @@ pub fn render(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme) {
     let mut title_spans = vec![
         Span::styled(
             "Contacts",
-            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw("    "),
     ];
     if contact_req_count > 0 {
         title_spans.push(Span::styled(
-            format!("({} request{})  ·  ", contact_req_count, if contact_req_count == 1 { "" } else { "s" }),
+            format!(
+                "({} request{})  ·  ",
+                contact_req_count,
+                if contact_req_count == 1 { "" } else { "s" }
+            ),
             theme.warn_style(),
         ));
     }
@@ -100,7 +106,10 @@ fn render_contact_requests(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Them
         .border_style(border)
         .padding(Padding::horizontal(1))
         .title(Span::styled(
-            format!(" Contact requests ({}) ", app.pending_contact_requests.len()),
+            format!(
+                " Contact requests ({}) ",
+                app.pending_contact_requests.len()
+            ),
             Style::default().fg(theme.warn),
         ));
     let inner = block.inner(area);
@@ -268,11 +277,7 @@ fn render_known(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme) {
         let mut spans = vec![
             Span::styled(
                 format!(" {} ", dot),
-                if online {
-                    theme.ok()
-                } else {
-                    theme.dim()
-                },
+                if online { theme.ok() } else { theme.dim() },
             ),
             Span::styled(display_name, theme.text_style()),
             Span::raw("  "),

@@ -106,9 +106,9 @@ fn clean_build_cache(workspace: &Path) {
             "note: `cargo clean` exited {:?}; the build cache was left in place.",
             s.code()
         ),
-        Err(e) => eprintln!(
-            "note: couldn't run `cargo clean` ({e}); the build cache was left in place."
-        ),
+        Err(e) => {
+            eprintln!("note: couldn't run `cargo clean` ({e}); the build cache was left in place.")
+        }
     }
 }
 
@@ -121,7 +121,10 @@ fn build_gui(workspace: &Path) -> Result<()> {
         .status()
         .context("failed to launch `cargo` — is the Rust toolchain on your PATH?")?;
     if !status.success() {
-        bail!("`cargo build -p huddle-gui` failed (exit {:?})", status.code());
+        bail!(
+            "`cargo build -p huddle-gui` failed (exit {:?})",
+            status.code()
+        );
     }
     Ok(())
 }
@@ -228,8 +231,7 @@ fn write_macos_bundle(base: &Path, bin: &Path) -> Result<PathBuf> {
     // "damaged". A running instance keeps its now-unlinked inode, so this is
     // safe even when we're about to relaunch.
     let _ = std::fs::remove_dir_all(&app);
-    std::fs::create_dir_all(&macos)
-        .with_context(|| format!("create {}", macos.display()))?;
+    std::fs::create_dir_all(&macos).with_context(|| format!("create {}", macos.display()))?;
     let dest = macos.join("huddle-gui");
     // Remove any existing binary first — overwriting a running executable fails
     // with "text file busy"; replacing the inode is fine.

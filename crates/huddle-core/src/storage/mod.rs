@@ -108,9 +108,7 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         if let Err(e) = conn.execute_batch(&batch) {
             // Best-effort rollback (no-op if not in a tx).
             let _ = conn.execute_batch("ROLLBACK;");
-            return Err(HuddleError::Other(format!(
-                "migration {idx} failed: {e}"
-            )));
+            return Err(HuddleError::Other(format!("migration {idx} failed: {e}")));
         }
     }
     Ok(())

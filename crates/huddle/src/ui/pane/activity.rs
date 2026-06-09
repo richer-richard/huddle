@@ -13,13 +13,19 @@ use crate::ui::theme::Theme;
 pub fn render(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme) {
     let parts = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(2), Constraint::Percentage(40), Constraint::Min(0)])
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Percentage(40),
+            Constraint::Min(0),
+        ])
         .split(area);
 
     let title = Paragraph::new(Line::from(vec![
         Span::styled(
             "Activity",
-            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw("    "),
         Span::styled("c", theme.warn_style()),

@@ -117,11 +117,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme) {
         .unwrap_or(0);
     let offset = scroll_to_show(sel_idx, vis_h, lines.len());
 
-    let visible: Vec<Line> = lines
-        .into_iter()
-        .skip(offset)
-        .take(vis_h)
-        .collect();
+    let visible: Vec<Line> = lines.into_iter().skip(offset).take(vis_h).collect();
     let para = Paragraph::new(visible);
     f.render_widget(para, inner);
 }
@@ -234,7 +230,11 @@ fn render_item<'a>(
                     if requests > 0 {
                         spans.push(Span::raw(" "));
                         spans.push(Span::styled(
-                            format!("{} request{}", requests, if requests == 1 { "" } else { "s" }),
+                            format!(
+                                "{} request{}",
+                                requests,
+                                if requests == 1 { "" } else { "s" }
+                            ),
                             theme.unread(),
                         ));
                     }
@@ -284,8 +284,7 @@ fn render_item<'a>(
                     spans.push(Span::styled("·".to_string(), theme.dim()));
                 }
             }
-            let line = Line::from(spans)
-                .style(highlight(theme, focused, is_sel, Style::default()));
+            let line = Line::from(spans).style(highlight(theme, focused, is_sel, Style::default()));
             apply_selection_fg(line, theme, focused, is_sel)
         }
         SidebarItem::Dm(room_id) => {
@@ -309,8 +308,7 @@ fn render_item<'a>(
                 .as_deref()
                 .map(|fp| {
                     app.known_peers.iter().any(|p| {
-                        p.connected_peer_id.is_some()
-                            && p.fingerprint.as_deref() == Some(fp)
+                        p.connected_peer_id.is_some() && p.fingerprint.as_deref() == Some(fp)
                     })
                 })
                 .unwrap_or(false);
@@ -428,10 +426,7 @@ fn render_item<'a>(
             apply_selection_fg(line, theme, focused, is_sel)
         }
         SidebarItem::Person(addr) => {
-            let p = app
-                .known_peers
-                .iter()
-                .find(|p| p.address == *addr);
+            let p = app.known_peers.iter().find(|p| p.address == *addr);
             let label = p
                 .and_then(|p| p.label.clone())
                 .unwrap_or_else(|| addr.to_string());
@@ -528,10 +523,7 @@ pub fn render_top_header(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme)
             theme.accent_bold(),
         ),
         Span::raw("  ·  "),
-        Span::styled(
-            display_id(app.handle.fingerprint()),
-            theme.dim(),
-        ),
+        Span::styled(display_id(app.handle.fingerprint()), theme.dim()),
     ]);
     f.render_widget(Paragraph::new(title), parts[0]);
     let clock = Line::from(vec![Span::styled(current_hhmm(), theme.dim())]);

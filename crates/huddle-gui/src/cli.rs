@@ -6,7 +6,11 @@ use huddle_core::network::NetworkMode;
 use libp2p::Multiaddr;
 
 #[derive(Parser)]
-#[command(name = "huddle-gui", version, about = "Huddle — decentralized encrypted chat (native GUI)")]
+#[command(
+    name = "huddle-gui",
+    version,
+    about = "Huddle — decentralized encrypted chat (native GUI)"
+)]
 pub struct Cli {
     /// Override the data directory (best-effort — see `apply_data_dir_override`).
     #[arg(long)]
@@ -84,7 +88,8 @@ pub enum Commands {
 }
 
 fn parse_mode(s: &str) -> std::result::Result<NetworkMode, String> {
-    NetworkMode::from_str(s).ok_or_else(|| format!("unknown mode `{s}` (try server, mdns or direct)"))
+    NetworkMode::from_str(s)
+        .ok_or_else(|| format!("unknown mode `{s}` (try server, mdns or direct)"))
 }
 
 impl Cli {
@@ -129,7 +134,9 @@ impl Cli {
     }
 
     pub fn resolve_tor_socks(&self) -> Option<String> {
-        self.tor_socks.clone().or_else(huddle_core::config::tor_socks)
+        self.tor_socks
+            .clone()
+            .or_else(huddle_core::config::tor_socks)
     }
 
     /// huddle 1.0: `--transport-order` as a token list (core folds in

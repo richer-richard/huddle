@@ -238,7 +238,10 @@ mod tests {
         assert_eq!(ct.len(), MLKEM_CT_LEN);
 
         let ss_recv = responder.decapsulate(&ct).unwrap();
-        assert_eq!(*ss_send, *ss_recv, "encapsulator and decapsulator must agree");
+        assert_eq!(
+            *ss_send, *ss_recv,
+            "encapsulator and decapsulator must agree"
+        );
     }
 
     #[test]

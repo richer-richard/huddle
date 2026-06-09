@@ -40,8 +40,8 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use base64::engine::general_purpose::STANDARD as B64;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use base64::Engine;
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -257,7 +257,8 @@ pub fn decode(url: &str) -> Result<InviteLink> {
             {
                 return Err(HuddleError::Other(
                     "invite claims legacy v1 but carries signature fields \
-                     (possible version-downgrade attack) — refusing".into(),
+                     (possible version-downgrade attack) — refusing"
+                        .into(),
                 ));
             }
             Ok(invite)
@@ -341,9 +342,7 @@ fn verify_invite_signature(invite: &InviteLink) -> Result<()> {
 
 fn verify_invite_freshness(invite: &InviteLink) -> Result<()> {
     if invite.signed_at_ms == 0 {
-        return Err(HuddleError::Other(
-            "v2 invite missing signed_at_ms".into(),
-        ));
+        return Err(HuddleError::Other("v2 invite missing signed_at_ms".into()));
     }
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -481,7 +480,10 @@ mod tests {
         let url = encode(&signed).unwrap();
         let back = decode(&url).unwrap();
         assert_eq!(back, signed);
-        assert_eq!(back.relay_url.as_deref(), Some("wss://abc.trycloudflare.com/ws"));
+        assert_eq!(
+            back.relay_url.as_deref(),
+            Some("wss://abc.trycloudflare.com/ws")
+        );
     }
 
     #[test]
@@ -555,7 +557,10 @@ mod tests {
         inv.fingerprint = id.fingerprint().to_string();
         inv.mlkem_ek_b64 = Some(B64.encode([7u8; 1184])); // ML-KEM-768 ek size
         let signed = sign_invite(&id, inv).unwrap();
-        assert_eq!(signed.v, 4, "an invite committing to an ML-KEM key must be v4");
+        assert_eq!(
+            signed.v, 4,
+            "an invite committing to an ML-KEM key must be v4"
+        );
         let url = encode(&signed).unwrap();
         let back = decode(&url).unwrap();
         assert_eq!(back, signed);
@@ -577,7 +582,10 @@ mod tests {
         let url = encode(&signed).unwrap();
         let back = decode(&url).unwrap();
         assert_eq!(back, signed);
-        assert_eq!(back.relay_url.as_deref(), Some("wss://abc.trycloudflare.com/ws"));
+        assert_eq!(
+            back.relay_url.as_deref(),
+            Some("wss://abc.trycloudflare.com/ws")
+        );
         assert!(back.mlkem_ek_b64.is_some());
     }
 

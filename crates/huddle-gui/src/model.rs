@@ -115,7 +115,10 @@ pub enum UiAction {
     SwitchRoom(String),
     SelectPane(Pane),
     ToggleSection(Section),
-    SendMessage { room_id: String, body: String },
+    SendMessage {
+        room_id: String,
+        body: String,
+    },
     TypingPing(String),
     Copy(String),
     // Modal openers.
@@ -367,7 +370,9 @@ pub enum Modal {
     Qr,
     /// huddle 1.2.1: About window — version + a link to the GitHub repo.
     About,
-    Onboarding { cursor: usize },
+    Onboarding {
+        cursor: usize,
+    },
     UpdateOptIn,
     QuitConfirm,
     /// huddle 2.0.0 (F5): change the master passphrase + re-key the DB at rest.
@@ -677,7 +682,11 @@ impl OpenRoom {
     pub fn reactions_for(&self, client_msg_id: &str, our_fp: &str) -> Vec<(String, usize, bool)> {
         let mut order: Vec<String> = Vec::new();
         let mut counts: HashMap<String, (usize, bool)> = HashMap::new();
-        for r in self.reactions.iter().filter(|r| r.target_client_msg_id == client_msg_id) {
+        for r in self
+            .reactions
+            .iter()
+            .filter(|r| r.target_client_msg_id == client_msg_id)
+        {
             let e = counts.entry(r.emoji.clone()).or_insert_with(|| {
                 order.push(r.emoji.clone());
                 (0, false)
@@ -720,7 +729,7 @@ pub struct ViewModel {
     // snapshots refreshed on the ~1s tick
     pub discovered: Vec<DiscoveredRoom>,
     pub active_ids: HashSet<String>,
-    pub labels: HashMap<String, String>,      // room_id -> display label
+    pub labels: HashMap<String, String>, // room_id -> display label
     pub peer_labels: HashMap<String, String>, // fingerprint -> display name
     pub known_peers: Vec<KnownPeerStatus>,
     pub pending_requests: Vec<PendingFriendRequest>,
@@ -946,7 +955,12 @@ impl ViewModel {
         let kind = h
             .active_room_info(id)
             .map(|r| r.kind)
-            .or_else(|| self.discovered.iter().find(|d| d.room_id == id).map(|d| d.kind))
+            .or_else(|| {
+                self.discovered
+                    .iter()
+                    .find(|d| d.room_id == id)
+                    .map(|d| d.kind)
+            })
             .unwrap_or(RoomKind::Group);
         self.ensure_open(h, id);
         self.pane = match kind {
@@ -1067,7 +1081,9 @@ pub fn reduce(vm: &mut ViewModel, h: &AppHandle, msg: Inbox) {
             crate::bridge::ReqOk::JoinCode(code) => {
                 vm.modal = Modal::Info(format!("Join code (valid ~10 min):\n\n{code}"));
             }
-            crate::bridge::ReqOk::SavedPath(p) => vm.set_status(format!("saved to {}", p.display())),
+            crate::bridge::ReqOk::SavedPath(p) => {
+                vm.set_status(format!("saved to {}", p.display()))
+            }
             other => vm.push_log(format!("ok [{tag:?}]: {other:?}")),
         },
         Inbox::ReqErr(tag, e) => match tag {
@@ -1102,7 +1118,10 @@ fn apply_event(vm: &mut ViewModel, h: &AppHandle, ev: AppEvent) {
                 vm.pane = Pane::Welcome;
             }
         }
-        AppEvent::MemberJoined { room_id, fingerprint } => {
+        AppEvent::MemberJoined {
+            room_id,
+            fingerprint,
+        } => {
             if let Some(r) = vm.open_room_mut(&room_id) {
                 if !r.members.contains(&fingerprint) {
                     r.members.push(fingerprint);
@@ -1110,12 +1129,20 @@ fn apply_event(vm: &mut ViewModel, h: &AppHandle, ev: AppEvent) {
                 }
             }
         }
-        AppEvent::MemberLeft { room_id, fingerprint } => {
+        AppEvent::MemberLeft {
+            room_id,
+            fingerprint,
+        } => {
             if let Some(r) = vm.open_room_mut(&room_id) {
                 r.members.retain(|f| f != &fingerprint);
             }
         }
-        AppEvent::MessageReceived { room_id, sender_fingerprint, body, sent_at } => {
+        AppEvent::MessageReceived {
+            room_id,
+            sender_fingerprint,
+            body,
+            sent_at,
+        } => {
             let active = vm.is_active_room(&room_id);
             if let Some(r) = vm.open_room_mut(&room_id) {
                 push_capped(
@@ -1145,7 +1172,11 @@ fn apply_event(vm: &mut ViewModel, h: &AppHandle, ev: AppEvent) {
                 *c = c.saturating_add(1);
             }
         }
-        AppEvent::MessageSent { room_id, body, message_id } => {
+        AppEvent::MessageSent {
+            room_id,
+            body,
+            message_id,
+        } => {
             let me = vm.our_fp.clone();
             let now = now_unix();
             if let Some(r) = vm.open_room_mut(&room_id) {
@@ -1177,14 +1208,24 @@ fn apply_event(vm: &mut ViewModel, h: &AppHandle, ev: AppEvent) {
         AppEvent::MentionReceived { room_id, .. } => {
             vm.set_status(format!("@you mentioned in {}", vm.room_label(&room_id)))
         }
-        AppEvent::InboundDial { peer_id, fingerprint, address } => {
+        AppEvent::InboundDial {
+            peer_id,
+            fingerprint,
+            address,
+        } => {
             vm.replace_modal_if_idle(Modal::InboundDial(InboundDialState {
                 peer_id,
                 fingerprint,
                 address,
             }));
         }
-        AppEvent::SasCodeReady { partner_fingerprint, tx_id, emoji_labels, decimal, .. } => {
+        AppEvent::SasCodeReady {
+            partner_fingerprint,
+            tx_id,
+            emoji_labels,
+            decimal,
+            ..
+        } => {
             // Advance our own in-flight SAS modal, or raise one for an
             // inbound request.
             if let Modal::Sas(s) = &mut vm.modal {
@@ -1207,13 +1248,23 @@ fn apply_event(vm: &mut ViewModel, h: &AppHandle, ev: AppEvent) {
                 },
             }));
         }
-        AppEvent::SasVerified { partner_fingerprint, .. } => {
+        AppEvent::SasVerified {
+            partner_fingerprint,
+            ..
+        } => {
             if matches!(vm.modal, Modal::Sas(_)) {
                 vm.close_modal();
             }
-            vm.set_status(format!("verified {} via SAS", fmt::short_fp2(&partner_fingerprint)));
+            vm.set_status(format!(
+                "verified {} via SAS",
+                fmt::short_fp2(&partner_fingerprint)
+            ));
         }
-        AppEvent::RotationRequested { room_id, rotator_fingerprint, new_salt } => {
+        AppEvent::RotationRequested {
+            room_id,
+            rotator_fingerprint,
+            new_salt,
+        } => {
             vm.replace_modal_if_idle(Modal::AcceptRotation(AcceptRotationState {
                 room_id,
                 rotator_fingerprint,
@@ -1224,10 +1275,13 @@ fn apply_event(vm: &mut ViewModel, h: &AppHandle, ev: AppEvent) {
         }
         AppEvent::WentDark => {
             vm.went_dark_at = Some(Instant::now());
-            vm.modal = Modal::Info("Goodbye. huddle has gone dark — your data has been wiped.".into());
+            vm.modal =
+                Modal::Info("Goodbye. huddle has gone dark — your data has been wiped.".into());
             vm.modal_queue.clear();
         }
-        AppEvent::InviteFingerprintMismatch { claimed, actual, .. } => {
+        AppEvent::InviteFingerprintMismatch {
+            claimed, actual, ..
+        } => {
             vm.replace_modal_if_idle(Modal::Error(format!(
                 "invite fingerprint mismatch — connection dropped.\nclaimed: {}\nactual:  {}\nthe invite link may be forged.",
                 fmt::short_fp2(&claimed),
@@ -1237,7 +1291,11 @@ fn apply_event(vm: &mut ViewModel, h: &AppHandle, ev: AppEvent) {
         AppEvent::CodeJoinTimedOut { reason, .. } => {
             vm.replace_modal_if_idle(Modal::Error(format!("join code: {reason}")));
         }
-        AppEvent::ContactRequestReceived { fingerprint, display_name, .. } => {
+        AppEvent::ContactRequestReceived {
+            fingerprint,
+            display_name,
+            ..
+        } => {
             // Pull the new request in immediately (don't wait for the 1s tick)
             // so the Requests tab badge updates the moment it arrives.
             vm.contact_requests = h.list_pending_contact_requests();
@@ -1325,9 +1383,15 @@ fn describe_event(ev: &AppEvent) -> String {
         RoomLost { room_id } => format!("room lost {}", short_room(room_id)),
         RoomJoined { room_id } => format!("joined room {}", short_room(room_id)),
         RoomLeft { room_id } => format!("left room {}", short_room(room_id)),
-        MemberJoined { fingerprint, .. } => format!("member joined {}", fmt::short_fp2(fingerprint)),
+        MemberJoined { fingerprint, .. } => {
+            format!("member joined {}", fmt::short_fp2(fingerprint))
+        }
         MemberLeft { fingerprint, .. } => format!("member left {}", fmt::short_fp2(fingerprint)),
-        MessageReceived { sender_fingerprint, body, .. } => {
+        MessageReceived {
+            sender_fingerprint,
+            body,
+            ..
+        } => {
             format!("{}: {}", fmt::short_fp2(sender_fingerprint), preview(body))
         }
         MessageSent { body, .. } => format!("you: {}", preview(body)),
@@ -1336,28 +1400,46 @@ fn describe_event(ev: &AppEvent) -> String {
         DialSucceeded { address, .. } => format!("connected to {address}"),
         DialFailed { address, error } => format!("dial {address} failed: {error}"),
         Error { description } => format!("error: {description}"),
-        FileOffered { name, size_bytes, .. } => {
+        FileOffered {
+            name, size_bytes, ..
+        } => {
             format!("file offered: {name} ({} KB)", size_bytes / 1024)
         }
         FileReady { .. } => "file ready".to_string(),
         FileSaved { path, .. } => format!("saved to {path}"),
         FileFailed { reason, .. } => format!("transfer failed: {reason}"),
-        RotationRequested { rotator_fingerprint, .. } => {
-            format!("key rotation requested by {}", fmt::short_fp2(rotator_fingerprint))
+        RotationRequested {
+            rotator_fingerprint,
+            ..
+        } => {
+            format!(
+                "key rotation requested by {}",
+                fmt::short_fp2(rotator_fingerprint)
+            )
         }
         MentionReceived { room_id, .. } => format!("@you mentioned in {}", short_room(room_id)),
-        InboundDial { fingerprint, .. } => format!("inbound dial from {}", fmt::short_fp2(fingerprint)),
+        InboundDial { fingerprint, .. } => {
+            format!("inbound dial from {}", fmt::short_fp2(fingerprint))
+        }
         SasCodeReady { decimal, .. } => format!("SAS code: {decimal}"),
-        SasVerified { partner_fingerprint, .. } => {
+        SasVerified {
+            partner_fingerprint,
+            ..
+        } => {
             format!("verified {} via SAS", fmt::short_fp2(partner_fingerprint))
         }
         NatStatusChanged { label, .. } => format!("NAT status: {label}"),
-        PeerProfileUpdated { fingerprint, username } => {
+        PeerProfileUpdated {
+            fingerprint,
+            username,
+        } => {
             let label = username.clone().unwrap_or_else(|| "[anonymous]".into());
             format!("{} is now {}", fmt::short_fp(fingerprint), label)
         }
         WentDark => "gone dark — data wiped".to_string(),
-        AutoOpenDm { fingerprint, .. } => format!("auto-opened DM with {}", fmt::short_fp2(fingerprint)),
+        AutoOpenDm { fingerprint, .. } => {
+            format!("auto-opened DM with {}", fmt::short_fp2(fingerprint))
+        }
         other => format!("{other:?}"),
     }
 }
@@ -1367,7 +1449,10 @@ fn short_room(id: &str) -> String {
 }
 
 fn preview(body: &str) -> String {
-    let single: String = body.chars().map(|c| if c == '\n' { ' ' } else { c }).collect();
+    let single: String = body
+        .chars()
+        .map(|c| if c == '\n' { ' ' } else { c })
+        .collect();
     let trimmed = single.trim();
     if trimmed.chars().count() > 80 {
         format!("{}…", trimmed.chars().take(77).collect::<String>())
@@ -1514,7 +1599,10 @@ mod tests {
         assert_eq!(grouped[0], ("👍".to_string(), 2, true));
         assert_eq!(grouped[1], ("❤️".to_string(), 1, false));
         // a different message's reactions don't leak in
-        assert_eq!(r.reactions_for("m2", "me"), vec![("🔥".to_string(), 1, false)]);
+        assert_eq!(
+            r.reactions_for("m2", "me"),
+            vec![("🔥".to_string(), 1, false)]
+        );
         // an un-reacted message is empty
         assert!(r.reactions_for("m3", "me").is_empty());
     }

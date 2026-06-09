@@ -65,7 +65,11 @@ enum Transition {
     /// `(auth, display_name, import_seed_phrase)` — the seed phrase is `Some`
     /// only on a fresh-install restore (F6), wrapped in `Zeroizing` so it's
     /// scrubbed once the build consumes it.
-    Build(bridge::AuthChoice, Option<String>, Option<Zeroizing<String>>),
+    Build(
+        bridge::AuthChoice,
+        Option<String>,
+        Option<Zeroizing<String>>,
+    ),
     Ready(ReadyParts),
     FailedAuth(String),
 }
@@ -92,7 +96,11 @@ impl HuddleApp {
 
     fn init_state(&mut self) {
         if self.cli.no_master_passphrase {
-            self.begin_build(bridge::AuthChoice::NoPassphrase, self.cli.name.clone(), None);
+            self.begin_build(
+                bridge::AuthChoice::NoPassphrase,
+                self.cli.name.clone(),
+                None,
+            );
             return;
         }
         let salt_exists = huddle_core::storage::keychain::keychain_salt_path().exists();
@@ -168,8 +176,7 @@ impl HuddleApp {
                 }));
             }
             Transition::FailedAuth(e) => {
-                let first_launch =
-                    !huddle_core::storage::keychain::keychain_salt_path().exists();
+                let first_launch = !huddle_core::storage::keychain::keychain_salt_path().exists();
                 self.state = AppState::Locked(LockedForm {
                     first_launch,
                     error: Some(e),
@@ -285,7 +292,8 @@ impl Ready {
             if !matches!(self.vm.modal, Modal::QuitConfirm) {
                 self.vm.replace_modal_if_idle(Modal::QuitConfirm);
             }
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
         false
     }
@@ -296,7 +304,13 @@ impl Ready {
         if focused || !self.vm.notifications_enabled {
             return None;
         }
-        if let AppEvent::MessageReceived { room_id, sender_fingerprint, body, .. } = ev {
+        if let AppEvent::MessageReceived {
+            room_id,
+            sender_fingerprint,
+            body,
+            ..
+        } = ev
+        {
             let room = self.vm.room_label(room_id);
             let sender = self.vm.peer_label(sender_fingerprint);
             return Some((
@@ -388,7 +402,11 @@ impl Ready {
                 });
             }
             UiAction::CloseModal => self.vm.close_modal(),
-            UiAction::SubmitNewGroup { name, encrypted, passphrase } => {
+            UiAction::SubmitNewGroup {
+                name,
+                encrypted,
+                passphrase,
+            } => {
                 let pass = if encrypted { Some(passphrase) } else { None };
                 self.cmd.request(ReqTag::StartRoom, move |h| async move {
                     h.start_room(name.trim(), encrypted, pass.as_deref(), RoomKind::Group)
@@ -426,7 +444,10 @@ impl Ready {
                     }
                 }
             }
-            UiAction::SubmitJoin { room_id, passphrase } => {
+            UiAction::SubmitJoin {
+                room_id,
+                passphrase,
+            } => {
                 self.cmd.fire(move |h| async move {
                     h.join_room(&room_id, passphrase.as_deref()).await
                 });
@@ -440,14 +461,18 @@ impl Ready {
             }
             UiAction::PersonStartDm(fp) => {
                 self.cmd.request(ReqTag::StartDirect, move |h| async move {
-                    h.start_direct(&fp).await.map(ReqOk::RoomId).map_err(|e| e.to_string())
+                    h.start_direct(&fp)
+                        .await
+                        .map(ReqOk::RoomId)
+                        .map_err(|e| e.to_string())
                 });
             }
             UiAction::PersonRedial(addr) => {
                 self.cmd.fire(move |h| async move { h.redial(&addr).await });
             }
             UiAction::PersonForget(addr) => {
-                self.cmd.fire(move |h| async move { h.forget_peer(&addr).await });
+                self.cmd
+                    .fire(move |h| async move { h.forget_peer(&addr).await });
             }
             UiAction::PersonBlock(fp) => {
                 if let Err(e) = self.handle.block_peer(&fp) {
@@ -464,7 +489,8 @@ impl Ready {
                 }
             }
             UiAction::AcceptRequest(fp) => {
-                self.cmd.fire(move |h| async move { h.accept_pending_friend_request(&fp).await });
+                self.cmd
+                    .fire(move |h| async move { h.accept_pending_friend_request(&fp).await });
             }
             UiAction::RejectRequest(fp) => {
                 if let Err(e) = self.handle.reject_pending_friend_request(&fp) {
@@ -509,11 +535,10 @@ impl Ready {
                     }
                     return;
                 }
-                let resolved =
-                    huddle_core::app::normalize_to_fingerprint(&target).or_else(|| {
-                        let m = self.handle.peers_with_username(&target);
-                        (m.len() == 1).then(|| m[0].clone())
-                    });
+                let resolved = huddle_core::app::normalize_to_fingerprint(&target).or_else(|| {
+                    let m = self.handle.peers_with_username(&target);
+                    (m.len() == 1).then(|| m[0].clone())
+                });
                 match resolved {
                     Some(fp) if fp == self.vm.our_fp => {
                         if let Modal::AddContact(s) = &mut self.vm.modal {
@@ -529,7 +554,8 @@ impl Ready {
                             let _ = h.dial_by_id_or_username(&dial_target).await;
                             r
                         });
-                        self.vm.set_status("contact request sent (also trying LAN)…");
+                        self.vm
+                            .set_status("contact request sent (also trying LAN)…");
                         self.vm.modal = Modal::None;
                     }
                     None => {
@@ -577,7 +603,10 @@ impl Ready {
                 });
             }
             UiAction::SubmitEditAlias { fingerprint, alias } => {
-                if let Err(e) = self.handle.set_contact_alias(&fingerprint, alias.as_deref()) {
+                if let Err(e) = self
+                    .handle
+                    .set_contact_alias(&fingerprint, alias.as_deref())
+                {
                     self.vm.set_status(format!("rename failed: {e}"));
                 } else {
                     self.vm.refresh(&self.handle);
@@ -591,11 +620,19 @@ impl Ready {
                 });
                 self.vm.close_modal();
             }
-            UiAction::InboundReject { peer_id, fingerprint } => {
-                self.cmd.fire(move |h| async move { h.reject_inbound(peer_id, &fingerprint).await });
+            UiAction::InboundReject {
+                peer_id,
+                fingerprint,
+            } => {
+                self.cmd
+                    .fire(move |h| async move { h.reject_inbound(peer_id, &fingerprint).await });
                 self.vm.close_modal();
             }
-            UiAction::InboundTrust { peer_id, fingerprint, address } => {
+            UiAction::InboundTrust {
+                peer_id,
+                fingerprint,
+                address,
+            } => {
                 self.cmd.fire(move |h| async move {
                     h.trust_inbound(peer_id, &fingerprint, &address).await
                 });
@@ -610,8 +647,11 @@ impl Ready {
             }
             UiAction::OpenVerify(room_id) => {
                 let me = self.vm.our_fp.clone();
-                let verified: std::collections::HashSet<String> =
-                    self.handle.verified_fingerprints(&room_id).into_iter().collect();
+                let verified: std::collections::HashSet<String> = self
+                    .handle
+                    .verified_fingerprints(&room_id)
+                    .into_iter()
+                    .collect();
                 let members = self
                     .handle
                     .room_members(&room_id)
@@ -624,19 +664,32 @@ impl Ready {
                     .collect();
                 self.vm.modal = Modal::Verify(VerifyState { room_id, members });
             }
-            UiAction::ToggleMemberVerified { room_id, fingerprint, verified } => {
-                if let Err(e) = self.handle.set_member_verified(&room_id, &fingerprint, verified) {
+            UiAction::ToggleMemberVerified {
+                room_id,
+                fingerprint,
+                verified,
+            } => {
+                if let Err(e) = self
+                    .handle
+                    .set_member_verified(&room_id, &fingerprint, verified)
+                {
                     self.vm.set_status(format!("verify failed: {e}"));
                 }
             }
-            UiAction::StartSas { room_id, fingerprint } => {
+            UiAction::StartSas {
+                room_id,
+                fingerprint,
+            } => {
                 self.vm.modal = Modal::Sas(SasState {
                     partner_fingerprint: fingerprint.clone(),
                     tx_id: String::new(),
                     stage: SasStage::Waiting,
                 });
                 self.cmd.request(
-                    ReqTag::SasStart { room_id: room_id.clone(), partner: fingerprint.clone() },
+                    ReqTag::SasStart {
+                        room_id: room_id.clone(),
+                        partner: fingerprint.clone(),
+                    },
                     move |h| async move {
                         h.sas_start(&room_id, &fingerprint)
                             .await
@@ -646,18 +699,25 @@ impl Ready {
                 );
             }
             UiAction::SasMatch(tx) => {
-                self.cmd.fire(move |h| async move { h.sas_match(&tx).await });
+                self.cmd
+                    .fire(move |h| async move { h.sas_match(&tx).await });
             }
             UiAction::SasCancel(tx) => {
                 self.handle.sas_cancel(&tx);
                 self.vm.close_modal();
             }
-            UiAction::DoKick { room_id, fingerprint } => {
+            UiAction::DoKick {
+                room_id,
+                fingerprint,
+            } => {
                 self.cmd.fire(move |h| async move {
                     h.kick_member(&room_id, &fingerprint).await.map(|_| ())
                 });
             }
-            UiAction::DoGrant { room_id, fingerprint } => {
+            UiAction::DoGrant {
+                room_id,
+                fingerprint,
+            } => {
                 self.cmd
                     .fire(move |h| async move { h.grant_owner(&room_id, &fingerprint).await });
             }
@@ -668,12 +728,19 @@ impl Ready {
                     error: None,
                 });
             }
-            UiAction::SubmitRotate { room_id, passphrase } => {
+            UiAction::SubmitRotate {
+                room_id,
+                passphrase,
+            } => {
                 self.cmd
                     .fire(move |h| async move { h.rotate_room(&room_id, &passphrase).await });
                 self.vm.modal = Modal::None;
             }
-            UiAction::SubmitAcceptRotation { room_id, new_salt, passphrase } => {
+            UiAction::SubmitAcceptRotation {
+                room_id,
+                new_salt,
+                passphrase,
+            } => {
                 self.cmd.fire(move |h| async move {
                     h.accept_rotation(&room_id, &new_salt, &passphrase).await
                 });
@@ -717,8 +784,9 @@ impl Ready {
                         room_id,
                         ..Default::default()
                     });
-                } else if let Some(path) =
-                    rfd::FileDialog::new().set_title("Attach a file").pick_file()
+                } else if let Some(path) = rfd::FileDialog::new()
+                    .set_title("Attach a file")
+                    .pick_file()
                 {
                     self.cmd.fire(move |h| async move {
                         h.send_file(&room_id, &path).await.map(|_| ())
@@ -747,7 +815,9 @@ impl Ready {
             }
             UiAction::SaveAttachment { room_id, file_id } => {
                 self.cmd.request(
-                    ReqTag::SaveDownload { file_id: file_id.clone() },
+                    ReqTag::SaveDownload {
+                        file_id: file_id.clone(),
+                    },
                     move |h| async move {
                         h.save_to_downloads(&room_id, &file_id)
                             .await
@@ -895,7 +965,8 @@ impl Ready {
                     }
                 } else {
                     let pass = if requires { input } else { String::new() };
-                    self.cmd.fire(move |h| async move { h.go_dark(&pass).await });
+                    self.cmd
+                        .fire(move |h| async move { h.go_dark(&pass).await });
                 }
             }
             UiAction::OnboardingNext => {
@@ -957,12 +1028,13 @@ impl Ready {
                 // Verification of `current` + the at-rest re-key happen in the
                 // core. Success arrives as AppEvent::PassphraseChanged (closes the
                 // modal); a failure comes back tagged so we can show it inline.
-                self.cmd.request(ReqTag::ChangePassphrase, move |h| async move {
-                    h.change_master_passphrase(&current, &new)
-                        .await
-                        .map(|_| ReqOk::Unit)
-                        .map_err(|e| e.to_string())
-                });
+                self.cmd
+                    .request(ReqTag::ChangePassphrase, move |h| async move {
+                        h.change_master_passphrase(&current, &new)
+                            .await
+                            .map(|_| ReqOk::Unit)
+                            .map_err(|e| e.to_string())
+                    });
             }
 
             // ---- huddle 2.0.0 (F6): BIP39 seed-phrase export ----
@@ -986,8 +1058,9 @@ impl Ready {
                         s.step = ExportSeedStep::Done;
                         s.error = None;
                     } else {
-                        s.error =
-                            Some("that doesn't match — check your transcription word by word".into());
+                        s.error = Some(
+                            "that doesn't match — check your transcription word by word".into(),
+                        );
                     }
                 }
             }
@@ -1005,18 +1078,34 @@ impl Ready {
             }
 
             // ---- huddle 2.0.0 (F10): reactions / replies / edits / deletes ----
-            UiAction::OpenEmojiPicker { room_id, target_msg_id } => {
-                self.vm.modal = Modal::EmojiPicker(EmojiPickerState { room_id, target_msg_id });
+            UiAction::OpenEmojiPicker {
+                room_id,
+                target_msg_id,
+            } => {
+                self.vm.modal = Modal::EmojiPicker(EmojiPickerState {
+                    room_id,
+                    target_msg_id,
+                });
             }
-            UiAction::SendReaction { room_id, target_msg_id, emoji, removed } => {
+            UiAction::SendReaction {
+                room_id,
+                target_msg_id,
+                emoji,
+                removed,
+            } => {
                 self.cmd.fire(move |h| async move {
-                    h.send_reaction(&room_id, &target_msg_id, &emoji, removed).await
+                    h.send_reaction(&room_id, &target_msg_id, &emoji, removed)
+                        .await
                 });
                 if matches!(self.vm.modal, Modal::EmojiPicker(_)) {
                     self.vm.modal = Modal::None;
                 }
             }
-            UiAction::StartReply { room_id, target_msg_id, preview } => {
+            UiAction::StartReply {
+                room_id,
+                target_msg_id,
+                preview,
+            } => {
                 if let Some(r) = self.vm.open_room_mut(&room_id) {
                     r.reply_to = Some((target_msg_id, preview));
                     r.edit_target = None;
@@ -1027,16 +1116,23 @@ impl Ready {
                     r.reply_to = None;
                 }
             }
-            UiAction::SendReply { room_id, body, reply_to } => {
+            UiAction::SendReply {
+                room_id,
+                body,
+                reply_to,
+            } => {
                 let rid = room_id.clone();
-                self.cmd.fire(move |h| async move {
-                    h.send_reply(&rid, &body, &reply_to).await
-                });
+                self.cmd
+                    .fire(move |h| async move { h.send_reply(&rid, &body, &reply_to).await });
                 if let Some(r) = self.vm.open_room_mut(&room_id) {
                     r.reply_to = None;
                 }
             }
-            UiAction::StartEdit { room_id, target_msg_id, body } => {
+            UiAction::StartEdit {
+                room_id,
+                target_msg_id,
+                body,
+            } => {
                 if let Some(r) = self.vm.open_room_mut(&room_id) {
                     r.edit_target = Some(target_msg_id);
                     r.input = body;
@@ -1049,7 +1145,11 @@ impl Ready {
                     r.input.clear();
                 }
             }
-            UiAction::SendEdit { room_id, target_msg_id, new_body } => {
+            UiAction::SendEdit {
+                room_id,
+                target_msg_id,
+                new_body,
+            } => {
                 let rid = room_id.clone();
                 self.cmd.fire(move |h| async move {
                     h.edit_message(&rid, &target_msg_id, &new_body).await
@@ -1059,17 +1159,23 @@ impl Ready {
                     r.input.clear();
                 }
             }
-            UiAction::OpenConfirmDelete { room_id, target_msg_id, preview } => {
+            UiAction::OpenConfirmDelete {
+                room_id,
+                target_msg_id,
+                preview,
+            } => {
                 self.vm.modal = Modal::ConfirmDelete(ConfirmDeleteState {
                     room_id,
                     target_msg_id,
                     preview,
                 });
             }
-            UiAction::SendDelete { room_id, target_msg_id } => {
-                self.cmd.fire(move |h| async move {
-                    h.delete_message(&room_id, &target_msg_id).await
-                });
+            UiAction::SendDelete {
+                room_id,
+                target_msg_id,
+            } => {
+                self.cmd
+                    .fire(move |h| async move { h.delete_message(&room_id, &target_msg_id).await });
                 self.vm.modal = Modal::None;
             }
         }
@@ -1120,7 +1226,10 @@ impl Ready {
             // huddle 2.0 (F1): None keeps this a v2/v3 invite (back-compatible).
             mlkem_ek_b64: None,
         };
-        let invite = self.handle.sign_invite(unsigned.clone()).unwrap_or(unsigned);
+        let invite = self
+            .handle
+            .sign_invite(unsigned.clone())
+            .unwrap_or(unsigned);
         match huddle_core::invite::encode(&invite) {
             Ok(url) => self.vm.modal = Modal::ShowInvite(url),
             Err(e) => self.vm.set_status(format!("encode invite: {e}")),
@@ -1141,8 +1250,9 @@ impl Ready {
             match self.handle.set_clearnet_relay(Some(relay)) {
                 Ok(()) => {
                     self.vm.clearnet_relay = Some(relay.to_string());
-                    self.vm
-                        .set_status(format!("saved invite relay {relay} — restart to connect through it"));
+                    self.vm.set_status(format!(
+                        "saved invite relay {relay} — restart to connect through it"
+                    ));
                 }
                 Err(e) => tracing::warn!(%e, "failed to save invite relay"),
             }
@@ -1252,7 +1362,11 @@ fn profile_pane(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) 
         crate::widgets::avatar::show(ui, 48.0, &vm.our_fp, &name);
         ui.vertical(|ui| {
             ui.heading(&name);
-            ui.label(RichText::new(&vm.our_id).monospace().color(palette().text_dim));
+            ui.label(
+                RichText::new(&vm.our_id)
+                    .monospace()
+                    .color(palette().text_dim),
+            );
         });
     });
     ui.separator();
@@ -1371,9 +1485,12 @@ fn render_locked(
                         match huddle_core::app::fingerprint_from_phrase(trimmed) {
                             Ok(fp) => {
                                 ui.label(
-                                    RichText::new(format!("restores {}", crate::fmt::display_id(&fp)))
-                                        .small()
-                                        .color(palette().success),
+                                    RichText::new(format!(
+                                        "restores {}",
+                                        crate::fmt::display_id(&fp)
+                                    ))
+                                    .small()
+                                    .color(palette().success),
                                 );
                             }
                             Err(_) => {
@@ -1392,7 +1509,11 @@ fn render_locked(
             if ui
                 .add_sized(
                     [w, 30.0],
-                    egui::Button::new(if form.first_launch { "sign up" } else { "unlock" }),
+                    egui::Button::new(if form.first_launch {
+                        "sign up"
+                    } else {
+                        "unlock"
+                    }),
                 )
                 .clicked()
             {

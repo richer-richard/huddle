@@ -3,18 +3,17 @@
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Modifier;
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
-use ratatui::style::Style;
 
 use crate::app::TuiApp;
-use crate::ui::theme::Theme;
 use crate::ui::short_fp;
+use crate::ui::theme::Theme;
 
 pub fn render(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme) {
-    let block = Block::default()
-        .borders(Borders::NONE);
+    let block = Block::default().borders(Borders::NONE);
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -84,7 +83,10 @@ pub fn render(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme) {
         ]),
         Line::from(vec![
             Span::styled("  a  ", theme.warn_style()),
-            Span::styled("add a contact by HD-ID (works over the internet)", theme.text_style()),
+            Span::styled(
+                "add a contact by HD-ID (works over the internet)",
+                theme.text_style(),
+            ),
         ]),
     ];
     f.render_widget(Paragraph::new(intro_lines), vparts[1]);
@@ -128,18 +130,11 @@ pub fn render(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme) {
             } else {
                 "○"
             };
-            let label = p.label.clone().unwrap_or_else(|| {
-                p.address
-                    .split('/')
-                    .last()
-                    .unwrap_or("?")
-                    .to_string()
-            });
-            let fp_short = p
+            let label = p
                 .label
-                .as_deref()
-                .map(short_fp)
-                .unwrap_or_default();
+                .clone()
+                .unwrap_or_else(|| p.address.split('/').last().unwrap_or("?").to_string());
+            let fp_short = p.label.as_deref().map(short_fp).unwrap_or_default();
             peers_lines.push(Line::from(vec![
                 Span::styled(format!("  {} ", dot), theme.text_style()),
                 Span::styled(label, theme.text_style()),

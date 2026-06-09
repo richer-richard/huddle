@@ -480,9 +480,9 @@ pub fn for_context(ctx: Context) -> impl Iterator<Item = &'static Binding> {
 
 /// Command palette entries — every binding that exposes a `palette_label`.
 pub fn palette_entries() -> impl Iterator<Item = (&'static str, &'static str)> {
-    BINDINGS.iter().filter_map(|b| {
-        b.palette_label.map(|label| (label, b.keys))
-    })
+    BINDINGS
+        .iter()
+        .filter_map(|b| b.palette_label.map(|label| (label, b.keys)))
 }
 
 /// Adaptive hint bar items for the current app state. Roughly 5-6 items,

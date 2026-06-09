@@ -92,7 +92,10 @@ fn fire(title: String, body: String) {
 
 /// Trim a message body to a single short line for the notification preview.
 pub fn preview(body: &str) -> String {
-    let single: String = body.chars().map(|c| if c == '\n' { ' ' } else { c }).collect();
+    let single: String = body
+        .chars()
+        .map(|c| if c == '\n' { ' ' } else { c })
+        .collect();
     let trimmed = single.trim();
     if trimmed.chars().count() > 120 {
         format!("{}…", trimmed.chars().take(117).collect::<String>())

@@ -217,9 +217,7 @@ pub enum RoomMessage {
     },
     /// A request from a recently-joined member: "I need session keys".
     /// Existing members respond with MemberAnnounce.
-    SessionKeyRequest {
-        requester_fingerprint: String,
-    },
+    SessionKeyRequest { requester_fingerprint: String },
     /// An encrypted message in an encrypted room.
     Encrypted {
         sender_fingerprint: String,
@@ -256,9 +254,7 @@ pub enum RoomMessage {
         reply_to: Option<String>,
     },
     /// Explicit leave notification.
-    MemberLeave {
-        sender_fingerprint: String,
-    },
+    MemberLeave { sender_fingerprint: String },
     /// "I'm rotating the room key — derive a new passphrase key from
     /// `new_salt` + the new passphrase you'll be told out-of-band, then
     /// wait for my MemberAnnounce." Phase 3 v1: simplistic — only the
@@ -270,9 +266,7 @@ pub enum RoomMessage {
         new_salt: Vec<u8>,
     },
     /// Ephemeral "I'm typing" signal. TTL on the receive side is 3s.
-    Typing {
-        sender_fingerprint: String,
-    },
+    Typing { sender_fingerprint: String },
     /// Announce a file the sender is about to push. The receiver creates
     /// an attachment row (status=offered) and waits for chunks. For
     /// encrypted rooms `encrypted_meta` carries the Megolm-wrapped file
@@ -334,10 +328,7 @@ pub enum RoomMessage {
     /// derived code and pressed "Match", each broadcasts this. On
     /// receiving the partner's `matched=true`, the local side flips
     /// `verified=1` for the partner's fingerprint. Signed.
-    SasConfirm {
-        tx_id: String,
-        matched: bool,
-    },
+    SasConfirm { tx_id: String, matched: bool },
     /// Phase E: an existing owner of a `verified_only` room is
     /// telling `target_fingerprint` (an unverified joiner) why their
     /// announce went unanswered. Replaces a silent hang on the

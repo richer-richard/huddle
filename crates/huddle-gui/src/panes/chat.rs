@@ -62,7 +62,11 @@ pub fn render(
             };
             ui.heading(title);
             if room.encrypted {
-                ui.label(RichText::new("encrypted").color(palette().encrypted).small());
+                ui.label(
+                    RichText::new("encrypted")
+                        .color(palette().encrypted)
+                        .small(),
+                );
             }
             ui.label(
                 RichText::new(format!("· {} members", room.members.len()))
@@ -133,100 +137,106 @@ pub fn render(
     egui::Panel::bottom(Id::new(("chat-comp", room_id)))
         .resizable(false)
         .show_inside(ui, |ui| {
-        ui.add_space(4.0);
-        if !typers.is_empty() {
-            ui.label(
-                RichText::new(format!("{} typing…", typers.join(", ")))
-                    .italics()
-                    .small()
-                    .color(palette().text_dim),
-            );
-        }
-        // huddle 1.2: when no transport can carry the message, don't pretend
-        // it sent — show why and keep the user's text intact (no echo).
-        let can_send = readiness.can_send();
-        if !can_send {
-            ui.label(
-                RichText::new(format!("○ {}", readiness.reason()))
-                    .small()
-                    .color(palette().error),
-            );
-        }
-        // huddle 2.0.0 (F10): reply / edit context banners above the composer.
-        // Snapshotted so the send routing below can read them after `room.input`
-        // is taken.
-        let editing = room.edit_target.clone();
-        let replying = room.reply_to.clone();
-        if editing.is_some() {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("editing message").small().color(palette().accent));
-                if ui.small_button("cancel").clicked() {
-                    actions.push(UiAction::CancelEdit(room_id.to_string()));
-                }
-            });
-        } else if let Some((_, preview)) = &replying {
-            ui.horizontal(|ui| {
+            ui.add_space(4.0);
+            if !typers.is_empty() {
                 ui.label(
-                    RichText::new(format!("replying to: {preview}"))
+                    RichText::new(format!("{} typing…", typers.join(", ")))
+                        .italics()
                         .small()
                         .color(palette().text_dim),
                 );
-                if ui.small_button("cancel").clicked() {
-                    actions.push(UiAction::CancelReply(room_id.to_string()));
+            }
+            // huddle 1.2: when no transport can carry the message, don't pretend
+            // it sent — show why and keep the user's text intact (no echo).
+            let can_send = readiness.can_send();
+            if !can_send {
+                ui.label(
+                    RichText::new(format!("○ {}", readiness.reason()))
+                        .small()
+                        .color(palette().error),
+                );
+            }
+            // huddle 2.0.0 (F10): reply / edit context banners above the composer.
+            // Snapshotted so the send routing below can read them after `room.input`
+            // is taken.
+            let editing = room.edit_target.clone();
+            let replying = room.reply_to.clone();
+            if editing.is_some() {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("editing message")
+                            .small()
+                            .color(palette().accent),
+                    );
+                    if ui.small_button("cancel").clicked() {
+                        actions.push(UiAction::CancelEdit(room_id.to_string()));
+                    }
+                });
+            } else if let Some((_, preview)) = &replying {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!("replying to: {preview}"))
+                            .small()
+                            .color(palette().text_dim),
+                    );
+                    if ui.small_button("cancel").clicked() {
+                        actions.push(UiAction::CancelReply(room_id.to_string()));
+                    }
+                });
+            }
+            ui.horizontal(|ui| {
+                let btn_w = 64.0;
+                let resp = ui.add_sized(
+                    [ui.available_width() - btn_w - 8.0, 28.0],
+                    TextEdit::singleline(&mut room.input).hint_text(if !can_send {
+                        "waiting for connection…"
+                    } else if editing.is_some() {
+                        "edit your message…"
+                    } else {
+                        "message…"
+                    }),
+                );
+                if resp.changed() && !room.input.is_empty() && can_send && editing.is_none() {
+                    let now = Instant::now();
+                    let due = room
+                        .last_typing_sent
+                        .is_none_or(|t| now.duration_since(t) > TYPING_DEBOUNCE);
+                    if due {
+                        room.last_typing_sent = Some(now);
+                        actions.push(UiAction::TypingPing(room_id.to_string()));
+                    }
+                }
+                let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                let send_label = if editing.is_some() { "Save" } else { "Send" };
+                let clicked = ui
+                    .add_enabled(can_send, egui::Button::new(send_label))
+                    .clicked();
+                if can_send && (enter || clicked) && !room.input.trim().is_empty() {
+                    let body = std::mem::take(&mut room.input);
+                    if let Some(target) = editing.clone() {
+                        actions.push(UiAction::SendEdit {
+                            room_id: room_id.to_string(),
+                            target_msg_id: target,
+                            new_body: body,
+                        });
+                    } else if let Some((target, _)) = replying.clone() {
+                        actions.push(UiAction::SendReply {
+                            room_id: room_id.to_string(),
+                            body,
+                            reply_to: target,
+                        });
+                    } else {
+                        actions.push(UiAction::SendMessage {
+                            room_id: room_id.to_string(),
+                            body,
+                        });
+                    }
+                    room.stick_to_bottom = true;
+                    resp.request_focus();
                 }
             });
-        }
-        ui.horizontal(|ui| {
-            let btn_w = 64.0;
-            let resp = ui.add_sized(
-                [ui.available_width() - btn_w - 8.0, 28.0],
-                TextEdit::singleline(&mut room.input).hint_text(if !can_send {
-                    "waiting for connection…"
-                } else if editing.is_some() {
-                    "edit your message…"
-                } else {
-                    "message…"
-                }),
-            );
-            if resp.changed() && !room.input.is_empty() && can_send && editing.is_none() {
-                let now = Instant::now();
-                let due = room
-                    .last_typing_sent
-                    .is_none_or(|t| now.duration_since(t) > TYPING_DEBOUNCE);
-                if due {
-                    room.last_typing_sent = Some(now);
-                    actions.push(UiAction::TypingPing(room_id.to_string()));
-                }
-            }
-            let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-            let send_label = if editing.is_some() { "Save" } else { "Send" };
-            let clicked = ui.add_enabled(can_send, egui::Button::new(send_label)).clicked();
-            if can_send && (enter || clicked) && !room.input.trim().is_empty() {
-                let body = std::mem::take(&mut room.input);
-                if let Some(target) = editing.clone() {
-                    actions.push(UiAction::SendEdit {
-                        room_id: room_id.to_string(),
-                        target_msg_id: target,
-                        new_body: body,
-                    });
-                } else if let Some((target, _)) = replying.clone() {
-                    actions.push(UiAction::SendReply {
-                        room_id: room_id.to_string(),
-                        body,
-                        reply_to: target,
-                    });
-                } else {
-                    actions.push(UiAction::SendMessage {
-                        room_id: room_id.to_string(),
-                        body,
-                    });
-                }
-                room.stick_to_bottom = true;
-                resp.request_focus();
-            }
+            ui.add_space(4.0);
         });
-        ui.add_space(4.0);
-    });
 
     // Members side panel (group rooms).
     if show_members && is_group {
@@ -235,7 +245,12 @@ pub fn render(
             .default_size(230.0)
             .show_inside(ui, |ui| {
                 ui.add_space(6.0);
-                ui.label(RichText::new("MEMBERS").strong().small().color(palette().text_dim));
+                ui.label(
+                    RichText::new("MEMBERS")
+                        .strong()
+                        .small()
+                        .color(palette().text_dim),
+                );
                 let mut vonly = room_vonly;
                 if ui.checkbox(&mut vonly, "verified-only").changed() {
                     actions.push(UiAction::ToggleRoomVerifiedOnly {
@@ -264,7 +279,9 @@ pub fn render(
                                     widgets::verified_tick(ui);
                                 }
                                 if owners.contains(m) {
-                                    ui.label(RichText::new("owner").small().color(palette().accent));
+                                    ui.label(
+                                        RichText::new("owner").small().color(palette().accent),
+                                    );
                                 }
                             });
                             if !me {
@@ -277,8 +294,7 @@ pub fn render(
                                         });
                                     }
                                     if we_own {
-                                        if !owners.contains(m)
-                                            && ui.small_button("grant").clicked()
+                                        if !owners.contains(m) && ui.small_button("grant").clicked()
                                         {
                                             actions.push(UiAction::DoGrant {
                                                 room_id: room_id.to_string(),
@@ -381,11 +397,11 @@ pub fn render(
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         widgets::avatar::show(ui, 26.0, &m.sender_fingerprint, &sender_label);
-                        ui.label(
-                            RichText::new(&sender_label)
-                                .strong()
-                                .color(if is_me { palette().accent } else { palette().text }),
-                        );
+                        ui.label(RichText::new(&sender_label).strong().color(if is_me {
+                            palette().accent
+                        } else {
+                            palette().text
+                        }));
                         ui.label(
                             RichText::new(format!("{} UTC", fmt::hms(m.sent_at)))
                                 .small()
@@ -472,7 +488,10 @@ pub fn render(
                     let groups = room.reactions_for(&cid, &our_fp);
                     ui.horizontal_wrapped(|ui| {
                         for (emoji, count, mine) in &groups {
-                            if ui.selectable_label(*mine, format!("{emoji} {count}")).clicked() {
+                            if ui
+                                .selectable_label(*mine, format!("{emoji} {count}"))
+                                .clicked()
+                            {
                                 actions.push(UiAction::SendReaction {
                                     room_id: room_id.to_string(),
                                     target_msg_id: cid.clone(),
@@ -512,7 +531,10 @@ pub fn render(
 /// huddle 2.0.0 (F10): one-line, length-capped preview of a message body for
 /// reply quotes and the delete confirmation.
 fn msg_preview(body: &str) -> String {
-    let single: String = body.chars().map(|c| if c == '\n' { ' ' } else { c }).collect();
+    let single: String = body
+        .chars()
+        .map(|c| if c == '\n' { ' ' } else { c })
+        .collect();
     let trimmed = single.trim();
     if trimmed.chars().count() > 60 {
         format!("{}…", trimmed.chars().take(57).collect::<String>())

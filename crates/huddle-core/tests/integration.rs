@@ -41,7 +41,11 @@ async fn two_node_unencrypted_room_message_exchange() {
     let handle_a = AppHandle::start_with_db(db_a).await.unwrap();
     let handle_b = AppHandle::start_with_db(db_b).await.unwrap();
 
-    eprintln!("A fp={} B fp={}", handle_a.fingerprint(), handle_b.fingerprint());
+    eprintln!(
+        "A fp={} B fp={}",
+        handle_a.fingerprint(),
+        handle_b.fingerprint()
+    );
 
     let mut events_a = handle_a.subscribe();
     let mut events_b = handle_b.subscribe();
@@ -151,10 +155,7 @@ async fn two_node_encrypted_room_message_exchange() {
         return;
     }
 
-    handle_b
-        .join_room(&room_id, Some("hunter2"))
-        .await
-        .unwrap();
+    handle_b.join_room(&room_id, Some("hunter2")).await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(2500)).await;
 
@@ -293,7 +294,9 @@ async fn phase_a_inbound_dial_accept_forms_mesh() {
     .await
     .expect("B should see InboundDial from A");
     let (peer_id, addr) = match inbound {
-        AppEvent::InboundDial { peer_id, address, .. } => (peer_id, address),
+        AppEvent::InboundDial {
+            peer_id, address, ..
+        } => (peer_id, address),
         _ => unreachable!(),
     };
     assert_eq!(peer_id, handle_a.peer_id());
@@ -314,7 +317,10 @@ async fn phase_a_inbound_dial_accept_forms_mesh() {
         |ev| matches!(ev, AppEvent::RoomDiscovered(r) if r.room_id == target),
     )
     .await;
-    assert!(discovered.is_some(), "B never discovered A's room after accept");
+    assert!(
+        discovered.is_some(),
+        "B never discovered A's room after accept"
+    );
 
     handle_a.shutdown().await;
     handle_b.shutdown().await;
@@ -466,7 +472,10 @@ async fn phase_b_kick_rotates_key_and_excludes_banned() {
         .kick_member(&room_id, handle_b.fingerprint())
         .await
         .unwrap();
-    assert!(!new_pass.is_empty(), "encrypted room kick must return a new passphrase");
+    assert!(
+        !new_pass.is_empty(),
+        "encrypted room kick must return a new passphrase"
+    );
 
     // C accepts the rotation with the new passphrase (the TUI would
     // prompt; we drive it directly).
@@ -501,7 +510,10 @@ async fn phase_b_kick_rotates_key_and_excludes_banned() {
         |ev| matches!(ev, AppEvent::MessageReceived { body, .. } if body == "post-kick — only C should see this"),
     )
     .await;
-    assert!(to_c.is_some(), "C should still decrypt A's post-kick message");
+    assert!(
+        to_c.is_some(),
+        "C should still decrypt A's post-kick message"
+    );
 
     let to_b = await_event(
         &mut events_b,
@@ -577,7 +589,10 @@ async fn phase_f_code_join_round_trip() {
         |ev| matches!(ev, AppEvent::MessageReceived { body, .. } if body == "alice -> code-joined bob"),
     )
     .await;
-    assert!(to_b.is_some(), "B should decrypt A's message after code-join");
+    assert!(
+        to_b.is_some(),
+        "B should decrypt A's message after code-join"
+    );
 
     // B is marked read-only (no passphrase, no ability to wrap session
     // keys for future joiners). Surface check.
@@ -641,9 +656,17 @@ async fn send_reaction_rejects_unknown_target() {
     // Reacting to a target that isn't in the room is an error and stores
     // nothing locally.
     let bogus = handle
-        .send_reaction(&room_id, "00000000-0000-4000-8000-000000000000", "👍", false)
+        .send_reaction(
+            &room_id,
+            "00000000-0000-4000-8000-000000000000",
+            "👍",
+            false,
+        )
         .await;
-    assert!(bogus.is_err(), "reaction to unknown target must be rejected");
+    assert!(
+        bogus.is_err(),
+        "reaction to unknown target must be rejected"
+    );
     assert!(
         handle.room_reactions(&room_id).is_empty(),
         "rejected reaction must not leave an orphan row"

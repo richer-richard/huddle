@@ -268,7 +268,9 @@ mod tests {
         assert_eq!(groups.len(), 3);
         for g in &groups {
             assert_eq!(g.len(), 4);
-            assert!(g.chars().all(|c| c.is_ascii_hexdigit() && c.is_ascii_uppercase() || c.is_ascii_digit()));
+            assert!(g
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && c.is_ascii_uppercase() || c.is_ascii_digit()));
         }
     }
 

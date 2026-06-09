@@ -108,10 +108,7 @@ pub fn notify(title: &str, body: &str) {
     match action {
         NotifyAction::FireNow => fire(title.to_string(), body.to_string()),
         NotifyAction::ScheduleSummary => {
-            let last_fired = rate_state()
-                .lock()
-                .map(|s| s.last_fired_at)
-                .unwrap_or(now);
+            let last_fired = rate_state().lock().map(|s| s.last_fired_at).unwrap_or(now);
             let sleep = RATE_LIMIT.saturating_sub(now.duration_since(last_fired));
             std::thread::spawn(move || {
                 std::thread::sleep(sleep);
@@ -159,7 +156,10 @@ fn fire(title: String, body: String) {
 /// the notification preview. Real terminals will wrap long previews
 /// awkwardly and some notification daemons truncate silently.
 pub fn preview(body: &str) -> String {
-    let single: String = body.chars().map(|c| if c == '\n' { ' ' } else { c }).collect();
+    let single: String = body
+        .chars()
+        .map(|c| if c == '\n' { ' ' } else { c })
+        .collect();
     let trimmed = single.trim();
     if trimmed.chars().count() > 120 {
         let head: String = trimmed.chars().take(117).collect();

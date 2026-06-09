@@ -60,9 +60,7 @@ pub fn load_or_create_salt() -> Result<[u8; KEYCHAIN_SALT_LEN]> {
                 KEYCHAIN_SALT_LEN
             ))),
         },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            generate_and_persist_salt(&path)
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => generate_and_persist_salt(&path),
         Err(e) => Err(HuddleError::Other(format!(
             "failed to read keychain salt at {} ({e}). Refusing to regenerate, \
              since overwriting a present-but-unreadable salt would brick the \
@@ -138,8 +136,8 @@ pub fn persist_salt(path: &Path, salt: &[u8; KEYCHAIN_SALT_LEN]) -> Result<()> {
     // (a cross-device rename is not atomic).
     let tmp = path.with_extension("salt.tmp");
     {
-        let mut f = fs::File::create(&tmp)
-            .map_err(|e| HuddleError::Other(format!("stage salt: {e}")))?;
+        let mut f =
+            fs::File::create(&tmp).map_err(|e| HuddleError::Other(format!("stage salt: {e}")))?;
         f.write_all(salt)
             .map_err(|e| HuddleError::Other(format!("write salt: {e}")))?;
         f.sync_all()

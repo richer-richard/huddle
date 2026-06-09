@@ -81,25 +81,42 @@ enum ClientMsg {
         /// classical delete-on-deliver behavior. Either way we stay correct.
         acks: bool,
     },
-    Subscribe { room: String },
-    Unsubscribe { room: String },
-    Publish { room: String, id: String, payload_b64: String },
+    Subscribe {
+        room: String,
+    },
+    Unsubscribe {
+        room: String,
+    },
+    Publish {
+        room: String,
+        id: String,
+        payload_b64: String,
+    },
     /// huddle 1.2: deliver straight to a recipient fingerprint (`to`),
     /// independent of room membership. Used for 1:1 DMs and friend requests,
     /// where we know exactly who the recipient is. `room` is the opaque tag
     /// the recipient files it under (DM room id, or their inbox id). Mirrors
     /// `huddle-server`'s `ClientMsg::SendDirect`.
-    SendDirect { to: String, room: String, id: String, payload_b64: String },
+    SendDirect {
+        to: String,
+        room: String,
+        id: String,
+        payload_b64: String,
+    },
     /// huddle 1.2.1: mint a short-lived connect code bound to our identity.
     CreateConnectToken,
     /// huddle 1.2.1: resolve a connect code → owner fingerprint + pubkey.
-    RedeemConnectToken { token: String },
+    RedeemConnectToken {
+        token: String,
+    },
     Fetch,
     /// huddle 2.0: acknowledge durable receipt of a mailbox-delivered message so
     /// the relay can delete that row (at-least-once delivery). `mailbox_id` is
     /// the row id the relay attached to the `ServerMsg::Message` we persisted.
     /// Mirrors `huddle-server`'s `ClientMsg::Ack`.
-    Ack { mailbox_id: i64 },
+    Ack {
+        mailbox_id: i64,
+    },
     Ping,
 }
 
@@ -109,7 +126,9 @@ enum ClientMsg {
 enum ServerMsg {
     /// huddle 1.1.4: the relay opens the connection with a random challenge
     /// nonce. We sign it and answer with an authenticated `Hello`.
-    Challenge { nonce_b64: String },
+    Challenge {
+        nonce_b64: String,
+    },
     // The server echoes our fingerprint on `ready`, but we already know
     // our own identity, so we keep only the tag and let serde ignore the
     // extra field.
@@ -125,9 +144,16 @@ enum ServerMsg {
         #[serde(default)]
         mailbox_id: Option<i64>,
     },
-    Sent { id: String, delivered: usize, queued: usize },
+    Sent {
+        id: String,
+        delivered: usize,
+        queued: usize,
+    },
     /// huddle 1.2.1: a freshly minted connect code + its lifetime in seconds.
-    ConnectToken { token: String, ttl_secs: u64 },
+    ConnectToken {
+        token: String,
+        ttl_secs: u64,
+    },
     /// huddle 1.2.1: result of redeeming a connect code. `fingerprint`/`pubkey_b64`
     /// are `None` when the code was unknown or expired. (The relay also echoes
     /// the `token`, but we don't need it client-side — serde ignores it.)
@@ -138,7 +164,9 @@ enum ServerMsg {
         pubkey_b64: Option<String>,
     },
     Pong,
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 /// What the connector surfaces to the rest of huddle-core. The caller
@@ -151,7 +179,11 @@ pub enum ServerEvent {
     /// Delivery receipt for one of our `publish` calls: how many of the
     /// room's other members received it live vs. were queued because they
     /// were offline. Lets the UI mark a message delivered/pending.
-    Sent { id: String, delivered: usize, queued: usize },
+    Sent {
+        id: String,
+        delivered: usize,
+        queued: usize,
+    },
     /// A room message delivered (live or from the offline mailbox). huddle 2.0:
     /// `mailbox_id` is `Some(row_id)` when a 2.0 relay used at-least-once
     /// delivery and the consumer should `ack_mailbox(row_id)` after durably
@@ -393,19 +425,35 @@ impl ServerClient {
                     Ok(ServerMsg::Ready) => {
                         let _ = ev_tx.send(ServerEvent::Ready);
                     }
-                    Ok(ServerMsg::Sent { id, delivered, queued }) => {
-                        let _ = ev_tx.send(ServerEvent::Sent { id, delivered, queued });
+                    Ok(ServerMsg::Sent {
+                        id,
+                        delivered,
+                        queued,
+                    }) => {
+                        let _ = ev_tx.send(ServerEvent::Sent {
+                            id,
+                            delivered,
+                            queued,
+                        });
                     }
                     Ok(ServerMsg::ConnectToken { token, ttl_secs }) => {
                         let _ = ev_tx.send(ServerEvent::ConnectToken { token, ttl_secs });
                     }
-                    Ok(ServerMsg::ConnectTokenResolved { fingerprint, pubkey_b64 }) => {
+                    Ok(ServerMsg::ConnectTokenResolved {
+                        fingerprint,
+                        pubkey_b64,
+                    }) => {
                         let _ = ev_tx.send(ServerEvent::ConnectTokenResolved {
                             fingerprint,
                             pubkey_b64,
                         });
                     }
-                    Ok(ServerMsg::Message { room, id, payload_b64, mailbox_id }) => {
+                    Ok(ServerMsg::Message {
+                        room,
+                        id,
+                        payload_b64,
+                        mailbox_id,
+                    }) => {
                         if payload_b64.len() > MAX_PAYLOAD_B64 {
                             warn!(
                                 len = payload_b64.len(),
@@ -464,11 +512,15 @@ impl ServerClient {
 
     /// Assert membership of a room so the server mailboxes us when offline.
     pub fn subscribe(&self, room: &str) -> Result<()> {
-        self.send(ClientMsg::Subscribe { room: room.to_string() })
+        self.send(ClientMsg::Subscribe {
+            room: room.to_string(),
+        })
     }
 
     pub fn unsubscribe(&self, room: &str) -> Result<()> {
-        self.send(ClientMsg::Unsubscribe { room: room.to_string() })
+        self.send(ClientMsg::Unsubscribe {
+            room: room.to_string(),
+        })
     }
 
     /// huddle 1.2.1: ask the relay to mint a short-lived connect code bound to
@@ -480,7 +532,9 @@ impl ServerClient {
     /// huddle 1.2.1: ask the relay to resolve a connect code to its owner.
     /// The reply arrives as `ServerEvent::ConnectTokenResolved`.
     pub fn redeem_connect_token(&self, token: &str) -> Result<()> {
-        self.send(ClientMsg::RedeemConnectToken { token: token.to_string() })
+        self.send(ClientMsg::RedeemConnectToken {
+            token: token.to_string(),
+        })
     }
 
     /// Ask the server to re-drain our mailbox.
@@ -517,7 +571,9 @@ fn host_port_from_ws_url(url: &str) -> Result<String> {
     } else if let Some(r) = url.strip_prefix("ws://") {
         (r, 80)
     } else {
-        return Err(HuddleError::Network(format!("expected ws:// url, got {url}")));
+        return Err(HuddleError::Network(format!(
+            "expected ws:// url, got {url}"
+        )));
     };
     let authority = rest.split('/').next().unwrap_or(rest);
     if authority.is_empty() {
@@ -536,14 +592,20 @@ mod tests {
 
     #[test]
     fn parses_host_port() {
-        assert_eq!(host_port_from_ws_url("ws://abc.onion/ws").unwrap(), "abc.onion:80");
+        assert_eq!(
+            host_port_from_ws_url("ws://abc.onion/ws").unwrap(),
+            "abc.onion:80"
+        );
         assert_eq!(
             host_port_from_ws_url("ws://127.0.0.1:8787/ws").unwrap(),
             "127.0.0.1:8787"
         );
         assert_eq!(host_port_from_ws_url("wss://h:443").unwrap(), "h:443");
         // huddle 1.0: bare wss:// defaults to 443, not 80.
-        assert_eq!(host_port_from_ws_url("wss://relay.example/ws").unwrap(), "relay.example:443");
+        assert_eq!(
+            host_port_from_ws_url("wss://relay.example/ws").unwrap(),
+            "relay.example:443"
+        );
         assert!(host_port_from_ws_url("http://x").is_err());
     }
 }

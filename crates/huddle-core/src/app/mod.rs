@@ -19,8 +19,8 @@ use crate::files::encryption::{self as file_encryption, EncryptedFileMeta};
 use crate::files::FileManager;
 use crate::identity::Identity;
 use crate::network::events::NetworkEvent;
-use crate::network::server::{ServerClient, ServerEvent};
 use crate::network::protocol::{encode_wire, RoomAnnouncement, RoomMessage, WireMessage};
+use crate::network::server::{ServerClient, ServerEvent};
 use crate::network::transport::{self, TransportId, TransportProfile};
 use crate::network::{self, NetworkHandle, NetworkMode};
 use crate::storage::repo::{
@@ -360,8 +360,7 @@ pub const DEFAULT_SERVER_URL: &str =
 /// user never dials clearnet. Override per-client with `--clearnet-server`,
 /// `clearnet_url` in config.toml, or Settings → Network; an explicit value
 /// always wins over this default.
-pub const DEFAULT_CLEARNET_URL: &str =
-    "wss://huddle-ws-proxy.richer-richard.workers.dev/ws";
+pub const DEFAULT_CLEARNET_URL: &str = "wss://huddle-ws-proxy.richer-richard.workers.dev/ws";
 /// Local Tor SOCKS5 proxy used to dial `.onion` server URLs.
 pub const DEFAULT_TOR_SOCKS: &str = "127.0.0.1:9050";
 
@@ -406,8 +405,7 @@ pub struct AppHandle {
     /// be in flight concurrently without trampling each other; and so
     /// the 30s timeout task (see `join_room_with_code`) can clean up
     /// its own entry by composite key without racing with peers.
-    pending_code_secrets:
-        Arc<Mutex<HashMap<(String, String), x25519_dalek::StaticSecret>>>,
+    pending_code_secrets: Arc<Mutex<HashMap<(String, String), x25519_dalek::StaticSecret>>>,
     /// Phase C follow-up: tracks "we dialed this multiaddr because of
     /// an invite link claiming this fingerprint." When the peer
     /// identifies (and we can derive their real fp), the post-dial arm
@@ -592,8 +590,14 @@ const PROFILE_REBROADCAST_FLOOR_MS: i64 = 60_000;
 
 impl AppHandle {
     pub async fn start() -> Result<Self> {
-        Self::start_with_options(NetworkMode::Server, 0, None, Vec::new(), TransportConfig::default())
-            .await
+        Self::start_with_options(
+            NetworkMode::Server,
+            0,
+            None,
+            Vec::new(),
+            TransportConfig::default(),
+        )
+        .await
     }
 
     /// huddle 0.7.8: peek the persisted `mdns_enabled` setting without
@@ -634,7 +638,8 @@ impl AppHandle {
             None => [0u8; 32],
         };
         let db = storage::open_db(&config::db_path(), master_key)?;
-        Self::start_with_db_and_options(db, mode, port, session_persist_key, relays, transports).await
+        Self::start_with_db_and_options(db, mode, port, session_persist_key, relays, transports)
+            .await
     }
 
     pub async fn start_with_db(db: Db) -> Result<Self> {
@@ -756,7 +761,11 @@ impl AppHandle {
             transports
                 .order
                 .as_ref()
-                .map(|v| v.iter().filter_map(|s| TransportId::from_str(s)).collect::<Vec<_>>())
+                .map(|v| {
+                    v.iter()
+                        .filter_map(|s| TransportId::from_str(s))
+                        .collect::<Vec<_>>()
+                })
                 .filter(|v| !v.is_empty())
                 .or_else(|| {
                     repo::get_setting(&db, "transport_order")
@@ -810,9 +819,12 @@ impl AppHandle {
         // spawn_server_connection); the live call here also subscribes the
         // gossipsub topic for the LAN path.
         {
-            let inbox =
-                crate::network::protocol::inbox_room_id(handle.identity.fingerprint());
-            handle.aux_subscriptions.lock().unwrap().insert(inbox.clone());
+            let inbox = crate::network::protocol::inbox_room_id(handle.identity.fingerprint());
+            handle
+                .aux_subscriptions
+                .lock()
+                .unwrap()
+                .insert(inbox.clone());
             handle.network.subscribe_room(inbox).await;
         }
         // huddle 0.8/1.0: now that active rooms are loaded, open the
@@ -946,18 +958,18 @@ impl AppHandle {
     /// embedded pubkey and rejects the invite if any signed field
     /// (host_multiaddr, fingerprint, room id/name/encrypted/salt/
     /// creator_fp/owner_list, signed_at_ms) was tampered with.
-    pub fn sign_invite(&self, invite: crate::invite::InviteLink) -> Result<crate::invite::InviteLink> {
+    pub fn sign_invite(
+        &self,
+        invite: crate::invite::InviteLink,
+    ) -> Result<crate::invite::InviteLink> {
         crate::invite::sign_invite(&self.identity, invite)
     }
 
     pub fn discovered_rooms(&self) -> Vec<DiscoveredRoom> {
         let now = now_unix();
         let our_fp = self.identity.fingerprint().to_string();
-        let mut by_id: HashMap<String, DiscoveredRoom> = self
-            .discovered_rooms
-            .lock()
-            .unwrap()
-            .clone();
+        let mut by_id: HashMap<String, DiscoveredRoom> =
+            self.discovered_rooms.lock().unwrap().clone();
 
         // Merge in rooms we're currently in — gossipsub doesn't echo our
         // own announcements back to us, so without this our own hosted
@@ -1023,12 +1035,7 @@ impl AppHandle {
             }
             // Active rooms we host pass unconditionally — we always know
             // we're a member of our own DM.
-            if self
-                .active_rooms
-                .lock()
-                .unwrap()
-                .contains_key(room_id)
-            {
+            if self.active_rooms.lock().unwrap().contains_key(room_id) {
                 return true;
             }
             // Otherwise: the announcer must be the other partner, AND
@@ -1052,10 +1059,7 @@ impl AppHandle {
         if room.info.kind != RoomKind::Direct {
             return None;
         }
-        room.members
-            .iter()
-            .find(|m| **m != our_fp)
-            .cloned()
+        room.members.iter().find(|m| **m != our_fp).cloned()
     }
 
     pub fn active_room_ids(&self) -> Vec<String> {
@@ -1263,7 +1267,9 @@ impl AppHandle {
         }
         if repo::get_room(&self.db, &room_id)?.is_some() {
             // Re-bootstrap the in-memory active room from disk.
-            return self.bootstrap_direct_room(&room_id, partner_fingerprint).await;
+            return self
+                .bootstrap_direct_room(&room_id, partner_fingerprint)
+                .await;
         }
 
         let created_at = now_unix();
@@ -1971,22 +1977,22 @@ impl AppHandle {
         let leave_msg = RoomMessage::MemberLeave {
             sender_fingerprint: self.identity.fingerprint().to_string(),
         };
-        let dispatched = match crate::crypto::sign_message(&self.identity, &leave_msg)
-            .and_then(|env| {
+        let dispatched =
+            match crate::crypto::sign_message(&self.identity, &leave_msg).and_then(|env| {
                 crate::network::protocol::encode_wire_signed(&env)
                     .map_err(|e| HuddleError::Session(format!("encode signed leave: {e}")))
             }) {
-            Ok(bytes) => {
-                self.network
-                    .publish_room_message(room_id.to_string(), bytes)
-                    .await;
-                true
-            }
-            Err(e) => {
-                warn!(%e, %room_id, "failed to sign+encode MemberLeave notice");
-                false
-            }
-        };
+                Ok(bytes) => {
+                    self.network
+                        .publish_room_message(room_id.to_string(), bytes)
+                        .await;
+                    true
+                }
+                Err(e) => {
+                    warn!(%e, %room_id, "failed to sign+encode MemberLeave notice");
+                    false
+                }
+            };
 
         self.active_rooms.lock().unwrap().remove(room_id);
         self.network.unsubscribe_room(room_id.to_string()).await;
@@ -2008,12 +2014,7 @@ impl AppHandle {
     /// `client_msg_id` of the message being replied to (the target may itself be
     /// a pre-2.0 message with no id or a since-deleted one — the UI degrades to a
     /// plain message then). Otherwise identical to [`send_room_message`].
-    pub async fn send_reply(
-        &self,
-        room_id: &str,
-        body: &str,
-        reply_to: &str,
-    ) -> Result<()> {
+    pub async fn send_reply(&self, room_id: &str, body: &str, reply_to: &str) -> Result<()> {
         self.send_room_message_inner(room_id, body, Some(reply_to))
             .await
     }
@@ -2181,11 +2182,8 @@ impl AppHandle {
     /// would start counting from zero again). No-op when no row exists yet (a
     /// never-sent room keeps the fresh 0/now baseline).
     fn rehydrate_rotation_state(&self, crypto: &mut RoomCrypto) {
-        match repo::get_megolm_rotation_state(
-            &self.db,
-            crypto.room_id(),
-            crypto.our_fingerprint(),
-        ) {
+        match repo::get_megolm_rotation_state(&self.db, crypto.room_id(), crypto.our_fingerprint())
+        {
             Ok(Some((count, at))) => crypto.restore_rotation_state(count, at),
             Ok(None) => {}
             Err(e) => {
@@ -2417,7 +2415,9 @@ impl AppHandle {
                 "seed export requires a master passphrase to protect the exported phrase".into(),
             ));
         }
-        Ok(crate::crypto::mnemonic::seed_to_phrase(&self.identity.seed()))
+        Ok(crate::crypto::mnemonic::seed_to_phrase(
+            &self.identity.seed(),
+        ))
     }
 
     /// huddle 2.0.0 (F6): does `phrase` decode to OUR identity? Used by the
@@ -2466,7 +2466,9 @@ impl AppHandle {
             ));
         }
         if new.is_empty() {
-            return Err(HuddleError::Other("new passphrase must not be empty".into()));
+            return Err(HuddleError::Other(
+                "new passphrase must not be empty".into(),
+            ));
         }
         // 1. Verify the current passphrase against the live persist key.
         let salt = storage::keychain::load_or_create_salt()?;
@@ -2527,18 +2529,18 @@ impl AppHandle {
                     Err(_) => continue,
                 };
                 let new_blob: Vec<u8> = if s.is_outbound {
-                    let p = GroupSessionPickle::from_encrypted(&data_str, old_key).map_err(|e| {
-                        HuddleError::Other(format!("rekey: outbound pickle decrypt: {e}"))
-                    })?;
+                    let p =
+                        GroupSessionPickle::from_encrypted(&data_str, old_key).map_err(|e| {
+                            HuddleError::Other(format!("rekey: outbound pickle decrypt: {e}"))
+                        })?;
                     GroupSession::from_pickle(p)
                         .pickle()
                         .encrypt(new_key)
                         .into_bytes()
                 } else {
-                    let p =
-                        InboundGroupSessionPickle::from_encrypted(&data_str, old_key).map_err(|e| {
-                            HuddleError::Other(format!("rekey: inbound pickle decrypt: {e}"))
-                        })?;
+                    let p = InboundGroupSessionPickle::from_encrypted(&data_str, old_key).map_err(
+                        |e| HuddleError::Other(format!("rekey: inbound pickle decrypt: {e}")),
+                    )?;
                     InboundGroupSession::from_pickle(p)
                         .pickle()
                         .encrypt(new_key)
@@ -2578,7 +2580,12 @@ impl AppHandle {
             if !room.info.encrypted {
                 continue;
             }
-            match RoomCrypto::load(self.db.clone(), room.info.id.clone(), our_fp.clone(), *new_key) {
+            match RoomCrypto::load(
+                self.db.clone(),
+                room.info.id.clone(),
+                our_fp.clone(),
+                *new_key,
+            ) {
                 Ok(Some(mut c)) => {
                     // F4: a rekey reload must not lose the epoch bookkeeping —
                     // rehydrate it so the rotation schedule keeps counting.
@@ -2586,7 +2593,9 @@ impl AppHandle {
                     room.crypto = Some(c);
                 }
                 Ok(None) => {}
-                Err(e) => warn!(%e, room_id = %room.info.id, "F5: RoomCrypto reload after rekey failed"),
+                Err(e) => {
+                    warn!(%e, room_id = %room.info.id, "F5: RoomCrypto reload after rekey failed")
+                }
             }
         }
     }
@@ -3378,17 +3387,12 @@ impl AppHandle {
             .and_then(|r| r.info.passphrase_salt.clone())
             .or_else(|| {
                 // Try the cached announcement salt
-                ROOM_SALT_CACHE
-                    .lock()
-                    .unwrap()
-                    .get(room_id)
-                    .cloned()
+                ROOM_SALT_CACHE.lock().unwrap().get(room_id).cloned()
             })
     }
 
     async fn announce_room_now(&self, info: &StoredRoom, member_count: u32) {
-        let owner_fingerprints =
-            repo::list_room_owners(&self.db, &info.id).unwrap_or_default();
+        let owner_fingerprints = repo::list_room_owners(&self.db, &info.id).unwrap_or_default();
         let verified_only = repo::get_room_verified_only(&self.db, &info.id).unwrap_or(false);
         let host_addrs = self.dialable_addrs();
         let ann = RoomAnnouncement {
@@ -3509,8 +3513,7 @@ impl AppHandle {
     /// we belong to a room even before we can decrypt it — otherwise its
     /// fan-out skips us and group messages silently never arrive.
     fn relay_membership_ids(&self) -> Vec<String> {
-        let mut set: HashSet<String> =
-            self.active_rooms.lock().unwrap().keys().cloned().collect();
+        let mut set: HashSet<String> = self.active_rooms.lock().unwrap().keys().cloned().collect();
         set.extend(self.restorable_rooms.lock().unwrap().keys().cloned());
         set.extend(self.aux_subscriptions.lock().unwrap().iter().cloned());
         set.into_iter().collect()
@@ -3525,7 +3528,10 @@ impl AppHandle {
                 // and let this task end (it holds the only live relay socket and
                 // an AppHandle clone — leaving it running leaks both and, across
                 // an in-process restart, races the new instance on the shared DB).
-                if handle.shutting_down.load(std::sync::atomic::Ordering::SeqCst) {
+                if handle
+                    .shutting_down
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
                     handle.network.detach_server();
                     return;
                 }
@@ -3543,23 +3549,14 @@ impl AppHandle {
                     TransportId,
                 )> = None;
                 for id in &order {
-                    let (url, dial) = match handle
-                        .transport_profiles
-                        .iter()
-                        .find(|p| p.id == *id)
-                    {
+                    let (url, dial) = match handle.transport_profiles.iter().find(|p| p.id == *id) {
                         Some(p) if p.available() => {
                             (p.url.clone().unwrap(), p.dial.clone().unwrap())
                         }
                         _ => continue,
                     };
-                    match ServerClient::connect(
-                        &url,
-                        &dial,
-                        handle.identity.clone(),
-                        rooms.clone(),
-                    )
-                    .await
+                    match ServerClient::connect(&url, &dial, handle.identity.clone(), rooms.clone())
+                        .await
                     {
                         Ok((client, rx)) => {
                             info!(%url, transport = id.as_str(), "connected to relay");
@@ -3630,7 +3627,9 @@ impl AppHandle {
                                 fingerprint,
                                 pubkey_b64,
                             } => {
-                                handle.on_connect_code_resolved(fingerprint, pubkey_b64).await;
+                                handle
+                                    .on_connect_code_resolved(fingerprint, pubkey_b64)
+                                    .await;
                             }
                             ServerEvent::Disconnected => break,
                         }
@@ -3643,7 +3642,10 @@ impl AppHandle {
                 }
                 // huddle 2.0.0: exit promptly on shutdown rather than sleeping
                 // the backoff and looping back to reconnect.
-                if handle.shutting_down.load(std::sync::atomic::Ordering::SeqCst) {
+                if handle
+                    .shutting_down
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
                     handle.network.detach_server();
                     return;
                 }
@@ -3657,8 +3659,7 @@ impl AppHandle {
         let handle = self.clone();
         tokio::spawn(async move {
             let our_fp = handle.identity.fingerprint().to_string();
-            let mut interval =
-                tokio::time::interval(Duration::from_secs(ANNOUNCE_INTERVAL_SECS));
+            let mut interval = tokio::time::interval(Duration::from_secs(ANNOUNCE_INTERVAL_SECS));
             interval.tick().await; // skip the immediate tick
             loop {
                 interval.tick().await;
@@ -3675,7 +3676,11 @@ impl AppHandle {
                 // heartbeat is what fires the *time*-based trigger for rooms that
                 // aren't actively sending; the send path covers the count trigger.
                 let rotation_policy = handle.megolm_rotation_policy();
-                let (snapshot, dm_nudges, rotated): (Vec<(StoredRoom, u32)>, Vec<String>, Vec<String>) = {
+                let (snapshot, dm_nudges, rotated): (
+                    Vec<(StoredRoom, u32)>,
+                    Vec<String>,
+                    Vec<String>,
+                ) = {
                     let mut active = handle.active_rooms.lock().unwrap();
                     let snap: Vec<(StoredRoom, u32)> = active
                         .values()
@@ -3966,8 +3971,7 @@ impl AppHandle {
                     // themselves into our sidebar simply by re-announcing
                     // the DM topic; we'd subscribe and persist a row for
                     // them before any user action.
-                    if repo::is_peer_blocked(&self.db, &ann.creator_fingerprint).unwrap_or(false)
-                    {
+                    if repo::is_peer_blocked(&self.db, &ann.creator_fingerprint).unwrap_or(false) {
                         debug!(
                             partner = %ann.creator_fingerprint,
                             "ignoring Direct announcement from blocked peer"
@@ -4027,9 +4031,7 @@ impl AppHandle {
                                 // MUST match it. A different pubkey for
                                 // the same fingerprint means identity
                                 // drift — TOFU violation — drop.
-                                match repo::get_member_ed25519_pubkey(
-                                    &self.db, &room_id, &fp,
-                                ) {
+                                match repo::get_member_ed25519_pubkey(&self.db, &room_id, &fp) {
                                     Ok(Some(known)) if known != claimed_pubkey => {
                                         // huddle 2.0.0 (F3): surface the drift
                                         // instead of silently dropping. The
@@ -4042,18 +4044,15 @@ impl AppHandle {
                                             "pubkey mismatch vs stored; emitting SafetyNumberChanged and dropping signed message"
                                         );
                                         let display_name =
-                                            repo::lookup_display_name(&self.db, &fp)
-                                                .ok()
-                                                .flatten();
-                                        let _ = self.app_event_tx.send(
-                                            AppEvent::SafetyNumberChanged {
+                                            repo::lookup_display_name(&self.db, &fp).ok().flatten();
+                                        let _ =
+                                            self.app_event_tx.send(AppEvent::SafetyNumberChanged {
                                                 room_id: room_id.clone(),
                                                 fingerprint: fp.clone(),
                                                 old_pubkey_b64: known,
                                                 new_pubkey_b64: claimed_pubkey.clone(),
                                                 display_name,
-                                            },
-                                        );
+                                            });
                                         return;
                                     }
                                     _ => {}
@@ -4067,7 +4066,8 @@ impl AppHandle {
                         }
                     }
                 };
-                self.handle_room_message(&room_id, msg, verified_signer).await;
+                self.handle_room_message(&room_id, msg, verified_signer)
+                    .await;
             }
             NetworkEvent::DialSucceeded { peer_id, address } => {
                 let addr_s = address.to_string();
@@ -4102,7 +4102,10 @@ impl AppHandle {
                     error,
                 });
             }
-            NetworkEvent::PeerIdentified { peer_id, fingerprint } => {
+            NetworkEvent::PeerIdentified {
+                peer_id,
+                fingerprint,
+            } => {
                 // For any address we user-dialed for this peer, retroactively
                 // backfill the fingerprint and flip trusted=true. The
                 // upsert's COALESCE preserves fingerprint once set and
@@ -4244,16 +4247,9 @@ impl AppHandle {
                             updated_at: now_ms,
                         };
                         if let Ok(env) = crate::crypto::sign_message(&self.identity, &msg) {
-                            if let Ok(bytes) =
-                                crate::network::protocol::encode_wire_signed(&env)
-                            {
-                                let rooms: Vec<String> = self
-                                    .active_rooms
-                                    .lock()
-                                    .unwrap()
-                                    .keys()
-                                    .cloned()
-                                    .collect();
+                            if let Ok(bytes) = crate::network::protocol::encode_wire_signed(&env) {
+                                let rooms: Vec<String> =
+                                    self.active_rooms.lock().unwrap().keys().cloned().collect();
                                 for room_id in rooms {
                                     self.network
                                         .publish_room_message(room_id, bytes.clone())
@@ -4316,13 +4312,17 @@ impl AppHandle {
                     // PeerId for compactness — full peer id is too long
                     // for a status line.
                     let s = remote_peer.to_base58();
-                    let tail: String = s.chars().rev().take(8).collect::<String>()
+                    let tail: String = s
+                        .chars()
+                        .rev()
+                        .take(8)
+                        .collect::<String>()
                         .chars()
                         .rev()
                         .collect();
-                    let _ = self.app_event_tx.send(AppEvent::DcutrSucceeded {
-                        peer_label: tail,
-                    });
+                    let _ = self
+                        .app_event_tx
+                        .send(AppEvent::DcutrSucceeded { peer_label: tail });
                 }
             }
             NetworkEvent::InboundDial {
@@ -4340,17 +4340,15 @@ impl AppHandle {
                 // reject any unverified fingerprint without prompting.
                 // SAS-verified (Phase G) and already-trusted (Phase A)
                 // peers still come through.
-                let global_verified_only =
-                    repo::get_setting(&self.db, "verified_only_inbound")
-                        .ok()
-                        .flatten()
-                        .map(|v| v == "1")
-                        .unwrap_or(false);
+                let global_verified_only = repo::get_setting(&self.db, "verified_only_inbound")
+                    .ok()
+                    .flatten()
+                    .map(|v| v == "1")
+                    .unwrap_or(false);
                 if global_verified_only {
-                    let is_verified =
-                        repo::is_globally_verified(&self.db, &fingerprint).unwrap_or(false)
-                            || repo::is_fingerprint_trusted(&self.db, &fingerprint)
-                                .unwrap_or(false);
+                    let is_verified = repo::is_globally_verified(&self.db, &fingerprint)
+                        .unwrap_or(false)
+                        || repo::is_fingerprint_trusted(&self.db, &fingerprint).unwrap_or(false);
                     if !is_verified {
                         info!(
                             %fingerprint,
@@ -4433,9 +4431,7 @@ impl AppHandle {
                             .map(|m| m.fingerprint)
                             .find(|fp| *fp != our_fp);
                         if let Some(partner_fp) = partner {
-                            if let Err(e) =
-                                self.bootstrap_direct_room(room_id, &partner_fp).await
-                            {
+                            if let Err(e) = self.bootstrap_direct_room(room_id, &partner_fp).await {
                                 debug!(%e, %room_id, "lazy DM re-activation on inbound failed");
                             }
                         }
@@ -4483,9 +4479,7 @@ impl AppHandle {
                 }
                 // Drop announcements from banned fingerprints — they
                 // can't rejoin until an owner unbans them (Phase B).
-                if repo::is_member_banned(&self.db, room_id, &sender_fingerprint)
-                    .unwrap_or(false)
-                {
+                if repo::is_member_banned(&self.db, room_id, &sender_fingerprint).unwrap_or(false) {
                     info!(%sender_fingerprint, %room_id, "dropping MemberAnnounce from banned peer");
                     return;
                 }
@@ -4511,9 +4505,7 @@ impl AppHandle {
                             reason: "room requires SAS verification — ask an existing member to verify you".into(),
                         };
                         if let Ok(env) = crate::crypto::sign_message(&self.identity, &msg) {
-                            if let Ok(bytes) =
-                                crate::network::protocol::encode_wire_signed(&env)
-                            {
+                            if let Ok(bytes) = crate::network::protocol::encode_wire_signed(&env) {
                                 self.network
                                     .publish_room_message(room_id.to_string(), bytes)
                                     .await;
@@ -4737,9 +4729,7 @@ impl AppHandle {
                 // they have no inbound session, but in unencrypted rooms
                 // their plaintext rendered freely — see RoomMessage::Plain
                 // arm below).
-                if repo::is_member_banned(&self.db, room_id, &sender_fingerprint)
-                    .unwrap_or(false)
-                {
+                if repo::is_member_banned(&self.db, room_id, &sender_fingerprint).unwrap_or(false) {
                     debug!(%sender_fingerprint, %room_id, "dropping Encrypted from banned peer");
                     return;
                 }
@@ -4901,9 +4891,7 @@ impl AppHandle {
                 if sender_fingerprint == our_fp {
                     return;
                 }
-                if repo::is_member_banned(&self.db, room_id, &sender_fingerprint)
-                    .unwrap_or(false)
-                {
+                if repo::is_member_banned(&self.db, room_id, &sender_fingerprint).unwrap_or(false) {
                     debug!(%sender_fingerprint, %room_id, "dropping Plain from banned peer");
                     return;
                 }
@@ -4931,9 +4919,7 @@ impl AppHandle {
                 if sender_fingerprint == our_fp {
                     return;
                 }
-                if repo::is_member_banned(&self.db, room_id, &sender_fingerprint)
-                    .unwrap_or(false)
-                {
+                if repo::is_member_banned(&self.db, room_id, &sender_fingerprint).unwrap_or(false) {
                     return;
                 }
                 let expiry = now_unix() + TYPING_TTL_SECS;
@@ -5039,9 +5025,7 @@ impl AppHandle {
                 }
                 // Drop offers from banned peers in the same shape as
                 // MemberAnnounce — keeps moderation invariant tight.
-                if repo::is_member_banned(&self.db, room_id, &sender_fingerprint)
-                    .unwrap_or(false)
-                {
+                if repo::is_member_banned(&self.db, room_id, &sender_fingerprint).unwrap_or(false) {
                     info!(%sender_fingerprint, %room_id, %file_id, "dropping FileOffer from banned peer");
                     return;
                 }
@@ -5066,9 +5050,7 @@ impl AppHandle {
                 if sender_fingerprint == our_fp {
                     return;
                 }
-                if repo::is_member_banned(&self.db, room_id, &sender_fingerprint)
-                    .unwrap_or(false)
-                {
+                if repo::is_member_banned(&self.db, room_id, &sender_fingerprint).unwrap_or(false) {
                     return;
                 }
                 self.handle_file_chunk(
@@ -5174,14 +5156,14 @@ impl AppHandle {
                         return;
                     }
                 };
-                let their_pub =
-                    match crate::crypto::sas::parse_pubkey(&ephemeral_x25519_pubkey_b64) {
-                        Ok(pk) => pk,
-                        Err(e) => {
-                            warn!(%e, "SasInit: bad x25519 pubkey");
-                            return;
-                        }
-                    };
+                let their_pub = match crate::crypto::sas::parse_pubkey(&ephemeral_x25519_pubkey_b64)
+                {
+                    Ok(pk) => pk,
+                    Err(e) => {
+                        warn!(%e, "SasInit: bad x25519 pubkey");
+                        return;
+                    }
+                };
                 let tx_id_bytes = match B64.decode(&tx_id) {
                     Ok(b) if b.len() == crate::crypto::sas::TX_ID_LEN => {
                         let mut arr = [0u8; crate::crypto::sas::TX_ID_LEN];
@@ -5282,14 +5264,14 @@ impl AppHandle {
                         return;
                     }
                 };
-                let their_pub =
-                    match crate::crypto::sas::parse_pubkey(&ephemeral_x25519_pubkey_b64) {
-                        Ok(pk) => pk,
-                        Err(e) => {
-                            warn!(%e, "SasResponse: bad x25519 pubkey");
-                            return;
-                        }
-                    };
+                let their_pub = match crate::crypto::sas::parse_pubkey(&ephemeral_x25519_pubkey_b64)
+                {
+                    Ok(pk) => pk,
+                    Err(e) => {
+                        warn!(%e, "SasResponse: bad x25519 pubkey");
+                        return;
+                    }
+                };
                 let tx_id_bytes = match B64.decode(&tx_id) {
                     Ok(b) if b.len() == crate::crypto::sas::TX_ID_LEN => {
                         let mut arr = [0u8; crate::crypto::sas::TX_ID_LEN];
@@ -5387,18 +5369,15 @@ impl AppHandle {
                         return;
                     }
                     let original_len = room.issued_codes.len();
-                    room.issued_codes.retain(|(c, exp)| !(c == &code && *exp > now));
+                    room.issued_codes
+                        .retain(|(c, exp)| !(c == &code && *exp > now));
                     let matched = room.issued_codes.len() < original_len;
                     if !matched {
                         info!(%joiner_fp, "CodeJoinRequest: code invalid or expired; ignoring");
                         return;
                     }
                     let crypto = room.crypto.as_ref().unwrap();
-                    (
-                        true,
-                        crypto.our_session_id(),
-                        crypto.our_session_key_b64(),
-                    )
+                    (true, crypto.our_session_id(), crypto.our_session_key_b64())
                 };
                 let _ = code_ok;
                 // ECDH with the joiner's ephemeral pubkey.
@@ -5505,9 +5484,7 @@ impl AppHandle {
                 let mut rooms = self.active_rooms.lock().unwrap();
                 if let Some(room) = rooms.get_mut(room_id) {
                     if let Some(crypto) = room.crypto.as_mut() {
-                        if let Err(e) =
-                            crypto.add_inbound_session(&owner_fp, &session_key_str)
-                        {
+                        if let Err(e) = crypto.add_inbound_session(&owner_fp, &session_key_str) {
                             warn!(%e, "CodeJoinResponse: add_inbound_session failed");
                         } else {
                             info!(%room_id, %owner_fp, %owner_session_id, "code-join completed; can decrypt owner's messages");
@@ -5658,8 +5635,7 @@ impl AppHandle {
                 // the canonical DM room, after which the normal MemberAnnounce
                 // exchange shares session keys.
                 if self.is_contact(&requester_fingerprint) {
-                    let _ =
-                        repo::delete_pending_contact_request(&self.db, &requester_fingerprint);
+                    let _ = repo::delete_pending_contact_request(&self.db, &requester_fingerprint);
                     if let Err(e) = self.start_direct(&requester_fingerprint).await {
                         debug!(%e, "ContactRequest mutual: start_direct failed");
                     }
@@ -5720,7 +5696,13 @@ impl AppHandle {
                     }
                 }
                 let res = if removed {
-                    repo::remove_reaction(&self.db, room_id, &target_msg_id, &sender_fingerprint, &emoji)
+                    repo::remove_reaction(
+                        &self.db,
+                        room_id,
+                        &target_msg_id,
+                        &sender_fingerprint,
+                        &emoji,
+                    )
                 } else {
                     repo::add_reaction(
                         &self.db,
@@ -5772,13 +5754,14 @@ impl AppHandle {
                 if repo::is_member_banned(&self.db, room_id, &sender_fingerprint).unwrap_or(false) {
                     return;
                 }
-                let target = match repo::find_message_by_client_id(&self.db, room_id, &target_msg_id) {
-                    Ok(Some(m)) => m,
-                    _ => {
-                        debug!(%target_msg_id, %room_id, "Edit target unknown; dropping");
-                        return;
-                    }
-                };
+                let target =
+                    match repo::find_message_by_client_id(&self.db, room_id, &target_msg_id) {
+                        Ok(Some(m)) => m,
+                        _ => {
+                            debug!(%target_msg_id, %room_id, "Edit target unknown; dropping");
+                            return;
+                        }
+                    };
                 if target.sender_fingerprint != signer && !self.is_owner(room_id, &signer) {
                     warn!(%signer, %target_msg_id, "Edit not authorized (not sender or owner); dropping");
                     return;
@@ -5868,13 +5851,14 @@ impl AppHandle {
                 if signer != sender_fingerprint {
                     return;
                 }
-                let target = match repo::find_message_by_client_id(&self.db, room_id, &target_msg_id) {
-                    Ok(Some(m)) => m,
-                    _ => {
-                        debug!(%target_msg_id, %room_id, "Delete target unknown; dropping");
-                        return;
-                    }
-                };
+                let target =
+                    match repo::find_message_by_client_id(&self.db, room_id, &target_msg_id) {
+                        Ok(Some(m)) => m,
+                        _ => {
+                            debug!(%target_msg_id, %room_id, "Delete target unknown; dropping");
+                            return;
+                        }
+                    };
                 if target.sender_fingerprint != signer && !self.is_owner(room_id, &signer) {
                     warn!(%signer, %target_msg_id, "Delete not authorized (not sender or owner); dropping");
                     return;
@@ -5973,7 +5957,12 @@ impl AppHandle {
                     .as_mut()
                     .ok_or_else(|| HuddleError::Session("missing room crypto".into()))?;
                 let (ciphertext, meta) = file_encryption::encrypt_file(&bytes, crypto)?;
-                (true, Some(meta.megolm_session_id.clone()), Some(meta), ciphertext)
+                (
+                    true,
+                    Some(meta.megolm_session_id.clone()),
+                    Some(meta),
+                    ciphertext,
+                )
             } else {
                 (false, None, None, bytes)
             }
@@ -5997,11 +5986,18 @@ impl AppHandle {
             mime: mime.clone(),
             size_bytes: plan.size_bytes as i64,
             status: AttachmentStatus::Ready,
-            cache_path: Some(self.file_manager.cache_path(&file_id).to_string_lossy().into()),
+            cache_path: Some(
+                self.file_manager
+                    .cache_path(&file_id)
+                    .to_string_lossy()
+                    .into(),
+            ),
             saved_path: Some(original_path.to_string_lossy().into()),
             error: None,
             encrypted: room_encrypted,
-            wrapped_key: encrypted_meta_opt.as_ref().map(|m| m.wrapped_key_b64.clone()),
+            wrapped_key: encrypted_meta_opt
+                .as_ref()
+                .map(|m| m.wrapped_key_b64.clone()),
             nonce: encrypted_meta_opt.as_ref().map(|m| m.nonce_b64.clone()),
             megolm_session_id: encrypted_meta_opt
                 .as_ref()
@@ -6123,17 +6119,14 @@ impl AppHandle {
                         .clone()
                         .ok_or_else(|| HuddleError::Other("missing content_hash".into()))?,
                 };
-                self.decrypt_attachment(
-                    room_id,
-                    &attachment.sender_fingerprint,
-                    &cached,
-                    &meta,
-                )?
+                self.decrypt_attachment(room_id, &attachment.sender_fingerprint, &cached, &meta)?
             } else {
                 cached
             }
         };
-        let saved = self.file_manager.write_to_downloads(&attachment.name, &plaintext)?;
+        let saved = self
+            .file_manager
+            .write_to_downloads(&attachment.name, &plaintext)?;
         repo::update_attachment_paths(
             &self.db,
             room_id,
@@ -6166,9 +6159,9 @@ impl AppHandle {
     pub fn open_saved(&self, room_id: &str, file_id: &str) -> Result<()> {
         let attachment = repo::get_attachment(&self.db, room_id, file_id)?
             .ok_or_else(|| HuddleError::Other("attachment not found".into()))?;
-        let path = attachment
-            .saved_path
-            .ok_or_else(|| HuddleError::Other("not saved yet — press Enter to save first".into()))?;
+        let path = attachment.saved_path.ok_or_else(|| {
+            HuddleError::Other("not saved yet — press Enter to save first".into())
+        })?;
         open_with_system(&path)
     }
 
@@ -6258,7 +6251,11 @@ impl AppHandle {
     }
 
     pub fn set_verified_only_inbound(&self, on: bool) -> Result<()> {
-        repo::set_setting(&self.db, "verified_only_inbound", if on { "1" } else { "0" })
+        repo::set_setting(
+            &self.db,
+            "verified_only_inbound",
+            if on { "1" } else { "0" },
+        )
     }
 
     /// huddle 0.7.8: persisted LAN-discovery toggle. When true, the next
@@ -6467,9 +6464,7 @@ impl AppHandle {
     pub async fn grant_owner(&self, room_id: &str, target_fingerprint: &str) -> Result<()> {
         let our_fp = self.identity.fingerprint().to_string();
         if !self.is_owner(room_id, &our_fp) {
-            return Err(HuddleError::Other(
-                "only an owner can grant owner".into(),
-            ));
+            return Err(HuddleError::Other("only an owner can grant owner".into()));
         }
         let msg = RoomMessage::OwnerGrant {
             room_id: room_id.to_string(),
@@ -6495,11 +6490,7 @@ impl AppHandle {
     /// still subscribe to the gossipsub topic and see the ciphertext,
     /// but they can't unwrap the new session key without the new
     /// passphrase, so they can't decrypt anything sent after the kick.
-    pub async fn kick_member(
-        &self,
-        room_id: &str,
-        target_fingerprint: &str,
-    ) -> Result<String> {
+    pub async fn kick_member(&self, room_id: &str, target_fingerprint: &str) -> Result<String> {
         let our_fp = self.identity.fingerprint().to_string();
         if !self.is_owner(room_id, &our_fp) {
             return Err(HuddleError::Other("only an owner can kick".into()));
@@ -6596,11 +6587,7 @@ impl AppHandle {
     /// `CodeJoinResponse`. The receive arm builds an `ActiveRoom`
     /// flagged read-only (no passphrase = can't share our outbound
     /// session key with others).
-    pub async fn join_room_with_code(
-        &self,
-        room_id: &str,
-        code: &str,
-    ) -> Result<()> {
+    pub async fn join_room_with_code(&self, room_id: &str, code: &str) -> Result<()> {
         // Resolve discovered metadata so we know name/encrypted/etc.
         let info = {
             let d = self.discovered_rooms.lock().unwrap().get(room_id).cloned();
@@ -6771,7 +6758,8 @@ impl AppHandle {
             if flow.sas_code.is_none() {
                 return Err(HuddleError::Other(
                     "SAS code not computed yet — wait for the partner's response \
-                     before confirming a match".into(),
+                     before confirming a match"
+                        .into(),
                 ));
             }
             flow.our_confirmed = true;
@@ -6831,7 +6819,12 @@ impl AppHandle {
             .get(tx_id)
             .map(|f| f.partner_pq_capable)
             .unwrap_or(false);
-        repo::add_verified_peer(&self.db, partner_fingerprint, now_unix(), partner_pq_capable)?;
+        repo::add_verified_peer(
+            &self.db,
+            partner_fingerprint,
+            now_unix(),
+            partner_pq_capable,
+        )?;
         self.sas_flows.lock().unwrap().remove(tx_id);
         let _ = self.app_event_tx.send(AppEvent::SasVerified {
             room_id: room_id.to_string(),
@@ -7276,7 +7269,11 @@ impl AppHandle {
         let full = self.identity.fingerprint().to_lowercase();
         // First 8 hex chars (two dash-separated groups joined), e.g.
         // "a3b1c2d4" of "a3b1-c2d4-…".
-        let short: String = full.chars().filter(|c| c.is_ascii_hexdigit()).take(8).collect();
+        let short: String = full
+            .chars()
+            .filter(|c| c.is_ascii_hexdigit())
+            .take(8)
+            .collect();
         let lower = body.to_lowercase();
         let hit = lower.contains(full.as_str())
             || lower
@@ -7323,24 +7320,15 @@ impl AppHandle {
         let no_master = self.persist_key() == [0u8; 32];
         if !no_master {
             let salt = storage::keychain::load_or_create_salt()?;
-            let candidate_master =
-                storage::keychain::derive_master_key(master_passphrase, &salt)?;
+            let candidate_master = storage::keychain::derive_master_key(master_passphrase, &salt)?;
             let candidate_subkey =
                 storage::keychain::derive_subkey(&candidate_master, b"megolm-persist");
             if !ct_eq_32(&candidate_subkey, &self.persist_key()) {
-                return Err(HuddleError::Other(
-                    "incorrect master passphrase".into(),
-                ));
+                return Err(HuddleError::Other("incorrect master passphrase".into()));
             }
         }
 
-        let room_ids: Vec<String> = self
-            .active_rooms
-            .lock()
-            .unwrap()
-            .keys()
-            .cloned()
-            .collect();
+        let room_ids: Vec<String> = self.active_rooms.lock().unwrap().keys().cloned().collect();
         let _ = tokio::time::timeout(Duration::from_secs(2), async {
             for room_id in &room_ids {
                 if let Err(e) = self.leave_room(room_id).await {
@@ -7532,7 +7520,10 @@ mod attach_path_tests {
             PathBuf::from("/home/alice/docs/f.txt")
         );
         // Absolute + relative paths pass through untouched.
-        assert_eq!(expand_tilde_with("/etc/hosts", home), PathBuf::from("/etc/hosts"));
+        assert_eq!(
+            expand_tilde_with("/etc/hosts", home),
+            PathBuf::from("/etc/hosts")
+        );
         assert_eq!(expand_tilde_with("rel/f", home), PathBuf::from("rel/f"));
         // `~user` is NOT resolved — left literal so the error shows what was typed
         // (no `$HOME`+username gluing like the old TUI path did).
@@ -7621,7 +7612,11 @@ mod dm_key_plan_tests {
                 for &ct in &[true, false] {
                     let a = plan_dm_key(keyed, false, true, init, ct);
                     assert_ne!(a, DmKeyAction::Classical, "PQ peer must not go classical");
-                    assert_ne!(a, DmKeyAction::Noop, "PQ peer must act (derive/upgrade/request)");
+                    assert_ne!(
+                        a,
+                        DmKeyAction::Noop,
+                        "PQ peer must act (derive/upgrade/request)"
+                    );
                 }
             }
         }
@@ -7933,9 +7928,8 @@ mod transport_preference_tests {
     fn lan_beats_public_beats_circuit() {
         let lan = address_preference("/ip4/192.168.1.5/tcp/9027");
         let pub_v4 = address_preference("/ip4/8.8.8.8/tcp/9027");
-        let circuit = address_preference(
-            "/ip4/1.2.3.4/tcp/4001/p2p/12D3Koo/p2p-circuit/p2p/12D3KooXYZ",
-        );
+        let circuit =
+            address_preference("/ip4/1.2.3.4/tcp/4001/p2p/12D3Koo/p2p-circuit/p2p/12D3KooXYZ");
         assert!(lan < pub_v4, "LAN {} should beat public {}", lan, pub_v4);
         assert!(
             pub_v4 < circuit,

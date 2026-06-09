@@ -131,7 +131,8 @@ impl FileManager {
         if !is_valid_file_id(file_id) {
             return Err(HuddleError::Other(
                 "read_cache: file_id is not a 64-char hex digest (rejected to \
-                 prevent path traversal)".into(),
+                 prevent path traversal)"
+                    .into(),
             ));
         }
         let path = self.cache_path(file_id);
@@ -207,7 +208,8 @@ impl FileManager {
         if !is_valid_file_id(file_id) {
             return Err(HuddleError::Other(
                 "FileChunk: file_id is not a 64-char hex digest (rejected to \
-                 prevent path traversal)".into(),
+                 prevent path traversal)"
+                    .into(),
             ));
         }
         if expected_size > MAX_FILE_SIZE {
@@ -553,7 +555,13 @@ mod tests {
         let mut completion: Option<CompletedFile> = None;
         for (i, chunk) in plan.chunks.iter().enumerate() {
             let c = mgr2
-                .accept_chunk(&plan.file_id, i as u32, total, chunk.clone(), plan.size_bytes)
+                .accept_chunk(
+                    &plan.file_id,
+                    i as u32,
+                    total,
+                    chunk.clone(),
+                    plan.size_bytes,
+                )
                 .unwrap();
             if c.is_some() {
                 completion = c;

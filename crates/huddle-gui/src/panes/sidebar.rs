@@ -21,13 +21,19 @@ pub fn render(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
             section_header(ui, vm, actions, Section::Direct, "DIRECT MESSAGES");
             if vm.expanded.contains(&Section::Direct) {
                 if ui
-                    .selectable_label(false, RichText::new("  + New message").color(palette().accent))
+                    .selectable_label(
+                        false,
+                        RichText::new("  + New message").color(palette().accent),
+                    )
                     .clicked()
                 {
                     actions.push(UiAction::OpenNewDm);
                 }
                 if ui
-                    .selectable_label(false, RichText::new("  + Paste invite").color(palette().accent))
+                    .selectable_label(
+                        false,
+                        RichText::new("  + Paste invite").color(palette().accent),
+                    )
                     .clicked()
                 {
                     actions.push(UiAction::OpenPasteInvite);
@@ -72,7 +78,11 @@ pub fn render(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
                     .filter(|d| d.kind != RoomKind::Direct && !vm.active_ids.contains(&d.room_id))
                     .collect();
                 if !discover.is_empty() {
-                    ui.label(RichText::new("  Discover").small().color(palette().text_dim));
+                    ui.label(
+                        RichText::new("  Discover")
+                            .small()
+                            .color(palette().text_dim),
+                    );
                     for d in discover {
                         ui.horizontal(|ui| {
                             let enc = if d.encrypted { "  E" } else { "" };
@@ -155,7 +165,11 @@ fn room_row(
     kind: RoomKind,
 ) {
     let selected = vm.current_room_id() == Some(room_id);
-    let prefix = if kind == RoomKind::Direct { "  " } else { "  # " };
+    let prefix = if kind == RoomKind::Direct {
+        "  "
+    } else {
+        "  # "
+    };
     let label = vm.room_label(room_id);
     let unread = vm.unread.get(room_id).copied().unwrap_or(0);
     let badge = if unread > 0 {
@@ -174,9 +188,18 @@ fn room_row(
     }
 }
 
-fn pane_row(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>, pane: Pane, title: &str) {
+fn pane_row(
+    ui: &mut egui::Ui,
+    vm: &ViewModel,
+    actions: &mut Vec<UiAction>,
+    pane: Pane,
+    title: &str,
+) {
     let selected = vm.pane == pane;
-    if ui.selectable_label(selected, format!("  {title}")).clicked() {
+    if ui
+        .selectable_label(selected, format!("  {title}"))
+        .clicked()
+    {
         actions.push(UiAction::SelectPane(pane));
     }
 }

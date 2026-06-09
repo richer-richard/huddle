@@ -62,13 +62,8 @@ fn hybrid_dm_full_handshake_end_to_end() {
         } => {
             let ed = decode32(&ed);
             let ek = B64.decode(&ek).unwrap();
-            dm::derive_dm_key_hybrid_initiator(
-                &initiator.secret_bytes(),
-                &ed,
-                &ek,
-                &room_id,
-            )
-            .unwrap()
+            dm::derive_dm_key_hybrid_initiator(&initiator.secret_bytes(), &ed, &ek, &room_id)
+                .unwrap()
         }
         _ => panic!("expected responder announce with ML-KEM key"),
     };
@@ -112,9 +107,13 @@ fn hybrid_dm_full_handshake_end_to_end() {
         _ => panic!("expected initiator announce with ciphertext + wrapped key"),
     };
 
-    assert_eq!(init_key, resp_key, "both peers must agree on the hybrid DM key");
     assert_eq!(
-        recovered, init_session_key.as_bytes(),
+        init_key, resp_key,
+        "both peers must agree on the hybrid DM key"
+    );
+    assert_eq!(
+        recovered,
+        init_session_key.as_bytes(),
         "responder must unwrap the initiator's Megolm session key"
     );
 

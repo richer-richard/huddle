@@ -192,10 +192,8 @@ pub fn derive_sas_code(
     // (3 × 13-bit chunks, each offset by 1000).
     let d = &okm[6..11];
     let chunk0 = ((u32::from(d[0]) << 5) | (u32::from(d[1]) >> 3)) & 0x1fff;
-    let chunk1 = ((u32::from(d[1] & 0x07) << 10)
-        | (u32::from(d[2]) << 2)
-        | (u32::from(d[3]) >> 6))
-        & 0x1fff;
+    let chunk1 =
+        ((u32::from(d[1] & 0x07) << 10) | (u32::from(d[2]) << 2) | (u32::from(d[3]) >> 6)) & 0x1fff;
     let chunk2 = ((u32::from(d[3] & 0x3f) << 7) | (u32::from(d[4]) >> 1)) & 0x1fff;
     let decimal = format!("{}-{}-{}", chunk0 + 1000, chunk1 + 1000, chunk2 + 1000);
 
@@ -285,10 +283,7 @@ pub const SAS_EMOJI: [(&str, &str); 49] = [
 /// huddle 0.7.11: rejection-sampling emoji-index derivation. Refills any
 /// index ≥ 49 with deterministic additional HKDF expansion so the
 /// distribution over the 49-element table is uniform.
-fn derive_emoji_indices_rejection(
-    hk: &Hkdf<Sha256>,
-    initial: [u8; 7],
-) -> [u8; 7] {
+fn derive_emoji_indices_rejection(hk: &Hkdf<Sha256>, initial: [u8; 7]) -> [u8; 7] {
     let mut out = [0u8; 7];
     let mut accepted = 0usize;
     // Use the initial bytes first.

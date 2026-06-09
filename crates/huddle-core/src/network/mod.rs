@@ -9,7 +9,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
-use sha2::{Digest, Sha256};
 use libp2p::core::ConnectedPoint;
 use libp2p::swarm::dial_opts::DialOpts;
 use libp2p::swarm::ConnectionId;
@@ -17,6 +16,7 @@ use libp2p::{
     autonat, dcutr, gossipsub, identify, mdns, noise, ping, tcp, yamux, Multiaddr, PeerId, Swarm,
     SwarmBuilder,
 };
+use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
@@ -73,16 +73,25 @@ use crate::network::protocol::{room_topic, RoomAnnouncement, ROOMS_TOPIC};
 #[derive(Debug)]
 pub enum NetworkCommand {
     /// Subscribe to a room's per-room gossipsub topic.
-    SubscribeRoom { room_id: String },
+    SubscribeRoom {
+        room_id: String,
+    },
     /// Unsubscribe from a room's topic.
-    UnsubscribeRoom { room_id: String },
+    UnsubscribeRoom {
+        room_id: String,
+    },
     /// Publish a JSON-encoded `RoomMessage` to a room's topic.
-    PublishRoomMessage { room_id: String, payload: Vec<u8> },
+    PublishRoomMessage {
+        room_id: String,
+        payload: Vec<u8>,
+    },
     /// Publish a room announcement on the global rooms topic.
     AnnounceRoom(RoomAnnouncement),
     /// User-initiated dial of an explicit address. Used for cross-network
     /// reach when mDNS isn't enough.
-    Dial { address: Multiaddr },
+    Dial {
+        address: Multiaddr,
+    },
     /// huddle 0.5.2: dial a peer using multiple candidate addresses,
     /// letting libp2p race them in parallel. Used by the "add by HD
     /// ID / username" flow, which resolves a fingerprint to every
@@ -90,14 +99,20 @@ pub enum NetworkCommand {
     /// + persisted `known_peers`). libp2p's parallel dialer picks
     /// the cheapest path that completes — LAN beats public IP beats
     /// relay-hopped without us having to probe transports manually.
-    DialAddresses { addresses: Vec<Multiaddr> },
+    DialAddresses {
+        addresses: Vec<Multiaddr>,
+    },
     /// Phase A: user accepted an inbound dial — promote the peer to
     /// explicit-peer status so room announcements flow.
-    AcceptInbound { peer_id: PeerId },
+    AcceptInbound {
+        peer_id: PeerId,
+    },
     /// Phase A: user rejected an inbound dial — disconnect them and
     /// add the peer_id to the in-memory blocklist for this session
     /// (caller is responsible for the persistent blocked_peers row).
-    RejectInbound { peer_id: PeerId },
+    RejectInbound {
+        peer_id: PeerId,
+    },
     /// Phase C follow-up: drop a connection that failed an
     /// application-level identity check (e.g. invite-fingerprint
     /// mismatch). Differs from `RejectInbound` in that it doesn't
@@ -105,7 +120,9 @@ pub enum NetworkCommand {
     /// past Identify when we discover the mismatch) and doesn't
     /// persist a block — the caller may want to retry with a
     /// corrected invite.
-    DisconnectPeer { peer_id: PeerId },
+    DisconnectPeer {
+        peer_id: PeerId,
+    },
     Shutdown,
 }
 
@@ -606,10 +623,7 @@ impl NetworkTask {
         }
     }
 
-    async fn handle_swarm_event(
-        &mut self,
-        event: libp2p::swarm::SwarmEvent<HuddleBehaviorEvent>,
-    ) {
+    async fn handle_swarm_event(&mut self, event: libp2p::swarm::SwarmEvent<HuddleBehaviorEvent>) {
         match event {
             libp2p::swarm::SwarmEvent::NewListenAddr { address, .. } => {
                 info!(%address, "listening");
@@ -617,9 +631,7 @@ impl NetworkTask {
                 // milestone — surface it as its own event so the lobby
                 // can show "reachable via N relays" status.
                 use libp2p::multiaddr::Protocol;
-                let is_circuit = address
-                    .iter()
-                    .any(|p| matches!(p, Protocol::P2pCircuit));
+                let is_circuit = address.iter().any(|p| matches!(p, Protocol::P2pCircuit));
                 if is_circuit {
                     let _ = self
                         .event_tx
@@ -784,7 +796,10 @@ impl NetworkTask {
                             .behaviour_mut()
                             .gossipsub
                             .remove_explicit_peer(&peer_id);
-                        let _ = self.event_tx.send(NetworkEvent::PeerExpired { peer_id }).await;
+                        let _ = self
+                            .event_tx
+                            .send(NetworkEvent::PeerExpired { peer_id })
+                            .await;
                     }
                 }
             }
@@ -793,11 +808,10 @@ impl NetworkTask {
                 message,
                 ..
             }) => {
-                self.handle_gossipsub_message(propagation_source, message).await;
+                self.handle_gossipsub_message(propagation_source, message)
+                    .await;
             }
-            HuddleBehaviorEvent::Identify(identify::Event::Received {
-                peer_id, info, ..
-            }) => {
+            HuddleBehaviorEvent::Identify(identify::Event::Received { peer_id, info, .. }) => {
                 debug!(%peer_id, agent = %info.agent_version, "identify received");
                 // Phase D: if this peer is a configured relay, register
                 // a `/p2p-circuit` reservation on first identify. Idem-
@@ -942,11 +956,7 @@ impl NetworkTask {
         }
     }
 
-    async fn handle_gossipsub_message(
-        &mut self,
-        from_peer: PeerId,
-        message: gossipsub::Message,
-    ) {
+    async fn handle_gossipsub_message(&mut self, from_peer: PeerId, message: gossipsub::Message) {
         let topic = message.topic.to_string();
         if topic == ROOMS_TOPIC {
             match serde_json::from_slice::<RoomAnnouncement>(&message.data) {
@@ -1002,8 +1012,7 @@ impl NetworkTask {
                 let topic = gossipsub::IdentTopic::new(ROOMS_TOPIC);
                 match serde_json::to_vec(&ann) {
                     Ok(payload) => {
-                        if let Err(e) =
-                            self.swarm.behaviour_mut().gossipsub.publish(topic, payload)
+                        if let Err(e) = self.swarm.behaviour_mut().gossipsub.publish(topic, payload)
                         {
                             debug!(%e, "publish room announcement failed");
                         }
@@ -1072,9 +1081,7 @@ impl NetworkTask {
                         _ => None,
                     });
                 let opts = match peer_id {
-                    Some(pid) => DialOpts::peer_id(pid)
-                        .addresses(addresses.clone())
-                        .build(),
+                    Some(pid) => DialOpts::peer_id(pid).addresses(addresses.clone()).build(),
                     // No /p2p/ segment anywhere — fall back to single-
                     // address dial of the first candidate, matching the
                     // legacy `Dial` semantics for unanchored multiaddrs.

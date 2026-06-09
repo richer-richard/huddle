@@ -38,9 +38,17 @@ pub enum Inbox {
 pub enum ReqTag {
     StartRoom,
     StartDirect,
-    JoinCode { room_id: String, room_name: String },
-    SaveDownload { file_id: String },
-    SasStart { room_id: String, partner: String },
+    JoinCode {
+        room_id: String,
+        room_name: String,
+    },
+    SaveDownload {
+        file_id: String,
+    },
+    SasStart {
+        room_id: String,
+        partner: String,
+    },
     SendFile,
     GoDark,
     /// huddle 2.0.0 (F5): change the master passphrase. A failure (wrong current
@@ -184,7 +192,10 @@ async fn build_inner(ctx: egui::Context, params: BuildParams) -> Result<ReadyPar
             };
             let db = huddle_core::storage::open_db(&huddle_core::config::db_path(), key.as_ref())
                 .map_err(|e| e.to_string())?;
-            if repo::load_identity(&db).map_err(|e| e.to_string())?.is_none() {
+            if repo::load_identity(&db)
+                .map_err(|e| e.to_string())?
+                .is_none()
+            {
                 let id = huddle_core::app::import_identity_from_phrase(&phrase)
                     .map_err(|e| e.to_string())?;
                 let now = std::time::SystemTime::now()
@@ -275,7 +286,12 @@ impl Cmd {
         tx: crossbeam_channel::Sender<Inbox>,
         ctx: egui::Context,
     ) -> Self {
-        Self { rt, handle, tx, ctx }
+        Self {
+            rt,
+            handle,
+            tx,
+            ctx,
+        }
     }
 
     /// Fire-and-forget: run an async mutation; on error, surface a `CmdError`.

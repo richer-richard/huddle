@@ -56,7 +56,10 @@ pub fn render(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme) {
         mode_spans.push(Span::raw("    "));
     }
     mode_spans.push(Span::styled("relay  ", theme.dim()));
-    mode_spans.push(Span::styled(format!("{relay_glyph}{relay_text}"), relay_style));
+    mode_spans.push(Span::styled(
+        format!("{relay_glyph}{relay_text}"),
+        relay_style,
+    ));
     mode_spans.push(Span::raw("    "));
     mode_spans.push(Span::styled("mode  ", theme.dim()));
     mode_spans.push(Span::styled(app.mode_str().to_string(), theme.text_style()));
@@ -74,11 +77,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme) {
     for (i, (label, value)) in fields.iter().enumerate() {
         let is_sel = i == cursor;
         let prefix = if is_sel { "►" } else { " " };
-        let label_text = format!(
-            "{:>w$}",
-            label,
-            w = label_width
-        );
+        let label_text = format!("{:>w$}", label, w = label_width);
         let style = if is_sel {
             theme
                 .text_style()

@@ -61,10 +61,7 @@ pub fn render_card_lines(
             Span::styled(pad_right(&hints, inside_w), hint_style),
             Span::styled(" │", border_style),
         ]),
-        Line::from(vec![
-            Span::raw(prefix),
-            Span::styled(bot, border_style),
-        ]),
+        Line::from(vec![Span::raw(prefix), Span::styled(bot, border_style)]),
     ];
     debug_assert_eq!(
         out.len(),
@@ -76,26 +73,16 @@ pub fn render_card_lines(
 
 fn card_state(a: &StoredAttachment) -> (Color, &'static str, &'static str) {
     match a.status {
-        AttachmentStatus::Offered => (
-            Color::DarkGray,
-            "offered",
-            "[Enter] download   [c] dismiss",
-        ),
-        AttachmentStatus::Downloading => (
-            Color::Yellow,
-            "downloading",
-            "[Enter] wait   [c] cancel",
-        ),
+        AttachmentStatus::Offered => (Color::DarkGray, "offered", "[Enter] download   [c] dismiss"),
+        AttachmentStatus::Downloading => {
+            (Color::Yellow, "downloading", "[Enter] wait   [c] cancel")
+        }
         AttachmentStatus::Ready => (
             Color::Green,
             "ready",
             "[Enter] save to Downloads   [o] open   [s] save copy",
         ),
-        AttachmentStatus::Saved => (
-            Color::Green,
-            "saved",
-            "[o] open   [s] save copy",
-        ),
+        AttachmentStatus::Saved => (Color::Green, "saved", "[o] open   [s] save copy"),
         AttachmentStatus::Failed => (Color::Red, "failed", "[Enter] retry"),
         AttachmentStatus::Cancelled => (Color::DarkGray, "cancelled", "[Enter] retry"),
     }

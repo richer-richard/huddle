@@ -14,7 +14,10 @@ pub fn run() -> Result<()> {
     let data_dir = config::data_dir();
     println!("  data dir:   {}", data_dir.display());
     println!("  database:   {}", config::db_path().display());
-    println!("  log file:   {}", data_dir.join("huddle-gui.log").display());
+    println!(
+        "  log file:   {}",
+        data_dir.join("huddle-gui.log").display()
+    );
     println!("  config:     {}", config::config_path().display());
     println!();
 

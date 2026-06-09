@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use huddle_core::app::{AppEvent, AppHandle};
 use huddle_core::network::NetworkMode;
-use huddle_core::storage::{self, repo};
 use huddle_core::storage::repo::{RoomKind, StoredRoom};
+use huddle_core::storage::{self, repo};
 
 struct Server(Child);
 impl Drop for Server {
@@ -32,7 +32,10 @@ fn spawn_server(port: u16, db: &str) -> Server {
 
 async fn wait_listening(port: u16) {
     for _ in 0..100 {
-        if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+        if tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_ok()
+        {
             return;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -96,7 +99,9 @@ async fn connects_to_live_onion_over_tor() {
         0,
         [0u8; 32],
         Vec::new(),
-        huddle_core::app::TransportConfig::onion_only(huddle_core::app::DEFAULT_SERVER_URL.to_string()),
+        huddle_core::app::TransportConfig::onion_only(
+            huddle_core::app::DEFAULT_SERVER_URL.to_string(),
+        ),
     )
     .await
     .unwrap();
@@ -188,10 +193,16 @@ async fn two_apps_exchange_messages_over_the_server() {
         .send_room_message(&room_id, "hello over the onion relay")
         .await
         .unwrap();
-    assert_eq!(next_message(&mut events_b).await, "hello over the onion relay");
+    assert_eq!(
+        next_message(&mut events_b).await,
+        "hello over the onion relay"
+    );
 
     // B → A reply, same path in reverse.
-    handle_b.send_room_message(&room_id, "got it").await.unwrap();
+    handle_b
+        .send_room_message(&room_id, "got it")
+        .await
+        .unwrap();
     assert_eq!(next_message(&mut events_a).await, "got it");
 
     handle_a.shutdown().await;
@@ -261,7 +272,10 @@ async fn contact_request_over_server_opens_dm() {
         .await
         .unwrap();
     assert_eq!(next_message(&mut events_b).await, "yo over the inbox");
-    handle_b.send_room_message(&dm_room, "hey back").await.unwrap();
+    handle_b
+        .send_room_message(&dm_room, "hey back")
+        .await
+        .unwrap();
     assert_eq!(next_message(&mut events_a).await, "hey back");
 
     handle_a.shutdown().await;
@@ -414,7 +428,10 @@ async fn offline_first_contact_then_dm_over_server() {
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     let dm = huddle_core::app::canonical_dm_room_id(&a_fp, &b_fp);
-    handle_a.send_room_message(&dm, "first words").await.unwrap();
+    handle_a
+        .send_room_message(&dm, "first words")
+        .await
+        .unwrap();
     assert_eq!(next_message(&mut events_b).await, "first words");
     handle_b.send_room_message(&dm, "got them").await.unwrap();
     assert_eq!(next_message(&mut events_a).await, "got them");
@@ -475,7 +492,10 @@ async fn dm_stays_live_across_restart_over_server() {
         handle_b.start_direct(&a_fp).await.unwrap();
         tokio::time::sleep(Duration::from_secs(2)).await;
         let dm = huddle_core::app::canonical_dm_room_id(&a_fp, &b_fp);
-        handle_a.send_room_message(&dm, "before restart").await.unwrap();
+        handle_a
+            .send_room_message(&dm, "before restart")
+            .await
+            .unwrap();
         assert_eq!(next_message(&mut events_b).await, "before restart");
         handle_a.shutdown().await;
         // handle_a dropped at end of scope → simulates the process exiting.
@@ -495,7 +515,11 @@ async fn dm_stays_live_across_restart_over_server() {
     )
     .await
     .unwrap();
-    assert_eq!(handle_a2.fingerprint(), a_fp, "same identity across restart");
+    assert_eq!(
+        handle_a2.fingerprint(),
+        a_fp,
+        "same identity across restart"
+    );
     let mut events_a2 = handle_a2.subscribe();
     wait_server_connected(&handle_a2).await;
 
@@ -508,7 +532,10 @@ async fn dm_stays_live_across_restart_over_server() {
     // B sends a fresh message; the restarted A receives + decrypts it with no
     // manual reopen — the load-bearing Phase 0.2 behavior.
     tokio::time::sleep(Duration::from_millis(800)).await;
-    handle_b.send_room_message(&dm, "after restart").await.unwrap();
+    handle_b
+        .send_room_message(&dm, "after restart")
+        .await
+        .unwrap();
     assert_eq!(next_message(&mut events_a2).await, "after restart");
 
     handle_a2.shutdown().await;
@@ -599,12 +626,18 @@ async fn group_fanout_reaches_all_members_over_server() {
     tokio::time::sleep(Duration::from_millis(600)).await;
 
     // A → both B and C.
-    handle_a.send_room_message(&room_id, "hello trio").await.unwrap();
+    handle_a
+        .send_room_message(&room_id, "hello trio")
+        .await
+        .unwrap();
     assert_eq!(next_message(&mut ev_b).await, "hello trio");
     assert_eq!(next_message(&mut ev_c).await, "hello trio");
 
     // C → both A and B (fan-out works from any member, not just the creator).
-    handle_c.send_room_message(&room_id, "from C").await.unwrap();
+    handle_c
+        .send_room_message(&room_id, "from C")
+        .await
+        .unwrap();
     assert_eq!(next_message(&mut ev_a).await, "from C");
     assert_eq!(next_message(&mut ev_b).await, "from C");
 
@@ -715,7 +748,10 @@ async fn live_relay_group_and_attachment() {
     handle_b.join_room(&room_id, None).await.unwrap();
     tokio::time::sleep(Duration::from_millis(800)).await;
 
-    handle_a.send_room_message(&room_id, "live group msg").await.unwrap();
+    handle_a
+        .send_room_message(&room_id, "live group msg")
+        .await
+        .unwrap();
     assert_eq!(next_message(&mut ev_b).await, "live group msg");
 
     let payload: Vec<u8> = (0..300 * 1024).map(|i| (i % 251) as u8).collect();

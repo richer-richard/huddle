@@ -110,7 +110,9 @@ pub fn render_messages(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme, r
                 let label_style = if is_me {
                     Style::default().fg(theme.warn).add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD)
                 };
                 let is_verified = !is_me && verified.contains(&m.sender_fingerprint);
                 let time = format_time(m.sent_at);
@@ -306,14 +308,12 @@ pub fn render_input(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme, room
         out
     };
 
-    let widget = Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(border_style)
-                .padding(Padding::horizontal(1)),
-        );
+    let widget = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(border_style)
+            .padding(Padding::horizontal(1)),
+    );
     f.render_widget(widget, area);
 }
 
@@ -468,7 +468,9 @@ fn reply_preview(r: &OpenRoom, app: &TuiApp, reply_to: &str, me: &str) -> Option
         .iter()
         .find(|m| m.client_msg_id.as_deref() == Some(reply_to))?;
     let who = if target.sender_fingerprint.as_str() == me || target.direction == "out" {
-        app.handle.display_name().unwrap_or_else(|| "you".to_string())
+        app.handle
+            .display_name()
+            .unwrap_or_else(|| "you".to_string())
     } else {
         app.handle
             .lookup_username(&target.sender_fingerprint)

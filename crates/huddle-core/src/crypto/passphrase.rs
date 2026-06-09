@@ -45,10 +45,7 @@ pub fn derive_key(passphrase: &str, salt: &[u8]) -> Result<[u8; KEY_LEN]> {
 /// huddle 0.7.11: same as `derive_key` but returns the key in a
 /// zeroize-on-drop wrapper. Callers that want defense-in-depth against
 /// heap-residency leaks should prefer this over `derive_key`.
-pub fn derive_key_zeroizing(
-    passphrase: &str,
-    salt: &[u8],
-) -> Result<Zeroizing<[u8; KEY_LEN]>> {
+pub fn derive_key_zeroizing(passphrase: &str, salt: &[u8]) -> Result<Zeroizing<[u8; KEY_LEN]>> {
     let params = Params::new(65_536, 3, 4, Some(KEY_LEN))
         .map_err(|e| HuddleError::Session(format!("argon2 params: {e}")))?;
     let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);

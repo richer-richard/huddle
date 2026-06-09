@@ -11,8 +11,8 @@ use crate::model::{
     ConfirmDeleteState, ConfirmInviteState, DisappearingState, EditAliasState, EditUsernameState,
     EmojiPickerState, ExportSeedState, ExportSeedStep, GoDarkState, InboundDialState, JoinState,
     JoinWithCodeState, Modal, NewDmState, NewGroupState, PasteInviteState, RotateState,
-    SafetyNumberChangedState, SasStage, SasState, SearchState, SetRelayState, UiAction, VerifyState,
-    DISAPPEARING_OPTIONS, GO_DARK_CONFIRM_PHRASE, ONBOARDING_PAGES, REACTION_EMOJIS,
+    SafetyNumberChangedState, SasStage, SasState, SearchState, SetRelayState, UiAction,
+    VerifyState, DISAPPEARING_OPTIONS, GO_DARK_CONFIRM_PHRASE, ONBOARDING_PAGES, REACTION_EMOJIS,
 };
 use crate::theme::palette;
 
@@ -79,13 +79,25 @@ fn change_passphrase(
         );
         ui.add_space(10.0);
         ui.label("current passphrase");
-        ui.add(TextEdit::singleline(&mut s.current).password(true).desired_width(f32::INFINITY));
+        ui.add(
+            TextEdit::singleline(&mut s.current)
+                .password(true)
+                .desired_width(f32::INFINITY),
+        );
         ui.add_space(6.0);
         ui.label("new passphrase");
-        ui.add(TextEdit::singleline(&mut s.new).password(true).desired_width(f32::INFINITY));
+        ui.add(
+            TextEdit::singleline(&mut s.new)
+                .password(true)
+                .desired_width(f32::INFINITY),
+        );
         ui.add_space(6.0);
         ui.label("confirm new passphrase");
-        ui.add(TextEdit::singleline(&mut s.confirm).password(true).desired_width(f32::INFINITY));
+        ui.add(
+            TextEdit::singleline(&mut s.confirm)
+                .password(true)
+                .desired_width(f32::INFINITY),
+        );
         if let Some(e) = &s.error {
             ui.add_space(6.0);
             ui.colored_label(palette().error, e);
@@ -237,9 +249,24 @@ fn safety_number_changed(
              but it can also be a sign of impersonation. Their last message was dropped.",
         );
         ui.add_space(8.0);
-        ui.label(RichText::new(format!("peer: {}", fmt::display_id(&s.fingerprint))).small().monospace().color(palette().text_dim));
-        ui.label(RichText::new(format!("old key: {}", short_key(&s.old_pubkey_b64))).small().monospace().color(palette().text_dim));
-        ui.label(RichText::new(format!("new key: {}", short_key(&s.new_pubkey_b64))).small().monospace().color(palette().text_dim));
+        ui.label(
+            RichText::new(format!("peer: {}", fmt::display_id(&s.fingerprint)))
+                .small()
+                .monospace()
+                .color(palette().text_dim),
+        );
+        ui.label(
+            RichText::new(format!("old key: {}", short_key(&s.old_pubkey_b64)))
+                .small()
+                .monospace()
+                .color(palette().text_dim),
+        );
+        ui.label(
+            RichText::new(format!("new key: {}", short_key(&s.new_pubkey_b64)))
+                .small()
+                .monospace()
+                .color(palette().text_dim),
+        );
         ui.add_space(12.0);
         ui.horizontal(|ui| {
             if ui.button("Re-verify (SAS)").clicked() {
@@ -315,10 +342,7 @@ fn emoji_picker(ctx: &egui::Context, s: &EmojiPickerState, actions: &mut Vec<UiA
         ui.add_space(8.0);
         ui.horizontal_wrapped(|ui| {
             for emoji in REACTION_EMOJIS {
-                if ui
-                    .button(RichText::new(*emoji).size(22.0))
-                    .clicked()
-                {
+                if ui.button(RichText::new(*emoji).size(22.0)).clicked() {
                     actions.push(UiAction::SendReaction {
                         room_id: s.room_id.clone(),
                         target_msg_id: s.target_msg_id.clone(),
@@ -351,7 +375,11 @@ fn confirm_delete(ctx: &egui::Context, s: &ConfirmDeleteState, actions: &mut Vec
         );
         if !s.preview.is_empty() {
             ui.add_space(6.0);
-            ui.label(RichText::new(format!("“{}”", s.preview)).italics().color(palette().text_dim));
+            ui.label(
+                RichText::new(format!("“{}”", s.preview))
+                    .italics()
+                    .color(palette().text_dim),
+            );
         }
         ui.add_space(12.0);
         ui.horizontal(|ui| {
@@ -409,11 +437,17 @@ fn go_dark(ctx: &egui::Context, s: &mut GoDarkState, actions: &mut Vec<UiAction>
     let resp = egui::Modal::new(Id::new("modal-go-dark")).show(ctx, |ui| {
         ui.set_width(420.0);
         ui.heading(RichText::new("Go dark").color(palette().error));
-        ui.label("This permanently deletes your account and wipes all local data. There is no undo.");
+        ui.label(
+            "This permanently deletes your account and wipes all local data. There is no undo.",
+        );
         ui.add_space(10.0);
         if s.requires_passphrase {
             ui.label("enter your master passphrase to confirm");
-            ui.add(TextEdit::singleline(&mut s.input).password(true).desired_width(f32::INFINITY));
+            ui.add(
+                TextEdit::singleline(&mut s.input)
+                    .password(true)
+                    .desired_width(f32::INFINITY),
+            );
         } else {
             ui.label(format!("type `{GO_DARK_CONFIRM_PHRASE}` to confirm"));
             ui.add(TextEdit::singleline(&mut s.input).desired_width(f32::INFINITY));
@@ -452,8 +486,7 @@ fn qr(ctx: &egui::Context, data: &str, actions: &mut Vec<UiAction>) {
                 let px = 240.0;
                 let quiet = 2usize;
                 let module = px / (w + quiet * 2) as f32;
-                let (rect, _) =
-                    ui.allocate_exact_size(egui::vec2(px, px), egui::Sense::hover());
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(px, px), egui::Sense::hover());
                 let painter = ui.painter();
                 painter.rect_filled(rect, 2.0, egui::Color32::WHITE);
                 for y in 0..w {
@@ -499,7 +532,10 @@ fn onboarding(ctx: &egui::Context, cursor: usize, actions: &mut Vec<UiAction>) {
         ui.label(body);
         ui.add_space(14.0);
         ui.horizontal(|ui| {
-            if ui.button(if last { "Get started" } else { "Next" }).clicked() {
+            if ui
+                .button(if last { "Get started" } else { "Next" })
+                .clicked()
+            {
                 actions.push(if last {
                     UiAction::OnboardingDone
                 } else {
@@ -605,7 +641,9 @@ fn sas(ctx: &egui::Context, s: &mut SasState, actions: &mut Vec<UiAction>) {
     let resp = egui::Modal::new(Id::new("modal-sas")).show(ctx, |ui| {
         ui.set_width(400.0);
         ui.heading("SAS verification");
-        ui.label(RichText::new(format!("with {}", fmt::display_id(&partner))).color(palette().text_dim));
+        ui.label(
+            RichText::new(format!("with {}", fmt::display_id(&partner))).color(palette().text_dim),
+        );
         ui.add_space(12.0);
         match &mut s.stage {
             SasStage::Waiting => {
@@ -614,14 +652,26 @@ fn sas(ctx: &egui::Context, s: &mut SasState, actions: &mut Vec<UiAction>) {
                     ui.label("waiting for the other side…");
                 });
             }
-            SasStage::Comparing { words, decimal, our_matched } => {
+            SasStage::Comparing {
+                words,
+                decimal,
+                our_matched,
+            } => {
                 ui.label("compare these with your partner out of band:");
                 ui.add_space(8.0);
-                ui.label(RichText::new(decimal.clone()).heading().monospace().color(palette().accent));
+                ui.label(
+                    RichText::new(decimal.clone())
+                        .heading()
+                        .monospace()
+                        .color(palette().accent),
+                );
                 ui.label(RichText::new(words.clone()).color(palette().text));
                 ui.add_space(12.0);
                 if *our_matched {
-                    ui.label(RichText::new("waiting for your partner to confirm…").color(palette().text_dim));
+                    ui.label(
+                        RichText::new("waiting for your partner to confirm…")
+                            .color(palette().text_dim),
+                    );
                 } else {
                     ui.horizontal(|ui| {
                         if ui.button("They match").clicked() {
@@ -649,14 +699,18 @@ fn show_invite(ctx: &egui::Context, url: &str, actions: &mut Vec<UiAction>) {
         ui.set_width(460.0);
         ui.heading("Invite link");
         ui.label(
-            RichText::new("share this out of band. For encrypted rooms, share the passphrase separately.")
-                .small()
-                .color(palette().text_dim),
+            RichText::new(
+                "share this out of band. For encrypted rooms, share the passphrase separately.",
+            )
+            .small()
+            .color(palette().text_dim),
         );
         ui.add_space(8.0);
-        egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
-            ui.add(TextEdit::multiline(&mut url.to_string()).desired_width(f32::INFINITY));
-        });
+        egui::ScrollArea::vertical()
+            .max_height(120.0)
+            .show(ui, |ui| {
+                ui.add(TextEdit::multiline(&mut url.to_string()).desired_width(f32::INFINITY));
+            });
         ui.add_space(10.0);
         ui.horizontal(|ui| {
             if ui.button("Copy").clicked() {
@@ -885,22 +939,24 @@ fn search(ctx: &egui::Context, s: &mut SearchState, actions: &mut Vec<UiAction>)
         }
         ui.add_space(8.0);
         ui.separator();
-        egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-            if s.searched && s.results.is_empty() {
-                ui.label(RichText::new("no matches").color(palette().text_dim));
-            }
-            for m in &s.results {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(fmt::hhmm(m.sent_at))
-                            .small()
-                            .monospace()
-                            .color(palette().text_dim),
-                    );
-                    ui.add(egui::Label::new(&m.body).wrap());
-                });
-            }
-        });
+        egui::ScrollArea::vertical()
+            .max_height(320.0)
+            .show(ui, |ui| {
+                if s.searched && s.results.is_empty() {
+                    ui.label(RichText::new("no matches").color(palette().text_dim));
+                }
+                for m in &s.results {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(fmt::hhmm(m.sent_at))
+                                .small()
+                                .monospace()
+                                .color(palette().text_dim),
+                        );
+                        ui.add(egui::Label::new(&m.body).wrap());
+                    });
+                }
+            });
         ui.add_space(8.0);
         if ui.button("Done").clicked() {
             actions.push(UiAction::CloseModal);
@@ -916,13 +972,19 @@ fn rotate(ctx: &egui::Context, s: &mut RotateState, actions: &mut Vec<UiAction>)
         ui.set_width(380.0);
         ui.heading("Rotate room key");
         ui.label(
-            RichText::new("everyone re-derives the key from a new passphrase — share it out of band.")
-                .small()
-                .color(palette().text_dim),
+            RichText::new(
+                "everyone re-derives the key from a new passphrase — share it out of band.",
+            )
+            .small()
+            .color(palette().text_dim),
         );
         ui.add_space(8.0);
         ui.label("new passphrase");
-        ui.add(TextEdit::singleline(&mut s.passphrase).password(true).desired_width(f32::INFINITY));
+        ui.add(
+            TextEdit::singleline(&mut s.passphrase)
+                .password(true)
+                .desired_width(f32::INFINITY),
+        );
         if let Some(e) = &s.error {
             ui.add_space(6.0);
             ui.colored_label(palette().error, e);
@@ -963,7 +1025,11 @@ fn accept_rotation(ctx: &egui::Context, s: &mut AcceptRotationState, actions: &m
         );
         ui.add_space(8.0);
         ui.label("new passphrase");
-        ui.add(TextEdit::singleline(&mut s.passphrase).password(true).desired_width(f32::INFINITY));
+        ui.add(
+            TextEdit::singleline(&mut s.passphrase)
+                .password(true)
+                .desired_width(f32::INFINITY),
+        );
         if let Some(e) = &s.error {
             ui.add_space(6.0);
             ui.colored_label(palette().error, e);
@@ -1145,7 +1211,11 @@ fn add_contact(ctx: &egui::Context, s: &mut AddContactState, actions: &mut Vec<U
         );
         let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
         ui.add_space(6.0);
-        ui.label(RichText::new("note (optional)").small().color(palette().text_dim));
+        ui.label(
+            RichText::new("note (optional)")
+                .small()
+                .color(palette().text_dim),
+        );
         ui.add(
             TextEdit::singleline(&mut s.note)
                 .desired_width(f32::INFINITY)
@@ -1180,7 +1250,12 @@ fn add_contact(ctx: &egui::Context, s: &mut AddContactState, actions: &mut Vec<U
                     code.clone()
                 };
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(&pretty).heading().monospace().color(palette().accent));
+                    ui.label(
+                        RichText::new(&pretty)
+                            .heading()
+                            .monospace()
+                            .color(palette().accent),
+                    );
                     if ui.button("Copy").clicked() {
                         actions.push(UiAction::Copy(code.clone()));
                     }
@@ -1195,7 +1270,8 @@ fn add_contact(ctx: &egui::Context, s: &mut AddContactState, actions: &mut Vec<U
                     .color(palette().text_dim),
                 );
                 // Keep the countdown ticking while the modal is open.
-                ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_secs(1));
             }
             None => {
                 if ui.button("Generate a code to share").clicked() {
@@ -1284,9 +1360,12 @@ fn edit_alias(ctx: &egui::Context, s: &mut EditAliasState, actions: &mut Vec<UiA
         ui.set_width(360.0);
         ui.heading("Rename contact");
         ui.label(
-            RichText::new(format!("{} — a local nickname, only you see it.", s.current_label))
-                .small()
-                .color(palette().text_dim),
+            RichText::new(format!(
+                "{} — a local nickname, only you see it.",
+                s.current_label
+            ))
+            .small()
+            .color(palette().text_dim),
         );
         ui.add_space(8.0);
         let r = ui.add(
@@ -1331,7 +1410,9 @@ fn join(ctx: &egui::Context, s: &mut JoinState, actions: &mut Vec<UiAction>) {
                     .desired_width(f32::INFINITY),
             );
         } else {
-            ui.label(RichText::new("this room is public (no passphrase)").color(palette().text_dim));
+            ui.label(
+                RichText::new("this room is public (no passphrase)").color(palette().text_dim),
+            );
         }
         if let Some(e) = &s.error {
             ui.add_space(6.0);

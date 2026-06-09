@@ -16,7 +16,11 @@ mod notifier;
 mod ui;
 
 #[derive(Parser)]
-#[command(name = "huddle", version, about = "Huddle — decentralized encrypted chat (TUI)")]
+#[command(
+    name = "huddle",
+    version,
+    about = "Huddle — decentralized encrypted chat (TUI)"
+)]
 struct Cli {
     #[arg(long, help = "Override data directory")]
     data_dir: Option<String>,
@@ -144,10 +148,7 @@ async fn main() -> Result<()> {
     if let Some(parent) = log_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let file_appender = rolling::never(
-        log_path.parent().unwrap(),
-        log_path.file_name().unwrap(),
-    );
+    let file_appender = rolling::never(log_path.parent().unwrap(), log_path.file_name().unwrap());
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive("huddle=debug".parse()?))
         .with_writer(file_appender)
@@ -214,8 +215,7 @@ async fn main() -> Result<()> {
         // a salt file behind and a future launch would think the DB
         // already existed.
         let salt = keychain::load_or_create_salt().map_err(|e| anyhow!(e))?;
-        let key =
-            keychain::derive_master_key(&prompt.passphrase, &salt).map_err(|e| anyhow!(e))?;
+        let key = keychain::derive_master_key(&prompt.passphrase, &salt).map_err(|e| anyhow!(e))?;
         // huddle 2.0.0 (F6): persist the recovered identity into the freshly
         // created (encrypted) database before the AppHandle would otherwise
         // generate a random one.
@@ -232,9 +232,7 @@ async fn main() -> Result<()> {
     // relay-only.
     let mode = if let Some(m) = cli.mode {
         m
-    } else if huddle_core::app::AppHandle::peek_mdns_enabled(master_key.as_ref())
-        .unwrap_or(false)
-    {
+    } else if huddle_core::app::AppHandle::peek_mdns_enabled(master_key.as_ref()).unwrap_or(false) {
         NetworkMode::Mdns
     } else {
         NetworkMode::Server
@@ -247,8 +245,7 @@ async fn main() -> Result<()> {
     } else {
         let mut from_cli: Vec<String> = cli.relays.clone();
         if from_cli.is_empty() {
-            from_cli = huddle_core::config::load_relays()
-                .unwrap_or_default();
+            from_cli = huddle_core::config::load_relays().unwrap_or_default();
         }
         let mut parsed = Vec::new();
         for s in &from_cli {
@@ -281,7 +278,10 @@ async fn main() -> Result<()> {
     };
     // SOCKS proxy override: `--tor-socks` flag → config.toml `tor_socks` →
     // (core default 127.0.0.1:9050). `None` lets core pick the default.
-    let tor_socks: Option<String> = cli.tor_socks.clone().or_else(huddle_core::config::tor_socks);
+    let tor_socks: Option<String> = cli
+        .tor_socks
+        .clone()
+        .or_else(huddle_core::config::tor_socks);
 
     if server_url.is_none() && !mode.uses_libp2p() {
         tracing::warn!(
@@ -450,9 +450,17 @@ fn run_transports(cli: &Cli) -> Result<()> {
         .clone()
         .or_else(huddle_core::config::tor_socks)
         .unwrap_or_else(|| huddle_core::app::DEFAULT_TOR_SOCKS.to_string());
-    let bridge = cli.tor_bridge.clone().or_else(huddle_core::config::tor_bridge);
+    let bridge = cli
+        .tor_bridge
+        .clone()
+        .or_else(huddle_core::config::tor_bridge);
 
-    let profiles = builtin_profiles(onion.as_deref(), clearnet.as_deref(), &tor_socks, bridge.as_deref());
+    let profiles = builtin_profiles(
+        onion.as_deref(),
+        clearnet.as_deref(),
+        &tor_socks,
+        bridge.as_deref(),
+    );
 
     let order: Vec<TransportId> =
         if let Some(pin) = cli.transport.as_deref().and_then(TransportId::from_str) {

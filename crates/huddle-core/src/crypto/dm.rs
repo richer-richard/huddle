@@ -302,7 +302,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(k_init, k_resp, "both peers must derive the same hybrid DM key");
+        assert_eq!(
+            k_init, k_resp,
+            "both peers must derive the same hybrid DM key"
+        );
     }
 
     #[test]

@@ -45,9 +45,9 @@ pub async fn arti_client(
     let client = ARTI
         .get_or_try_init(|| async {
             let config = TorClientConfig::default();
-            TorClient::create_bootstrapped(config).await.map_err(|e| {
-                crate::error::HuddleError::Network(format!("arti bootstrap: {e}"))
-            })
+            TorClient::create_bootstrapped(config)
+                .await
+                .map_err(|e| crate::error::HuddleError::Network(format!("arti bootstrap: {e}")))
         })
         .await?;
     Ok(client.clone())
@@ -267,9 +267,7 @@ pub fn default_fallback_order() -> Vec<TransportId> {
 /// Parse a comma-separated id list (`--transport-order`) into ids, dropping
 /// unknown tokens.
 pub fn parse_order(csv: &str) -> Vec<TransportId> {
-    csv.split(',')
-        .filter_map(TransportId::from_str)
-        .collect()
+    csv.split(',').filter_map(TransportId::from_str).collect()
 }
 
 #[cfg(test)]
@@ -308,10 +306,7 @@ mod tests {
             .available());
         // Arti availability tracks the build feature: available (with an
         // onion url) under `--features arti`, otherwise off-with-a-reason.
-        let arti = p
-            .iter()
-            .find(|p| p.id == TransportId::OnionArti)
-            .unwrap();
+        let arti = p.iter().find(|p| p.id == TransportId::OnionArti).unwrap();
         #[cfg(feature = "arti")]
         assert!(arti.available());
         #[cfg(not(feature = "arti"))]

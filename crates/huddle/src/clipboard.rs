@@ -41,9 +41,7 @@ pub fn copy(text: &str) -> Result<(), String> {
             "clipboard tool didn't respond within {}s — is the clipboard service running?",
             COPY_TIMEOUT.as_secs()
         )),
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
-            Err("clipboard thread crashed".to_string())
-        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err("clipboard thread crashed".to_string()),
     }
 }
 

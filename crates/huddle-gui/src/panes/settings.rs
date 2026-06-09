@@ -11,8 +11,15 @@ pub fn render(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
     ui.heading("Settings");
     ui.add_space(4.0);
     ui.horizontal(|ui| {
-        for tab in [SettingsTab::Account, SettingsTab::Network, SettingsTab::Privacy] {
-            if ui.selectable_label(vm.settings_tab == tab, tab.label()).clicked() {
+        for tab in [
+            SettingsTab::Account,
+            SettingsTab::Network,
+            SettingsTab::Privacy,
+        ] {
+            if ui
+                .selectable_label(vm.settings_tab == tab, tab.label())
+                .clicked()
+            {
                 actions.push(UiAction::SelectSettingsTab(tab));
             }
         }
@@ -161,9 +168,7 @@ fn network(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
             ui.label(RichText::new("●").color(palette().success));
             ui.label("connected");
             if let Some(t) = vm.active_transport {
-                ui.label(
-                    RichText::new(format!("· via {}", t.label())).color(palette().text_dim),
-                );
+                ui.label(RichText::new(format!("· via {}", t.label())).color(palette().text_dim));
             }
         } else {
             ui.label(RichText::new("○").color(palette().text_dim));
@@ -235,7 +240,9 @@ fn network(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
             if !p.available() {
                 if let Some(r) = p.reason {
                     ui.label(
-                        RichText::new(format!("({r})")).small().color(palette().text_dim),
+                        RichText::new(format!("({r})"))
+                            .small()
+                            .color(palette().text_dim),
                     );
                 }
             }
@@ -290,14 +297,20 @@ fn privacy(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
     ui.add_space(6.0);
     let mut n = vm.notifications_enabled;
     if ui
-        .checkbox(&mut n, "desktop notifications when the window isn't focused")
+        .checkbox(
+            &mut n,
+            "desktop notifications when the window isn't focused",
+        )
         .changed()
     {
         actions.push(UiAction::ToggleNotifications(n));
     }
     let mut vo = vm.verified_only_inbound;
     if ui
-        .checkbox(&mut vo, "accept inbound connections only from verified peers")
+        .checkbox(
+            &mut vo,
+            "accept inbound connections only from verified peers",
+        )
         .changed()
     {
         actions.push(UiAction::ToggleVerifiedOnlyInbound(vo));
@@ -339,9 +352,11 @@ fn privacy(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
     ui.separator();
     ui.label(RichText::new("Danger zone").color(palette().error).strong());
     ui.label(
-        RichText::new("Going dark deletes your account and wipes all local data. There is no undo.")
-            .small()
-            .color(palette().text_dim),
+        RichText::new(
+            "Going dark deletes your account and wipes all local data. There is no undo.",
+        )
+        .small()
+        .color(palette().text_dim),
     );
     ui.add_space(4.0);
     if ui

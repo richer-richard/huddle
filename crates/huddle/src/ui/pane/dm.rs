@@ -31,8 +31,8 @@ pub fn render(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme, room_id: &
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),       // header
-            Constraint::Min(3),           // messages
-            Constraint::Length(input_h),  // input
+            Constraint::Min(3),          // messages
+            Constraint::Length(input_h), // input
         ])
         .split(area);
 
@@ -64,7 +64,9 @@ fn render_header(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme, room_id
     let mut spans: Vec<Span> = vec![
         Span::styled(
             partner_label,
-            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
         Span::styled(partner_id, theme.dim()),

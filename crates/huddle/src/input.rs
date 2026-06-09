@@ -295,9 +295,7 @@ fn is_godark_chord(key: KeyEvent) -> bool {
         if matches!(key.code, KeyCode::Char('!')) {
             return true;
         }
-        if key.modifiers.contains(KeyModifiers::SHIFT)
-            && matches!(key.code, KeyCode::Char('1'))
-        {
+        if key.modifiers.contains(KeyModifiers::SHIFT) && matches!(key.code, KeyCode::Char('1')) {
             return true;
         }
     }
@@ -362,10 +360,7 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
             // KeyCode::Backspace on certain terminals because of the
             // ASCII collision. We accept both.
             if matches!(key.code, KeyCode::Char('h') | KeyCode::Char('H')) {
-                let input_active = app
-                    .active_room()
-                    .map(|r| r.input_active)
-                    .unwrap_or(false);
+                let input_active = app.active_room().map(|r| r.input_active).unwrap_or(false);
                 // Suppress when the user is typing — Ctrl+H = Backspace
                 // on POSIX terminals and we don't want to eat it.
                 if !input_active {
@@ -375,10 +370,7 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
             if matches!(key.code, KeyCode::Char('p') | KeyCode::Char('P')) {
                 // Ctrl+P is bound to TabPrev inside a room; only override
                 // when room input is NOT active so the palette is reachable.
-                let input_active = app
-                    .active_room()
-                    .map(|r| r.input_active)
-                    .unwrap_or(false);
+                let input_active = app.active_room().map(|r| r.input_active).unwrap_or(false);
                 let in_room = matches!(app.pane, Pane::Dm(_) | Pane::Group(_));
                 if !(in_room && input_active) {
                     return Action::OpenCommandPalette;
@@ -397,9 +389,7 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
             // Anything else (Esc, n, q, any letter) safely cancels —
             // matches the QuitConfirm shape so users with muscle memory
             // for that pattern aren't surprised.
-            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                Action::ClearBlockedPeers
-            }
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => Action::ClearBlockedPeers,
             _ => Action::CloseModal,
         },
         Modal::Error(_) => match key.code {
@@ -573,9 +563,7 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
         },
         Modal::ConfirmInvite(_) => match key.code {
             KeyCode::Esc | KeyCode::Char('c') | KeyCode::Char('C') => Action::CloseModal,
-            KeyCode::Enter | KeyCode::Char('d') | KeyCode::Char('D') => {
-                Action::ConfirmInviteAccept
-            }
+            KeyCode::Enter | KeyCode::Char('d') | KeyCode::Char('D') => Action::ConfirmInviteAccept,
             _ => Action::Nothing,
         },
         Modal::Onboarding { .. } => match key.code {
@@ -622,16 +610,12 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
             // into the filter as plain characters. Drop them silently
             // so the user's muscle memory for Ctrl+H / Ctrl+P outside
             // the palette doesn't corrupt their search query.
-            KeyCode::Char(_) if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                Action::Nothing
-            }
+            KeyCode::Char(_) if key.modifiers.contains(KeyModifiers::CONTROL) => Action::Nothing,
             KeyCode::Char(c) => Action::CommandPaletteTypeChar(c),
             _ => Action::Nothing,
         },
         Modal::UpdateCheckOptIn => match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                Action::UpdateCheckOptInYes
-            }
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => Action::UpdateCheckOptInYes,
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Action::UpdateCheckOptInNo,
             _ => Action::Nothing,
         },
@@ -830,9 +814,7 @@ fn map_sidebar(key: KeyEvent, app: &TuiApp) -> Action {
     // captures j/k inside the Pending sub-tab (reachable after Tab'ing
     // into the pane). Profile auto-switches the pane on sidebar
     // selection, so ungated j/k made further sidebar nav impossible.
-    if matches!(app.pane, Pane::Profile)
-        && matches!(app.sidebar.focus, SidebarFocus::Pane)
-    {
+    if matches!(app.pane, Pane::Profile) && matches!(app.sidebar.focus, SidebarFocus::Pane) {
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => return Action::ProfileFieldDown,
             KeyCode::Char('k') | KeyCode::Up => return Action::ProfileFieldUp,
@@ -1007,7 +989,9 @@ fn map_in_room(key: KeyEvent, app: &TuiApp) -> Action {
     if matches!(app.pane, Pane::Group(_) | Pane::Dm(_)) {
         let input_active = app.active_room().map(|r| r.input_active).unwrap_or(false);
         if !input_active {
-            if matches!(key.code, KeyCode::Char('I')) && !key.modifiers.contains(KeyModifiers::CONTROL) {
+            if matches!(key.code, KeyCode::Char('I'))
+                && !key.modifiers.contains(KeyModifiers::CONTROL)
+            {
                 return Action::GenerateInvite;
             }
             if key.modifiers.contains(KeyModifiers::ALT)

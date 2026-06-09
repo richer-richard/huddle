@@ -73,7 +73,9 @@ fn render_header(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme, room_id
     let mut spans: Vec<Span> = vec![
         Span::styled(
             format!("#{}", name),
-            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
         Span::styled(format!("{} members", members), theme.dim()),
@@ -134,7 +136,9 @@ fn render_member_margin(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme, 
     let me = app.handle.fingerprint().to_string();
     let mut lines: Vec<Line> = vec![Line::from(vec![Span::styled(
         "Members",
-        Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD),
     )])];
     for fp in &members {
         let name = if fp == &me {
@@ -166,9 +170,10 @@ fn render_member_margin(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme, 
     // group fires `OpenInvitePicker`. (Ctrl+I collapses to Tab in every
     // terminal, so the chord was moved off it in 0.7.11.)
     lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled("+ Add member", theme.warn_style()),
-    ]));
+    lines.push(Line::from(vec![Span::styled(
+        "+ Add member",
+        theme.warn_style(),
+    )]));
     lines.push(Line::from(vec![
         Span::styled(" Alt+I", theme.dim()),
         Span::styled(" picker  ", theme.dim()),

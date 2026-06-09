@@ -212,7 +212,10 @@ fn parse_semver(s: &str) -> (u32, u32, u32) {
     let major = it.next().unwrap_or("0").parse().unwrap_or(0);
     let minor = it.next().unwrap_or("0").parse().unwrap_or(0);
     let patch_raw = it.next().unwrap_or("0");
-    let patch_num: String = patch_raw.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let patch_num: String = patch_raw
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
     let patch = patch_num.parse().unwrap_or(0);
     (major, minor, patch)
 }
@@ -931,10 +934,7 @@ impl AttachPickerState {
     /// Read one directory's immediate children into unexpanded nodes.
     /// `metadata()` (not `file_type()`) is used so symlinks-to-dirs are
     /// navigable. Dirs sort first, then case-insensitive by name.
-    fn read_children(
-        dir: &std::path::Path,
-        show_hidden: bool,
-    ) -> std::io::Result<Vec<TreeNode>> {
+    fn read_children(dir: &std::path::Path, show_hidden: bool) -> std::io::Result<Vec<TreeNode>> {
         let rd = std::fs::read_dir(dir)?;
         let mut tmp: Vec<TreeNode> = Vec::new();
         for entry in rd.flatten() {
@@ -943,7 +943,9 @@ impl AttachPickerState {
                 continue;
             }
             let path = entry.path();
-            let is_dir = std::fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false);
+            let is_dir = std::fs::metadata(&path)
+                .map(|m| m.is_dir())
+                .unwrap_or(false);
             tmp.push(TreeNode {
                 name,
                 path,
@@ -1802,7 +1804,9 @@ impl TuiApp {
     pub fn refresh_attachments(&mut self) {
         let handle = self.handle.clone();
         for room in &mut self.open_rooms {
-            room.attachments = handle.list_room_attachments(&room.room_id).unwrap_or_default();
+            room.attachments = handle
+                .list_room_attachments(&room.room_id)
+                .unwrap_or_default();
             if room.attachments.is_empty() {
                 room.focused_card_idx = 0;
                 room.card_focus = false;
@@ -1900,7 +1904,10 @@ impl TuiApp {
                     self.unread.remove(&room_id);
                 }
             }
-            AppEvent::MemberJoined { room_id, fingerprint } => {
+            AppEvent::MemberJoined {
+                room_id,
+                fingerprint,
+            } => {
                 if let Some(r) = self.open_rooms.iter_mut().find(|r| r.room_id == room_id) {
                     if !r.members.contains(&fingerprint) {
                         r.members.push(fingerprint);
@@ -1908,7 +1915,10 @@ impl TuiApp {
                     }
                 }
             }
-            AppEvent::MemberLeft { room_id, fingerprint } => {
+            AppEvent::MemberLeft {
+                room_id,
+                fingerprint,
+            } => {
                 if let Some(r) = self.open_rooms.iter_mut().find(|r| r.room_id == room_id) {
                     r.members.retain(|f| f != &fingerprint);
                 }
@@ -1961,8 +1971,7 @@ impl TuiApp {
                 //   terminal isn't focused. A focused terminal already
                 //   shows the message; an unread badge is enough.
                 if self.startup_grace_until.is_some() {
-                    self.startup_catchup_count =
-                        self.startup_catchup_count.saturating_add(1);
+                    self.startup_catchup_count = self.startup_catchup_count.saturating_add(1);
                     // huddle 0.7.5: extend the grace deadline so a
                     // slow gossipsub backlog still batches into the
                     // single summary notification instead of leaking
@@ -1971,18 +1980,13 @@ impl TuiApp {
                     // the grace open indefinitely.
                     let extended = Instant::now() + STARTUP_GRACE_EXTEND;
                     let new_deadline = extended.min(self.startup_grace_cap);
-                    self.startup_grace_until = self
-                        .startup_grace_until
-                        .map(|d| d.max(new_deadline));
-                } else if !crate::notifier::is_focused()
-                    && self.handle.notifications_enabled()
-                {
+                    self.startup_grace_until =
+                        self.startup_grace_until.map(|d| d.max(new_deadline));
+                } else if !crate::notifier::is_focused() && self.handle.notifications_enabled() {
                     let room_name = self
                         .open_room(&room_id)
                         .map(|r| r.name.clone())
-                        .or_else(|| {
-                            self.handle.active_room_info(&room_id).map(|r| r.name)
-                        })
+                        .or_else(|| self.handle.active_room_info(&room_id).map(|r| r.name))
                         .unwrap_or_else(|| short_room(&room_id));
                     let sender_name = self
                         .handle
@@ -2075,11 +2079,7 @@ impl TuiApp {
                     *count = count.saturating_add(1);
                 }
                 let _ = room_id;
-                self.set_status(format!(
-                    "file offered: {} ({} KB)",
-                    name,
-                    size_bytes / 1024
-                ));
+                self.set_status(format!("file offered: {} ({} KB)", name, size_bytes / 1024));
             }
             AppEvent::FileProgress { .. } => {
                 // Progress is read on render from the attachments list;
@@ -2200,7 +2200,10 @@ impl TuiApp {
                 );
                 self.replace_modal_if_idle(Modal::Error(msg));
             }
-            AppEvent::NatStatusChanged { label, reachable: _ } => {
+            AppEvent::NatStatusChanged {
+                label,
+                reachable: _,
+            } => {
                 // The lobby renders this as an emoji badge via
                 // `nat_status_badge()`; we just stash the raw label.
                 self.nat_status = Some(label);
@@ -2211,7 +2214,10 @@ impl TuiApp {
                     Duration::from_secs(10),
                 );
             }
-            AppEvent::PeerProfileUpdated { fingerprint, username } => {
+            AppEvent::PeerProfileUpdated {
+                fingerprint,
+                username,
+            } => {
                 // huddle 0.5: a peer set / changed / cleared their
                 // username. The chat + member list pull from the DB
                 // every render, so a redraw is enough — but show a
@@ -2230,9 +2236,8 @@ impl TuiApp {
                 // huddle 0.5: go_dark wiped everything. Show the final
                 // farewell, then schedule a quit. The status TTL also
                 // serves as the visibility window before exit.
-                self.modal = Modal::Info(
-                    "Goodbye. huddle has gone dark. Restart to begin fresh.".into(),
-                );
+                self.modal =
+                    Modal::Info("Goodbye. huddle has gone dark. Restart to begin fresh.".into());
                 self.went_dark_at = Some(std::time::Instant::now());
             }
             AppEvent::AutoOpenDm {
@@ -2262,9 +2267,8 @@ impl TuiApp {
                 // Refresh the Contacts pane's Requests section and flag it in
                 // the status line so it's never silently buried.
                 self.refresh_pending_contact_requests();
-                let who = display_name.unwrap_or_else(|| {
-                    format!("HD-{}", short_fp(&fingerprint).to_uppercase())
-                });
+                let who = display_name
+                    .unwrap_or_else(|| format!("HD-{}", short_fp(&fingerprint).to_uppercase()));
                 self.set_status(format!("contact request from {} — see Contacts", who));
             }
             AppEvent::ConnectCodeCreated { code, expires_at } => {
@@ -2358,7 +2362,6 @@ impl TuiApp {
             }
         }
     }
-
 }
 
 fn short_room(room_id: &str) -> String {
@@ -2606,7 +2609,10 @@ fn open_existing_room_tab_quiet(app: &mut TuiApp, room_id: &str) {
     };
     let members = app.handle.room_members(room_id);
     let messages = app.handle.room_messages(room_id, 200).unwrap_or_default();
-    let attachments = app.handle.list_room_attachments(room_id).unwrap_or_default();
+    let attachments = app
+        .handle
+        .list_room_attachments(room_id)
+        .unwrap_or_default();
     app.open_rooms.push(OpenRoom {
         room_id: room_id.to_string(),
         name: info.name,
@@ -2660,7 +2666,10 @@ fn open_existing_room_tab(app: &mut TuiApp, room_id: &str) {
     if app.open_room(room_id).is_none() {
         let members = app.handle.room_members(room_id);
         let messages = app.handle.room_messages(room_id, 200).unwrap_or_default();
-        let attachments = app.handle.list_room_attachments(room_id).unwrap_or_default();
+        let attachments = app
+            .handle
+            .list_room_attachments(room_id)
+            .unwrap_or_default();
         app.open_rooms.push(OpenRoom {
             room_id: room_id.to_string(),
             name: info.name,
@@ -2811,7 +2820,9 @@ pub fn prompt_master_passphrase(is_new: bool) -> Result<AuthPrompt> {
                     } else {
                         " unlock huddle "
                     },
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
                 ));
 
             let masked = |s: &str| -> String { s.chars().map(|_| '•').collect() };
@@ -3054,7 +3065,9 @@ pub fn prompt_import_seed() -> Result<Option<Zeroizing<String>>> {
                 .padding(Padding::uniform(1))
                 .title(Span::styled(
                     " recover identity from seed phrase ",
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
                 ));
             let mut lines: Vec<Line> = vec![
                 Line::from(""),
@@ -3111,7 +3124,9 @@ pub fn prompt_import_seed() -> Result<Option<Zeroizing<String>>> {
                 Span::styled("Esc", Style::default().fg(Color::Yellow)),
                 Span::styled(" skip (new identity)", Style::default().fg(Color::DarkGray)),
             ]));
-            let para = Paragraph::new(lines).wrap(Wrap { trim: false }).block(block);
+            let para = Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .block(block);
             f.render_widget(para, area);
         })?;
 
@@ -3136,7 +3151,8 @@ pub fn prompt_import_seed() -> Result<Option<Zeroizing<String>>> {
                         KeyCode::Enter => {
                             if input.trim().is_empty() {
                                 outcome = Some(None);
-                            } else if huddle_core::app::fingerprint_from_phrase(input.trim()).is_ok()
+                            } else if huddle_core::app::fingerprint_from_phrase(input.trim())
+                                .is_ok()
                             {
                                 // Keep the returned phrase wrapped so the caller's
                                 // copy is scrubbed once it's been consumed.
@@ -3265,16 +3281,16 @@ async fn main_loop(
         // *request* lives on for up to 3 days, viewable + acceptable
         // from the People pane. A startup sweep removes rows older
         // than the TTL so the table stays bounded.
-        let auto_reject_state: Option<InboundDialState> =
-            if let Modal::InboundDial(s) = &app.modal {
-                if s.opened_at.elapsed() >= Duration::from_secs(15) {
-                    Some(s.clone())
-                } else {
-                    None
-                }
+        let auto_reject_state: Option<InboundDialState> = if let Modal::InboundDial(s) = &app.modal
+        {
+            if s.opened_at.elapsed() >= Duration::from_secs(15) {
+                Some(s.clone())
             } else {
                 None
-            };
+            }
+        } else {
+            None
+        };
         if let Some(s) = auto_reject_state {
             // Persist first so a failed reject_inbound doesn't drop
             // the request on the floor.
@@ -3659,19 +3675,14 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
                 }
                 SidebarItem::GroupDiscover => {
                     // Find first unjoined group room and open its join modal.
-                    if let Some(room) = app
-                        .handle
-                        .discovered_rooms()
-                        .into_iter()
-                        .find(|r| {
-                            r.kind != huddle_core::storage::repo::RoomKind::Direct
-                                && !app
-                                    .handle
-                                    .active_room_ids()
-                                    .iter()
-                                    .any(|aid| aid == &r.room_id)
-                        })
-                    {
+                    if let Some(room) = app.handle.discovered_rooms().into_iter().find(|r| {
+                        r.kind != huddle_core::storage::repo::RoomKind::Direct
+                            && !app
+                                .handle
+                                .active_room_ids()
+                                .iter()
+                                .any(|aid| aid == &r.room_id)
+                    }) {
                         if room.encrypted {
                             app.modal = Modal::JoinRoom(JoinRoomState {
                                 room_id: room.room_id.clone(),
@@ -3755,10 +3766,19 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
                 return Ok(false);
             }
             app.modal = Modal::None;
-            let pp = if encrypted { Some(passphrase.as_str()) } else { None };
+            let pp = if encrypted {
+                Some(passphrase.as_str())
+            } else {
+                None
+            };
             if let Err(e) = app
                 .handle
-                .start_room(&name, encrypted, pp, huddle_core::storage::repo::RoomKind::Group)
+                .start_room(
+                    &name,
+                    encrypted,
+                    pp,
+                    huddle_core::storage::repo::RoomKind::Group,
+                )
                 .await
             {
                 app.modal = Modal::Error(format!("start failed: {e}"));
@@ -4149,7 +4169,9 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             }
             app.modal = Modal::None;
             match app.handle.rotate_room(&room_id, &pp).await {
-                Ok(()) => app.set_status("rotation broadcast — share the new passphrase out-of-band"),
+                Ok(()) => {
+                    app.set_status("rotation broadcast — share the new passphrase out-of-band")
+                }
                 Err(e) => app.modal = Modal::Error(format!("rotate failed: {e}")),
             }
             Ok(false)
@@ -4267,8 +4289,11 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
                 None => return Ok(false),
             };
             let our_fp = app.handle.fingerprint().to_string();
-            let verified_set: std::collections::HashSet<String> =
-                app.handle.verified_fingerprints(&room_id).into_iter().collect();
+            let verified_set: std::collections::HashSet<String> = app
+                .handle
+                .verified_fingerprints(&room_id)
+                .into_iter()
+                .collect();
             let members: Vec<(String, bool)> = app
                 .active_room()
                 .map(|r| {
@@ -4457,7 +4482,11 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             app.set_status(if n == 0 {
                 "no unread to mark".to_string()
             } else {
-                format!("marked {} message(s) read across {} room(s)", n, app.open_rooms.len())
+                format!(
+                    "marked {} message(s) read across {} room(s)",
+                    n,
+                    app.open_rooms.len()
+                )
             });
             Ok(false)
         }
@@ -4529,9 +4558,10 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             let room = match app.active_room() {
                 Some(r) => {
                     if let Some(info) = app.handle.active_room_info(&r.room_id) {
-                        let salt_b64 = info.passphrase_salt.as_ref().map(|s| {
-                            base64::engine::general_purpose::STANDARD.encode(s)
-                        });
+                        let salt_b64 = info
+                            .passphrase_salt
+                            .as_ref()
+                            .map(|s| base64::engine::general_purpose::STANDARD.encode(s));
                         Some(huddle_core::invite::InviteRoom {
                             id: info.id.clone(),
                             name: info.name.clone(),
@@ -5230,7 +5260,9 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             match kind {
                 MemberActionKind::Grant => {
                     match app.handle.grant_owner(&room_id, &target_fp).await {
-                        Ok(()) => app.set_status(format!("granted owner to {}", short_fp(&target_fp))),
+                        Ok(()) => {
+                            app.set_status(format!("granted owner to {}", short_fp(&target_fp)))
+                        }
                         Err(e) => app.modal = Modal::Error(format!("grant failed: {e}")),
                     }
                 }
@@ -5285,7 +5317,10 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
                     app.modal = Modal::Error(format!("trust failed: {e}"));
                     return Ok(false);
                 }
-                app.set_status(format!("trusted {} — won't ask again", short_fp(&s.fingerprint)));
+                app.set_status(format!(
+                    "trusted {} — won't ask again",
+                    short_fp(&s.fingerprint)
+                ));
                 app.modal = Modal::None;
                 app.refresh_known_peers();
             }
@@ -5589,13 +5624,15 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
                 Modal::InvitePicker(s) => {
                     if s.selected.is_empty() {
                         if let Modal::InvitePicker(s2) = &mut app.modal {
-                            s2.status_line = Some(
-                                "Space to select peers · Enter sends · Esc cancels".into(),
-                            );
+                            s2.status_line =
+                                Some("Space to select peers · Enter sends · Esc cancels".into());
                         }
                         return Ok(false);
                     }
-                    (s.room_id.clone(), s.selected.iter().cloned().collect::<Vec<_>>())
+                    (
+                        s.room_id.clone(),
+                        s.selected.iter().cloned().collect::<Vec<_>>(),
+                    )
                 }
                 _ => return Ok(false),
             };
@@ -5621,7 +5658,11 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
                         continue;
                     }
                 };
-                match app.handle.send_room_message(&dm_room_id, &invite_text).await {
+                match app
+                    .handle
+                    .send_room_message(&dm_room_id, &invite_text)
+                    .await
+                {
                     Ok(()) => sent += 1,
                     Err(e) => failures.push(format!("{}: {}", short_fp(fp), e)),
                 }
@@ -5630,11 +5671,7 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             if failures.is_empty() {
                 app.set_status(format!("sent invite to {} peer(s)", sent));
             } else {
-                app.set_status(format!(
-                    "sent to {}; failed for {}",
-                    sent,
-                    failures.len()
-                ));
+                app.set_status(format!("sent to {}; failed for {}", sent, failures.len()));
                 tracing::warn!(?failures, "invite-picker send had partial failures");
             }
             Ok(false)
@@ -5799,7 +5836,9 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
                     let _ = app.handle.block_peer(fp);
                     app.set_status(format!("blocked {}", short_fp(fp)));
                 } else {
-                    app.set_status("can't block — fingerprint not learned yet (try after Identify)");
+                    app.set_status(
+                        "can't block — fingerprint not learned yet (try after Identify)",
+                    );
                 }
             }
             Ok(false)
@@ -5830,7 +5869,9 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
                         Err(e) => app.modal = Modal::Error(format!("DM failed: {e}")),
                     }
                 } else {
-                    app.set_status("can't DM yet — peer hasn't identified (try after they connect)");
+                    app.set_status(
+                        "can't DM yet — peer hasn't identified (try after they connect)",
+                    );
                 }
             }
             Ok(false)
@@ -5968,7 +6009,11 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
                 }
                 return Ok(false);
             }
-            match app.handle.change_master_passphrase(&current, &new_pass).await {
+            match app
+                .handle
+                .change_master_passphrase(&current, &new_pass)
+                .await
+            {
                 Ok(()) => {
                     // PassphraseChanged event closes the modal + sets status.
                     app.modal = Modal::None;
@@ -6054,8 +6099,9 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
                         }
                         Ok(false) => {
                             if let Modal::ExportSeed(s) = &mut app.modal {
-                                s.error =
-                                    Some("that doesn't match — re-type the 24 words exactly".into());
+                                s.error = Some(
+                                    "that doesn't match — re-type the 24 words exactly".into(),
+                                );
                                 s.reentry.clear();
                             }
                         }
@@ -6232,7 +6278,11 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
                 _ => return Ok(false),
             };
             app.modal = Modal::None;
-            if let Err(e) = app.handle.send_reaction(&room_id, &target, &emoji, false).await {
+            if let Err(e) = app
+                .handle
+                .send_reaction(&room_id, &target, &emoji, false)
+                .await
+            {
                 app.modal = Modal::Error(format!("reaction failed: {e}"));
             }
             Ok(false)
@@ -6287,7 +6337,12 @@ fn resolve_dm_target(app: &TuiApp, input: &str) -> Option<String> {
 /// focused card. Returns None when no card is focused / available.
 fn focused_card_info(
     app: &TuiApp,
-) -> Option<(String, String, huddle_core::storage::repo::AttachmentStatus, bool)> {
+) -> Option<(
+    String,
+    String,
+    huddle_core::storage::repo::AttachmentStatus,
+    bool,
+)> {
     let r = app.active_room()?;
     let a = r.attachments.get(r.focused_card_idx)?;
     Some((r.room_id.clone(), a.file_id.clone(), a.status, a.encrypted))
@@ -6309,10 +6364,7 @@ fn focused_card_info(
 ///   - blocked peers (would silently fail anyway, and confusing UX)
 ///   - peers we don't have a username/profile cached for AND no
 ///     fingerprint (can't render or address them)
-pub fn gather_invite_candidates(
-    app: &TuiApp,
-    room_id: &str,
-) -> Vec<InviteCandidate> {
+pub fn gather_invite_candidates(app: &TuiApp, room_id: &str) -> Vec<InviteCandidate> {
     let our_fp = app.handle.fingerprint().to_string();
     let in_room: HashSet<String> = app.handle.room_members(room_id).into_iter().collect();
     let blocked: HashSet<String> = app.handle.list_blocked_peers().into_iter().collect();
@@ -6354,10 +6406,7 @@ pub fn gather_invite_candidates(
             continue;
         }
         if let Some(partner) = app.handle.dm_partner_fingerprint(&rid) {
-            if partner == our_fp
-                || in_room.contains(&partner)
-                || blocked.contains(&partner)
-            {
+            if partner == our_fp || in_room.contains(&partner) || blocked.contains(&partner) {
                 continue;
             }
             let name = app.handle.lookup_username(&partner);
@@ -6400,10 +6449,11 @@ pub fn filtered_invite_candidates(state: &InvitePickerState) -> Vec<InviteCandid
                 }
             }
             let short = crate::ui::short_fp(&c.fingerprint).to_lowercase();
-            short.starts_with(&needle) || needle.starts_with("hd-") && {
-                let after = needle.trim_start_matches("hd-").to_lowercase();
-                short.starts_with(&after)
-            }
+            short.starts_with(&needle)
+                || needle.starts_with("hd-") && {
+                    let after = needle.trim_start_matches("hd-").to_lowercase();
+                    short.starts_with(&after)
+                }
         })
         .cloned()
         .collect()
@@ -6476,9 +6526,10 @@ pub fn build_room_invite_link(app: &TuiApp, room_id: &str) -> anyhow::Result<Str
         .handle
         .active_room_info(room_id)
         .ok_or_else(|| anyhow!("room not active locally"))?;
-    let salt_b64 = info.passphrase_salt.as_ref().map(|s| {
-        base64::engine::general_purpose::STANDARD.encode(s)
-    });
+    let salt_b64 = info
+        .passphrase_salt
+        .as_ref()
+        .map(|s| base64::engine::general_purpose::STANDARD.encode(s));
     let room = huddle_core::invite::InviteRoom {
         id: info.id,
         name: info.name,
@@ -6500,10 +6551,7 @@ pub fn build_room_invite_link(app: &TuiApp, room_id: &str) -> anyhow::Result<Str
         // huddle 2.0 (F1): None keeps this a v2/v3 invite (back-compatible).
         mlkem_ek_b64: None,
     };
-    let invite = app
-        .handle
-        .sign_invite(unsigned.clone())
-        .unwrap_or(unsigned);
+    let invite = app.handle.sign_invite(unsigned.clone()).unwrap_or(unsigned);
     huddle_core::invite::encode(&invite).map_err(|e| anyhow!("encode failed: {e}"))
 }
 
@@ -6759,7 +6807,10 @@ fn run_update_check(handle: &huddle_core::app::AppHandle) -> Option<String> {
         .build();
     let body = agent
         .get("https://crates.io/api/v1/crates/huddle")
-        .set("User-Agent", &format!("huddle/{}", env!("CARGO_PKG_VERSION")))
+        .set(
+            "User-Agent",
+            &format!("huddle/{}", env!("CARGO_PKG_VERSION")),
+        )
         .call()
         .ok()?
         .into_string()

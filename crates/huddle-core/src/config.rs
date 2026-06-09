@@ -151,7 +151,10 @@ pub fn tor_socks() -> Option<String> {
 /// ```
 /// `--clearnet-server` overrides this. `None` if absent.
 pub fn clearnet_url() -> Option<String> {
-    parse_scalar(&std::fs::read_to_string(config_path()).ok()?, "clearnet_url")
+    parse_scalar(
+        &std::fs::read_to_string(config_path()).ok()?,
+        "clearnet_url",
+    )
 }
 
 /// huddle 1.0: optional Tor bridge line for the bridge door (to reach Tor

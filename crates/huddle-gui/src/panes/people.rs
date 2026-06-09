@@ -223,7 +223,12 @@ fn known(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
             widgets::status_dot(ui, online);
             ui.vertical(|ui| {
                 ui.label(RichText::new(label).strong());
-                ui.label(RichText::new(&p.address).monospace().small().color(palette().text_dim));
+                ui.label(
+                    RichText::new(&p.address)
+                        .monospace()
+                        .small()
+                        .color(palette().text_dim),
+                );
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Forget").clicked() {
@@ -261,7 +266,12 @@ fn verified(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
                     ui.label(RichText::new(vm.peer_label(fp)).strong());
                     widgets::verified_tick(ui);
                 });
-                ui.label(RichText::new(fmt::display_id(fp)).monospace().small().color(palette().text_dim));
+                ui.label(
+                    RichText::new(fmt::display_id(fp))
+                        .monospace()
+                        .small()
+                        .color(palette().text_dim),
+                );
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Message").clicked() {
@@ -280,7 +290,11 @@ fn blocked(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
     }
     for fp in &vm.blocked {
         ui.horizontal(|ui| {
-            ui.label(RichText::new(fmt::display_id(fp)).monospace().color(palette().text_dim));
+            ui.label(
+                RichText::new(fmt::display_id(fp))
+                    .monospace()
+                    .color(palette().text_dim),
+            );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Unblock").clicked() {
                     actions.push(UiAction::PersonUnblock(fp.clone()));

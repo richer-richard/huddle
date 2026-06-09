@@ -458,11 +458,16 @@ mod tests {
         let room_id = setup_room(&db_alice, "test", "alice-fp");
         setup_room(&db_bob, "test", "alice-fp");
 
-        let mut alice =
-            RoomCrypto::new_for_room(db_alice.clone(), room_id.clone(), "alice-fp".into(), [0u8; 32])
-                .unwrap();
+        let mut alice = RoomCrypto::new_for_room(
+            db_alice.clone(),
+            room_id.clone(),
+            "alice-fp".into(),
+            [0u8; 32],
+        )
+        .unwrap();
         let mut bob =
-            RoomCrypto::new_for_room(db_bob.clone(), room_id.clone(), "bob-fp".into(), [0u8; 32]).unwrap();
+            RoomCrypto::new_for_room(db_bob.clone(), room_id.clone(), "bob-fp".into(), [0u8; 32])
+                .unwrap();
 
         bob.add_inbound_session("alice-fp", &alice.our_session_key_b64())
             .unwrap();
@@ -482,9 +487,11 @@ mod tests {
         setup_room(&db_b, "r", "a-fp");
 
         let mut alice =
-            RoomCrypto::new_for_room(db_a.clone(), room_id.clone(), "a-fp".into(), [0u8; 32]).unwrap();
+            RoomCrypto::new_for_room(db_a.clone(), room_id.clone(), "a-fp".into(), [0u8; 32])
+                .unwrap();
         let mut bob =
-            RoomCrypto::new_for_room(db_b.clone(), room_id.clone(), "b-fp".into(), [0u8; 32]).unwrap();
+            RoomCrypto::new_for_room(db_b.clone(), room_id.clone(), "b-fp".into(), [0u8; 32])
+                .unwrap();
 
         alice
             .add_inbound_session("b-fp", &bob.our_session_key_b64())
@@ -505,7 +512,8 @@ mod tests {
         let room_id = setup_room(&db, "r", "me-fp");
 
         let mut crypto =
-            RoomCrypto::new_for_room(db.clone(), room_id.clone(), "me-fp".into(), [0u8; 32]).unwrap();
+            RoomCrypto::new_for_room(db.clone(), room_id.clone(), "me-fp".into(), [0u8; 32])
+                .unwrap();
         let original_session_id = crypto.our_session_id();
         let (_, _) = crypto.encrypt(b"advance the ratchet").unwrap();
         drop(crypto);
@@ -529,11 +537,16 @@ mod tests {
         let room_id = setup_room(&db_alice, "test", "alice-fp");
         setup_room(&db_bob, "test", "alice-fp");
 
-        let mut alice =
-            RoomCrypto::new_for_room(db_alice.clone(), room_id.clone(), "alice-fp".into(), [0u8; 32])
-                .unwrap();
+        let mut alice = RoomCrypto::new_for_room(
+            db_alice.clone(),
+            room_id.clone(),
+            "alice-fp".into(),
+            [0u8; 32],
+        )
+        .unwrap();
         let mut bob =
-            RoomCrypto::new_for_room(db_bob.clone(), room_id.clone(), "bob-fp".into(), [0u8; 32]).unwrap();
+            RoomCrypto::new_for_room(db_bob.clone(), room_id.clone(), "bob-fp".into(), [0u8; 32])
+                .unwrap();
         bob.add_inbound_session("alice-fp", &alice.our_session_key_b64())
             .unwrap();
 
@@ -563,25 +576,36 @@ mod tests {
         let room_id = setup_room(&db_alice, "r", "alice-fp");
         setup_room(&db_bob, "r", "alice-fp");
 
-        let mut alice =
-            RoomCrypto::new_for_room(db_alice.clone(), room_id.clone(), "alice-fp".into(), [0u8; 32])
-                .unwrap();
+        let mut alice = RoomCrypto::new_for_room(
+            db_alice.clone(),
+            room_id.clone(),
+            "alice-fp".into(),
+            [0u8; 32],
+        )
+        .unwrap();
         let mut bob =
-            RoomCrypto::new_for_room(db_bob.clone(), room_id.clone(), "bob-fp".into(), [0u8; 32]).unwrap();
+            RoomCrypto::new_for_room(db_bob.clone(), room_id.clone(), "bob-fp".into(), [0u8; 32])
+                .unwrap();
 
         // Alice holds an inbound session from Bob and can decrypt his messages.
         alice
             .add_inbound_session("bob-fp", &bob.our_session_key_b64())
             .unwrap();
         let (sid1, ct1) = bob.encrypt(b"before rotate").unwrap();
-        assert_eq!(alice.decrypt("bob-fp", &sid1, &ct1).unwrap().0, b"before rotate");
+        assert_eq!(
+            alice.decrypt("bob-fp", &sid1, &ct1).unwrap().0,
+            b"before rotate"
+        );
 
         let old_outbound = alice.our_session_id();
 
         // Rotate Alice's outbound session.
         alice.rotate_outbound().unwrap();
         let new_outbound = alice.our_session_id();
-        assert_ne!(old_outbound, new_outbound, "rotate must mint a fresh outbound session");
+        assert_ne!(
+            old_outbound, new_outbound,
+            "rotate must mint a fresh outbound session"
+        );
 
         // Inbound from Bob is preserved — Alice still decrypts his next message.
         let (sid2, ct2) = bob.encrypt(b"after rotate").unwrap();
@@ -599,9 +623,14 @@ mod tests {
 
         // Reload deterministically restores the NEW outbound session.
         drop(alice);
-        let reloaded = RoomCrypto::load(db_alice.clone(), room_id.clone(), "alice-fp".into(), [0u8; 32])
-            .unwrap()
-            .expect("outbound session present");
+        let reloaded = RoomCrypto::load(
+            db_alice.clone(),
+            room_id.clone(),
+            "alice-fp".into(),
+            [0u8; 32],
+        )
+        .unwrap()
+        .expect("outbound session present");
         assert_eq!(reloaded.our_session_id(), new_outbound);
     }
 
@@ -612,7 +641,8 @@ mod tests {
         let db = open_db_in_memory().unwrap();
         let room_id = setup_room(&db, "r", "me-fp");
         let mut crypto =
-            RoomCrypto::new_for_room(db.clone(), room_id.clone(), "me-fp".into(), [0u8; 32]).unwrap();
+            RoomCrypto::new_for_room(db.clone(), room_id.clone(), "me-fp".into(), [0u8; 32])
+                .unwrap();
         assert_eq!(crypto.messages_since_rotation(), 0);
         for _ in 0..3 {
             crypto.encrypt(b"msg").unwrap();
@@ -627,7 +657,8 @@ mod tests {
         let db = open_db_in_memory().unwrap();
         let room_id = setup_room(&db, "r", "me-fp");
         let mut crypto =
-            RoomCrypto::new_for_room(db.clone(), room_id.clone(), "me-fp".into(), [0u8; 32]).unwrap();
+            RoomCrypto::new_for_room(db.clone(), room_id.clone(), "me-fp".into(), [0u8; 32])
+                .unwrap();
         for _ in 0..5 {
             crypto.encrypt(b"msg").unwrap();
         }
@@ -635,7 +666,11 @@ mod tests {
         let old_session = crypto.our_session_id();
 
         crypto.rotate_outbound().unwrap();
-        assert_ne!(crypto.our_session_id(), old_session, "rotate mints a new session");
+        assert_ne!(
+            crypto.our_session_id(),
+            old_session,
+            "rotate mints a new session"
+        );
         assert_eq!(
             crypto.messages_since_rotation(),
             0,
@@ -651,7 +686,8 @@ mod tests {
         let db = open_db_in_memory().unwrap();
         let room_id = setup_room(&db, "r", "me-fp");
         let mut crypto =
-            RoomCrypto::new_for_room(db.clone(), room_id.clone(), "me-fp".into(), [0u8; 32]).unwrap();
+            RoomCrypto::new_for_room(db.clone(), room_id.clone(), "me-fp".into(), [0u8; 32])
+                .unwrap();
         crypto.encrypt(b"one").unwrap();
         crypto.encrypt(b"two").unwrap();
         crypto.encrypt(b"three").unwrap();
@@ -710,7 +746,8 @@ mod tests {
         let db = open_db_in_memory().unwrap();
         let room_id = setup_room(&db, "r", "me-fp");
         let mut crypto =
-            RoomCrypto::new_for_room(db.clone(), room_id.clone(), "me-fp".into(), [0u8; 32]).unwrap();
+            RoomCrypto::new_for_room(db.clone(), room_id.clone(), "me-fp".into(), [0u8; 32])
+                .unwrap();
         let policy = RotationPolicy::new(3, 0);
 
         crypto.encrypt(b"a").unwrap();
@@ -729,7 +766,8 @@ mod tests {
         let db = open_db_in_memory().unwrap();
         let room_id = setup_room(&db, "r", "me-fp");
         let mut crypto =
-            RoomCrypto::new_for_room(db.clone(), room_id.clone(), "me-fp".into(), [0u8; 32]).unwrap();
+            RoomCrypto::new_for_room(db.clone(), room_id.clone(), "me-fp".into(), [0u8; 32])
+                .unwrap();
         let err = crypto.decrypt("unknown-fp", "session-id", b"junk");
         assert!(err.is_err());
         // huddle 1.3.1: the app's decrypt-miss key-request heal matches on this

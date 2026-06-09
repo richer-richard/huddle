@@ -26,7 +26,9 @@ pub fn render_welcome(f: &mut Frame) {
     let y = |s: &'static str| {
         Span::styled(
             s,
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         )
     };
 

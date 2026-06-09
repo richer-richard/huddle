@@ -66,7 +66,11 @@ async fn next_sent(rx: &mut Rx) -> (String, usize, usize) {
     let fut = async {
         loop {
             match rx.recv().await.expect("event stream open") {
-                ServerEvent::Sent { id, delivered, queued } => return (id, delivered, queued),
+                ServerEvent::Sent {
+                    id,
+                    delivered,
+                    queued,
+                } => return (id, delivered, queued),
                 ServerEvent::Ready
                 | ServerEvent::Message { .. }
                 | ServerEvent::ConnectToken { .. }
@@ -104,9 +108,10 @@ async fn next_connect_resolved(rx: &mut Rx) -> (Option<String>, Option<String>) 
     let fut = async {
         loop {
             match rx.recv().await.expect("event stream open") {
-                ServerEvent::ConnectTokenResolved { fingerprint, pubkey_b64 } => {
-                    return (fingerprint, pubkey_b64)
-                }
+                ServerEvent::ConnectTokenResolved {
+                    fingerprint,
+                    pubkey_b64,
+                } => return (fingerprint, pubkey_b64),
                 ServerEvent::Ready
                 | ServerEvent::Sent { .. }
                 | ServerEvent::Message { .. }
@@ -178,12 +183,14 @@ async fn client_connector_fanout_and_mailbox() {
     // are stable.
     let a_id = Arc::new(Identity::generate().unwrap());
     let b_id = Arc::new(Identity::generate().unwrap());
-    let (a, mut a_rx) = ServerClient::connect(&url, &DialMode::Direct, a_id.clone(), vec!["ROOMX".into()])
-        .await
-        .unwrap();
-    let (b, mut b_rx) = ServerClient::connect(&url, &DialMode::Direct, b_id.clone(), vec!["ROOMX".into()])
-        .await
-        .unwrap();
+    let (a, mut a_rx) =
+        ServerClient::connect(&url, &DialMode::Direct, a_id.clone(), vec!["ROOMX".into()])
+            .await
+            .unwrap();
+    let (b, mut b_rx) =
+        ServerClient::connect(&url, &DialMode::Direct, b_id.clone(), vec!["ROOMX".into()])
+            .await
+            .unwrap();
 
     // Give both hellos time to register membership server-side.
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -203,15 +210,17 @@ async fn client_connector_fanout_and_mailbox() {
     drop(b);
     drop(b_rx);
     tokio::time::sleep(Duration::from_millis(300)).await;
-    a.publish("ROOMX", "msg-2", b"queued-while-offline").unwrap();
+    a.publish("ROOMX", "msg-2", b"queued-while-offline")
+        .unwrap();
     // The receipt now reports it queued (B offline), not delivered.
     let (sid2, delivered2, queued2) = next_sent(&mut a_rx).await;
     assert_eq!(sid2, "msg-2");
     assert_eq!((delivered2, queued2), (0, 1));
 
-    let (_b2, mut b2_rx) = ServerClient::connect(&url, &DialMode::Direct, b_id.clone(), vec!["ROOMX".into()])
-        .await
-        .unwrap();
+    let (_b2, mut b2_rx) =
+        ServerClient::connect(&url, &DialMode::Direct, b_id.clone(), vec!["ROOMX".into()])
+            .await
+            .unwrap();
     let (id2, payload2) = next_message(&mut b2_rx).await;
     assert_eq!(id2, "msg-2");
     assert_eq!(payload2, b"queued-while-offline");
@@ -247,7 +256,8 @@ async fn send_direct_delivers_by_fingerprint_without_membership() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // A → B by fingerprint. `room` is just an opaque filing tag (a DM room id).
-    a.send_direct(&b_fp, "dm-tag-1", "d1", b"\x00direct-hi").unwrap();
+    a.send_direct(&b_fp, "dm-tag-1", "d1", b"\x00direct-hi")
+        .unwrap();
     let (id, payload) = next_message(&mut b_rx).await;
     assert_eq!(id, "d1");
     assert_eq!(payload, b"\x00direct-hi");
@@ -261,7 +271,8 @@ async fn send_direct_delivers_by_fingerprint_without_membership() {
     drop(_b);
     drop(b_rx);
     tokio::time::sleep(Duration::from_millis(300)).await;
-    a.send_direct(&b_fp, "dm-tag-1", "d2", b"direct-while-offline").unwrap();
+    a.send_direct(&b_fp, "dm-tag-1", "d2", b"direct-while-offline")
+        .unwrap();
     let (sid2, delivered2, queued2) = next_sent(&mut a_rx).await;
     assert_eq!(sid2, "d2");
     assert_eq!((delivered2, queued2), (0, 1));

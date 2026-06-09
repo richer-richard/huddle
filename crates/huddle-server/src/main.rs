@@ -162,7 +162,9 @@ enum ClientMsg {
     /// this ACK (at-least-once delivery). `mailbox_id` is the server-assigned
     /// row id from the `ServerMsg::Message` the client persisted. Scoped to the
     /// authenticated fingerprint, so an identity can only drop its own queue.
-    Ack { mailbox_id: i64 },
+    Ack {
+        mailbox_id: i64,
+    },
     Ping,
 }
 
@@ -171,8 +173,12 @@ enum ClientMsg {
 enum ServerMsg {
     /// huddle 1.1.4: sent immediately on connect. The client signs the nonce
     /// to prove control of its identity key before it can do anything.
-    Challenge { nonce_b64: String },
-    Ready { fingerprint: String },
+    Challenge {
+        nonce_b64: String,
+    },
+    Ready {
+        fingerprint: String,
+    },
     /// A room message delivered live or from the offline mailbox. huddle 2.0:
     /// `mailbox_id` is `Some(row_id)` when the message came from the relay's
     /// on-disk queue AND the recipient advertised ACK support in its `Hello`
@@ -187,9 +193,16 @@ enum ServerMsg {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mailbox_id: Option<i64>,
     },
-    Sent { id: String, delivered: usize, queued: usize },
+    Sent {
+        id: String,
+        delivered: usize,
+        queued: usize,
+    },
     /// huddle 1.2.1: a freshly minted connect code + its lifetime (seconds).
-    ConnectToken { token: String, ttl_secs: u64 },
+    ConnectToken {
+        token: String,
+        ttl_secs: u64,
+    },
     /// huddle 1.2.1: result of redeeming a connect code. `fingerprint`/`pubkey_b64`
     /// are `None` when the code is unknown or expired.
     ConnectTokenResolved {
@@ -198,7 +211,9 @@ enum ServerMsg {
         pubkey_b64: Option<String>,
     },
     Pong,
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 /// huddle 2.0 (F7): what the per-connection writer pump consumes. Almost every
@@ -295,7 +310,8 @@ async fn main() -> Result<()> {
         .init();
 
     let bind = std::env::var("HUDDLE_SERVER_BIND").unwrap_or_else(|_| "127.0.0.1:8787".to_string());
-    let db_path = std::env::var("HUDDLE_SERVER_DB").unwrap_or_else(|_| "huddle-server.db".to_string());
+    let db_path =
+        std::env::var("HUDDLE_SERVER_DB").unwrap_or_else(|_| "huddle-server.db".to_string());
 
     let conn = Connection::open(&db_path)?;
     migrate(&conn)?;
@@ -355,11 +371,17 @@ async fn main() -> Result<()> {
             // huddle 2.0 (F13): count this accepted socket as an active
             // connection for the lifetime of its handler so `/metrics` can
             // report live concurrency against `MAX_TOTAL_CONNECTIONS`.
-            shared.metrics.active_connections.fetch_add(1, Ordering::Relaxed);
+            shared
+                .metrics
+                .active_connections
+                .fetch_add(1, Ordering::Relaxed);
             if let Err(e) = handle_conn(stream, shared.clone()).await {
                 debug!(error = %e, "connection ended");
             }
-            shared.metrics.active_connections.fetch_sub(1, Ordering::Relaxed);
+            shared
+                .metrics
+                .active_connections
+                .fetch_sub(1, Ordering::Relaxed);
         });
     }
 }
@@ -388,7 +410,10 @@ async fn handle_conn(stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
     let n = match tokio::time::timeout_at(pre_ws_deadline, stream.peek(&mut buf)).await {
         Ok(r) => r?,
         Err(_) => {
-            shared.metrics.pre_auth_timeouts.fetch_add(1, Ordering::Relaxed);
+            shared
+                .metrics
+                .pre_auth_timeouts
+                .fetch_add(1, Ordering::Relaxed);
             return Ok(());
         }
     };
@@ -415,7 +440,10 @@ async fn handle_conn(stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
             Err(_) => {
                 // A partial WebSocket upgrade that never completes is the same
                 // idle-pre-auth abuse; count it too (huddle 2.0, F13).
-                shared.metrics.pre_auth_timeouts.fetch_add(1, Ordering::Relaxed);
+                shared
+                    .metrics
+                    .pre_auth_timeouts
+                    .fetch_add(1, Ordering::Relaxed);
                 return Ok(());
             }
         };
@@ -675,9 +703,15 @@ async fn serve_ws(ws: WebSocketStream<TcpStream>, shared: Arc<Shared>) -> Result
                 }
             }
         }
-        if let Err(e) =
-            handle_client_msg(msg, &mut fingerprint, &proven_pubkey, &mut acks_enabled, &tx, &shared)
-                .await
+        if let Err(e) = handle_client_msg(
+            msg,
+            &mut fingerprint,
+            &proven_pubkey,
+            &mut acks_enabled,
+            &tx,
+            &shared,
+        )
+        .await
         {
             let _ = tx
                 .send(OutEvent::Msg(ServerMsg::Error {
@@ -754,7 +788,11 @@ async fn handle_client_msg(
             // the Hello bit. A re-Hello may flip it (e.g. a client that upgraded
             // mid-session), but in practice it's constant for a socket's life.
             *acks_enabled = acks;
-            let _ = tx.send(OutEvent::Msg(ServerMsg::Ready { fingerprint: fp.clone() })).await;
+            let _ = tx
+                .send(OutEvent::Msg(ServerMsg::Ready {
+                    fingerprint: fp.clone(),
+                }))
+                .await;
             flush_mailbox(&fp, tx, shared, acks).await?;
         }
         ClientMsg::Subscribe { room } => {
@@ -772,7 +810,11 @@ async fn handle_client_msg(
                 params![fp, room],
             )?;
         }
-        ClientMsg::Publish { room, id, payload_b64 } => {
+        ClientMsg::Publish {
+            room,
+            id,
+            payload_b64,
+        } => {
             let fp = require_fp(fingerprint)?;
             let room = clean_id(&room).ok_or_else(|| anyhow!("invalid room"))?;
             if id.is_empty() || id.len() > MAX_MSG_ID_LEN {
@@ -816,15 +858,27 @@ async fn handle_client_msg(
                 };
                 if online {
                     delivered += 1;
-                    shared.metrics.publish_delivered.fetch_add(1, Ordering::Relaxed);
+                    shared
+                        .metrics
+                        .publish_delivered
+                        .fetch_add(1, Ordering::Relaxed);
                 } else {
                     let db = shared.db.lock().await;
                     enqueue(&db, &member, &room, &id, &payload_b64)?;
                     queued += 1;
-                    shared.metrics.publish_queued.fetch_add(1, Ordering::Relaxed);
+                    shared
+                        .metrics
+                        .publish_queued
+                        .fetch_add(1, Ordering::Relaxed);
                 }
             }
-            let _ = tx.send(OutEvent::Msg(ServerMsg::Sent { id, delivered, queued })).await;
+            let _ = tx
+                .send(OutEvent::Msg(ServerMsg::Sent {
+                    id,
+                    delivered,
+                    queued,
+                }))
+                .await;
         }
         ClientMsg::SendDirect {
             to,
@@ -865,15 +919,27 @@ async fn handle_client_msg(
                 }
             };
             let (delivered, queued) = if online {
-                shared.metrics.publish_delivered.fetch_add(1, Ordering::Relaxed);
+                shared
+                    .metrics
+                    .publish_delivered
+                    .fetch_add(1, Ordering::Relaxed);
                 (1usize, 0usize)
             } else {
                 let db = shared.db.lock().await;
                 enqueue(&db, &to, &room, &id, &payload_b64)?;
-                shared.metrics.publish_queued.fetch_add(1, Ordering::Relaxed);
+                shared
+                    .metrics
+                    .publish_queued
+                    .fetch_add(1, Ordering::Relaxed);
                 (0usize, 1usize)
             };
-            let _ = tx.send(OutEvent::Msg(ServerMsg::Sent { id, delivered, queued })).await;
+            let _ = tx
+                .send(OutEvent::Msg(ServerMsg::Sent {
+                    id,
+                    delivered,
+                    queued,
+                }))
+                .await;
         }
         ClientMsg::CreateConnectToken => {
             // huddle 1.2.1: mint a short-lived code bound to the proven identity.
@@ -1162,9 +1228,7 @@ fn normalize_connect_token(s: &str) -> Option<String> {
         .chars()
         .filter(|c| *c != '-' && *c != ' ')
         .collect();
-    if up.len() == CONNECT_TOKEN_LEN
-        && up.bytes().all(|b| CONNECT_TOKEN_ALPHABET.contains(&b))
-    {
+    if up.len() == CONNECT_TOKEN_LEN && up.bytes().all(|b| CONNECT_TOKEN_ALPHABET.contains(&b)) {
         Some(up)
     } else {
         None
@@ -1328,8 +1392,7 @@ mod tests {
     fn hello_acks_capability_defaults_false() {
         // A pre-2.0 Hello (no `acks` field) must decode with the bit off, so the
         // relay keeps the classical delete-on-deliver behavior for old clients.
-        let m: ClientMsg =
-            serde_json::from_str(r#"{"type":"hello","fingerprint":"fp"}"#).unwrap();
+        let m: ClientMsg = serde_json::from_str(r#"{"type":"hello","fingerprint":"fp"}"#).unwrap();
         match m {
             ClientMsg::Hello { acks, .. } => assert!(!acks),
             other => panic!("expected hello, got {other:?}"),
@@ -1345,14 +1408,20 @@ mod tests {
 
     #[test]
     fn parses_plain_paths() {
-        assert_eq!(request_target("GET / HTTP/1.1\r\nHost: x.onion\r\n\r\n"), "/");
+        assert_eq!(
+            request_target("GET / HTTP/1.1\r\nHost: x.onion\r\n\r\n"),
+            "/"
+        );
         assert_eq!(request_target("GET /health HTTP/1.1\r\n\r\n"), "/health");
         assert_eq!(request_target("GET /ws HTTP/1.1\r\n"), "/ws");
     }
 
     #[test]
     fn strips_query_string() {
-        assert_eq!(request_target("GET /health?probe=1 HTTP/1.1\r\n"), "/health");
+        assert_eq!(
+            request_target("GET /health?probe=1 HTTP/1.1\r\n"),
+            "/health"
+        );
         assert_eq!(request_target("GET /?x HTTP/1.1\r\n"), "/");
     }
 
