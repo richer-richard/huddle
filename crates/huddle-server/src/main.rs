@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, Mutex, Semaphore};
+use tokio::sync::{mpsc, oneshot, Mutex, Semaphore};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::WebSocketStream;
 use tracing::{debug, info, warn};
@@ -201,7 +201,20 @@ enum ServerMsg {
     Error { message: String },
 }
 
-type Tx = mpsc::Sender<ServerMsg>;
+/// huddle 2.0 (F7): what the per-connection writer pump consumes. Almost every
+/// event is a protocol `Msg` to serialize and write to the socket. `Flush` is a
+/// write barrier used only by the legacy (acks=false) mailbox drain: the writer
+/// signals it AFTER it has flushed every preceding `Msg` to the socket, so the
+/// drain can delete those mailbox rows only once they've truly reached the wire
+/// — not merely the bounded outbound channel. This closes the pre-2.0
+/// OUTBOUND_CAP loss window where a row accepted into the buffer but not yet
+/// written was deleted, then lost if the socket died mid-drain.
+enum OutEvent {
+    Msg(ServerMsg),
+    Flush(oneshot::Sender<()>),
+}
+
+type Tx = mpsc::Sender<OutEvent>;
 
 /// huddle 1.2.1: one minted connect code and what it resolves to.
 struct ConnectTokenEntry {
@@ -529,18 +542,33 @@ async fn serve_landing(mut stream: TcpStream) -> Result<()> {
 
 async fn serve_ws(ws: WebSocketStream<TcpStream>, shared: Arc<Shared>) -> Result<()> {
     let (mut sink, mut stream) = ws.split();
-    let (tx, mut rx) = mpsc::channel::<ServerMsg>(OUTBOUND_CAP);
+    let (tx, mut rx) = mpsc::channel::<OutEvent>(OUTBOUND_CAP);
 
     // Pump outgoing messages from the channel to the socket. Other
     // connections push into `tx` to deliver fan-out messages here.
     let writer = tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
-            let json = match serde_json::to_string(&msg) {
-                Ok(j) => j,
-                Err(_) => continue,
-            };
-            if sink.send(WsMessage::Text(json.into())).await.is_err() {
-                break;
+        while let Some(evt) = rx.recv().await {
+            match evt {
+                OutEvent::Msg(msg) => {
+                    let json = match serde_json::to_string(&msg) {
+                        Ok(j) => j,
+                        Err(_) => continue,
+                    };
+                    // `SinkExt::send` feeds AND flushes, so once it returns Ok the
+                    // bytes have reached the socket — that's what lets the `Flush`
+                    // barrier below stand for "everything ahead of me is on the wire".
+                    if sink.send(WsMessage::Text(json.into())).await.is_err() {
+                        break;
+                    }
+                }
+                // huddle 2.0 (F7): a write barrier. Because the channel is FIFO and
+                // we got here, every `Msg` queued before this barrier has been
+                // flushed to the socket. Signal the waiter so it can safely delete
+                // the corresponding legacy mailbox rows. If the waiter is gone we
+                // just drop the signal.
+                OutEvent::Flush(done) => {
+                    let _ = done.send(());
+                }
             }
         }
     });
@@ -557,9 +585,9 @@ async fn serve_ws(ws: WebSocketStream<TcpStream>, shared: Arc<Shared>) -> Result
     let mut nonce = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut nonce);
     if tx
-        .send(ServerMsg::Challenge {
+        .send(OutEvent::Msg(ServerMsg::Challenge {
             nonce_b64: B64.encode(nonce),
-        })
+        }))
         .await
         .is_err()
     {
@@ -604,9 +632,9 @@ async fn serve_ws(ws: WebSocketStream<TcpStream>, shared: Arc<Shared>) -> Result
             Ok(m) => m,
             Err(e) => {
                 let _ = tx
-                    .send(ServerMsg::Error {
+                    .send(OutEvent::Msg(ServerMsg::Error {
                         message: format!("bad message: {e}"),
-                    })
+                    }))
                     .await;
                 continue;
             }
@@ -630,18 +658,18 @@ async fn serve_ws(ws: WebSocketStream<TcpStream>, shared: Arc<Shared>) -> Result
                     Err(e) => {
                         debug!(error = %e, "client auth failed; dropping connection");
                         let _ = tx
-                            .send(ServerMsg::Error {
+                            .send(OutEvent::Msg(ServerMsg::Error {
                                 message: format!("auth failed: {e}"),
-                            })
+                            }))
                             .await;
                         break;
                     }
                 },
                 _ => {
                     let _ = tx
-                        .send(ServerMsg::Error {
+                        .send(OutEvent::Msg(ServerMsg::Error {
                             message: "authenticate with hello first".into(),
-                        })
+                        }))
                         .await;
                     break;
                 }
@@ -652,9 +680,9 @@ async fn serve_ws(ws: WebSocketStream<TcpStream>, shared: Arc<Shared>) -> Result
                 .await
         {
             let _ = tx
-                .send(ServerMsg::Error {
+                .send(OutEvent::Msg(ServerMsg::Error {
                     message: e.to_string(),
-                })
+                }))
                 .await;
         }
     }
@@ -708,9 +736,9 @@ async fn handle_client_msg(
             };
             if !registered {
                 let _ = tx
-                    .send(ServerMsg::Error {
+                    .send(OutEvent::Msg(ServerMsg::Error {
                         message: "too many concurrent connections for this identity".into(),
-                    })
+                    }))
                     .await;
                 bail!("per-fingerprint connection limit ({MAX_CONNECTIONS_PER_FP}) exceeded");
             }
@@ -726,7 +754,7 @@ async fn handle_client_msg(
             // the Hello bit. A re-Hello may flip it (e.g. a client that upgraded
             // mid-session), but in practice it's constant for a socket's life.
             *acks_enabled = acks;
-            let _ = tx.send(ServerMsg::Ready { fingerprint: fp.clone() }).await;
+            let _ = tx.send(OutEvent::Msg(ServerMsg::Ready { fingerprint: fp.clone() })).await;
             flush_mailbox(&fp, tx, shared, acks).await?;
         }
         ClientMsg::Subscribe { room } => {
@@ -796,7 +824,7 @@ async fn handle_client_msg(
                     shared.metrics.publish_queued.fetch_add(1, Ordering::Relaxed);
                 }
             }
-            let _ = tx.send(ServerMsg::Sent { id, delivered, queued }).await;
+            let _ = tx.send(OutEvent::Msg(ServerMsg::Sent { id, delivered, queued })).await;
         }
         ClientMsg::SendDirect {
             to,
@@ -845,7 +873,7 @@ async fn handle_client_msg(
                 shared.metrics.publish_queued.fetch_add(1, Ordering::Relaxed);
                 (0usize, 1usize)
             };
-            let _ = tx.send(ServerMsg::Sent { id, delivered, queued }).await;
+            let _ = tx.send(OutEvent::Msg(ServerMsg::Sent { id, delivered, queued })).await;
         }
         ClientMsg::CreateConnectToken => {
             // huddle 1.2.1: mint a short-lived code bound to the proven identity.
@@ -881,10 +909,10 @@ async fn handle_client_msg(
                 tok
             };
             let _ = tx
-                .send(ServerMsg::ConnectToken {
+                .send(OutEvent::Msg(ServerMsg::ConnectToken {
                     token,
                     ttl_secs: CONNECT_TOKEN_TTL_SECS as u64,
-                })
+                }))
                 .await;
         }
         ClientMsg::RedeemConnectToken { token } => {
@@ -906,11 +934,11 @@ async fn handle_client_msg(
                 None => (None, None),
             };
             let _ = tx
-                .send(ServerMsg::ConnectTokenResolved {
+                .send(OutEvent::Msg(ServerMsg::ConnectTokenResolved {
                     token: normalize_connect_token(&token).unwrap_or_default(),
                     fingerprint,
                     pubkey_b64,
-                })
+                }))
                 .await;
         }
         ClientMsg::Fetch => {
@@ -932,7 +960,7 @@ async fn handle_client_msg(
             )?;
         }
         ClientMsg::Ping => {
-            let _ = tx.send(ServerMsg::Pong).await;
+            let _ = tx.send(OutEvent::Msg(ServerMsg::Pong)).await;
         }
     }
     Ok(())
@@ -945,7 +973,7 @@ async fn handle_client_msg(
 fn fan_out(senders: &[Tx], out: &ServerMsg, metrics: &Metrics) -> bool {
     let mut any_ok = false;
     for s in senders {
-        match s.try_send(out.clone()) {
+        match s.try_send(OutEvent::Msg(out.clone())) {
             Ok(()) => any_ok = true,
             Err(mpsc::error::TrySendError::Full(_)) => {
                 metrics.outbound_cap_drops.fetch_add(1, Ordering::Relaxed);
@@ -958,18 +986,24 @@ fn fan_out(senders: &[Tx], out: &ServerMsg, metrics: &Metrics) -> bool {
 
 /// Drain a recipient's offline mailbox onto its live socket.
 ///
-/// huddle 1.1.4: peek (do NOT delete) the queue, deliver into the bounded
-/// outbound channel, and delete ONLY the rows that were accepted. If the socket
-/// is gone, `tx.send` errors and we stop — the rest stay in the DB with their
-/// original `created_at` for the next connection, so there's no silent loss and
-/// no TTL reset.
+/// huddle 1.1.4: peek (do NOT delete) the queue and deliver into the bounded
+/// outbound channel. If the socket is gone, `tx.send` errors and we stop — the
+/// rest stay in the DB with their original `created_at` for the next
+/// connection, so there's no silent loss and no TTL reset.
 ///
 /// huddle 2.0 (F7): `acks` selects the delivery discipline:
-/// - `false` (pre-2.0 clients): classical delete-on-deliver — tag the row with
-///   no `mailbox_id` and delete it once the writer accepts it. The residual is
-///   that a row accepted into the bounded buffer but not yet written when the
-///   socket dies can still be lost (bounded by OUTBOUND_CAP), but the queue can
-///   never wedge: an old client that never ACKs still drains its mailbox.
+/// - `false` (pre-2.0 clients): tag each row with no `mailbox_id` and delete it
+///   only AFTER the writer confirms it reached the socket. We push the batch,
+///   then enqueue an `OutEvent::Flush` write barrier; because the outbound
+///   channel is FIFO, the writer signals that barrier only once every preceding
+///   message has been flushed to the wire (`SinkExt::send` flushes). So a socket
+///   that dies mid-drain leaves ALL the batch's rows in the DB for the next
+///   connection instead of losing messages that were buffered but never written
+///   — the safe 1.1.4 delete-after-the-socket-send behavior. The cost is that a
+///   socket death after a partial write redelivers the already-written prefix
+///   next time; old clients dedup that by `msg_id`. The queue can never wedge:
+///   an old client that drains successfully has its rows deleted and never
+///   re-sends an `Ack`.
 /// - `true` (2.0+ clients): at-least-once — tag each row with its `id` and keep
 ///   it on disk. The client `Ack`s after durably persisting, and only then does
 ///   the relay delete the row (see the `Ack` handler). A lost ACK simply means
@@ -980,31 +1014,44 @@ async fn flush_mailbox(fp: &str, tx: &Tx, shared: &Arc<Shared>, acks: bool) -> R
         let db = shared.db.lock().await;
         peek_mailbox(&db, fp)?
     };
-    let mut delivered_ids: Vec<i64> = Vec::new();
+    // Rows pushed toward the socket on the legacy (acks=false) path this drain.
+    // They're deleted only once the write barrier below confirms they reached
+    // the wire. The at-least-once path never collects ids here (deletes on `Ack`).
+    let mut legacy_ids: Vec<i64> = Vec::new();
+    let mut socket_alive = true;
     for (row_id, room, msg_id, payload_b64) in items {
         // At-least-once clients get the row id to ACK; legacy clients get `None`
-        // and the delete-on-deliver path below.
+        // and the barrier-confirmed delete path below.
         let mailbox_id = if acks { Some(row_id) } else { None };
         if tx
-            .send(ServerMsg::Message {
+            .send(OutEvent::Msg(ServerMsg::Message {
                 room,
                 id: msg_id,
                 payload_b64,
                 mailbox_id,
-            })
+            }))
             .await
             .is_err()
         {
+            socket_alive = false;
             break; // socket gone — keep the remaining rows for next time
         }
-        // Only the legacy path deletes here; at-least-once waits for the `Ack`.
         if !acks {
-            delivered_ids.push(row_id);
+            legacy_ids.push(row_id);
         }
     }
-    if !delivered_ids.is_empty() {
-        let db = shared.db.lock().await;
-        delete_mailbox_ids(&db, &delivered_ids)?;
+    // huddle 2.0 (F7): for legacy clients, delete the drained rows ONLY once the
+    // writer confirms they hit the socket. We enqueue a `Flush` barrier after the
+    // batch and await its signal; the writer signals it only after flushing every
+    // message ahead of it (FIFO). If the barrier can't be sent or the writer
+    // drops it (socket died before writing the batch), we delete nothing and the
+    // rows survive for the next drain — no loss, at worst a deduped redelivery.
+    if !acks && socket_alive && !legacy_ids.is_empty() {
+        let (done_tx, done_rx) = oneshot::channel();
+        if tx.send(OutEvent::Flush(done_tx)).await.is_ok() && done_rx.await.is_ok() {
+            let db = shared.db.lock().await;
+            delete_mailbox_ids(&db, &legacy_ids)?;
+        }
     }
     Ok(())
 }
@@ -1210,7 +1257,32 @@ fn delete_mailbox_ids(c: &Connection, ids: &[i64]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{request_target, ClientMsg, ServerMsg};
+    use super::{
+        enqueue, flush_mailbox, migrate, peek_mailbox, request_target, ClientMsg, ConnectTokens,
+        Connection, Metrics, OutEvent, ServerMsg, Shared, OUTBOUND_CAP,
+    };
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tokio::sync::{mpsc, Mutex};
+
+    /// A `Shared` backed by a fresh in-memory mailbox DB — enough state to drive
+    /// `flush_mailbox` without a live socket (huddle 2.0, F7).
+    fn test_shared() -> Arc<Shared> {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        Arc::new(Shared {
+            db: Mutex::new(conn),
+            conns: Mutex::new(HashMap::new()),
+            tokens: Mutex::new(ConnectTokens::default()),
+            metrics: Metrics::default(),
+        })
+    }
+
+    /// How many rows are still queued for `fp`.
+    async fn mailbox_count(shared: &Arc<Shared>, fp: &str) -> usize {
+        let db = shared.db.lock().await;
+        peek_mailbox(&db, fp).unwrap().len()
+    }
 
     #[test]
     fn message_serializes_mailbox_id_only_when_present() {
@@ -1298,5 +1370,113 @@ mod tests {
         assert_eq!(request_target(""), "/"); // empty
         assert_eq!(request_target("GET"), "/"); // no target token
         assert_eq!(request_target("garbage\r\n"), "/"); // single token
+    }
+
+    #[tokio::test]
+    async fn legacy_flush_deletes_only_after_writer_confirms() {
+        // huddle 2.0 (F7): for acks=false clients the rows must be deleted only
+        // once the writer flushes the batch to the socket and signals the `Flush`
+        // barrier — the safe 1.1.4 deliver-then-delete behavior.
+        let shared = test_shared();
+        let fp = "fp-legacy";
+        {
+            let db = shared.db.lock().await;
+            for i in 0..3 {
+                enqueue(&db, fp, "room", &format!("m{i}"), "p").unwrap();
+            }
+        }
+        let (tx, mut rx) = mpsc::channel::<OutEvent>(OUTBOUND_CAP);
+        // A faithful writer: it drains every message and signals each barrier,
+        // standing in for a socket that stays up for the whole drain.
+        let writer = tokio::spawn(async move {
+            let mut written = 0usize;
+            while let Some(evt) = rx.recv().await {
+                match evt {
+                    OutEvent::Msg(_) => written += 1,
+                    OutEvent::Flush(done) => {
+                        let _ = done.send(());
+                    }
+                }
+            }
+            written
+        });
+        flush_mailbox(fp, &tx, &shared, false).await.unwrap();
+        drop(tx); // let the writer observe the channel close and finish
+        let written = writer.await.unwrap();
+        assert_eq!(written, 3, "all three legacy messages reached the writer");
+        assert_eq!(
+            mailbox_count(&shared, fp).await,
+            0,
+            "rows deleted only after the write barrier confirmed delivery"
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_flush_keeps_rows_when_socket_dies_before_barrier() {
+        // huddle 2.0 (F7): if the socket dies mid-drain — the writer drops its
+        // receiver before handling the `Flush` barrier — the legacy path must
+        // delete NOTHING, so a buffered-but-unwritten message is never lost. It
+        // is redelivered on the next connection (deduped by msg_id) instead.
+        let shared = test_shared();
+        let fp = "fp-legacy-drop";
+        {
+            let db = shared.db.lock().await;
+            for i in 0..3 {
+                enqueue(&db, fp, "room", &format!("m{i}"), "p").unwrap();
+            }
+        }
+        let (tx, mut rx) = mpsc::channel::<OutEvent>(OUTBOUND_CAP);
+        // The writer takes the three messages but returns (dropping `rx`) before
+        // it ever signals the trailing barrier — exactly a socket that drops
+        // after the buffer was accepted but before the bytes hit the wire.
+        let writer = tokio::spawn(async move {
+            for _ in 0..3 {
+                let _ = rx.recv().await;
+            }
+            // `rx` dropped here: the `Flush` barrier's signal is discarded.
+        });
+        flush_mailbox(fp, &tx, &shared, false).await.unwrap();
+        writer.await.unwrap();
+        assert_eq!(
+            mailbox_count(&shared, fp).await,
+            3,
+            "no rows deleted: the messages may never have reached the socket"
+        );
+    }
+
+    #[tokio::test]
+    async fn at_least_once_tags_rows_and_keeps_them_until_ack() {
+        // huddle 2.0 (F7): for acks=true clients flush tags each delivery with its
+        // mailbox_id and deletes nothing — the row lives until the client `Ack`s.
+        let shared = test_shared();
+        let fp = "fp-ack";
+        {
+            let db = shared.db.lock().await;
+            enqueue(&db, fp, "room", "m0", "p").unwrap();
+            enqueue(&db, fp, "room", "m1", "p").unwrap();
+        }
+        let (tx, mut rx) = mpsc::channel::<OutEvent>(OUTBOUND_CAP);
+        let collector = tokio::spawn(async move {
+            let mut ids = Vec::new();
+            while let Some(evt) = rx.recv().await {
+                if let OutEvent::Msg(ServerMsg::Message { mailbox_id, .. }) = evt {
+                    ids.push(mailbox_id);
+                }
+            }
+            ids
+        });
+        flush_mailbox(fp, &tx, &shared, true).await.unwrap();
+        drop(tx);
+        let ids = collector.await.unwrap();
+        assert_eq!(ids.len(), 2, "both queued messages were delivered");
+        assert!(
+            ids.iter().all(|m| m.is_some()),
+            "acks=true tags every delivery with its mailbox_id to ACK"
+        );
+        assert_eq!(
+            mailbox_count(&shared, fp).await,
+            2,
+            "acks=true never deletes in flush; it waits for the client's Ack"
+        );
     }
 }
