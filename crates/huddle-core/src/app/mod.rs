@@ -1102,7 +1102,11 @@ impl AppHandle {
         query: &str,
         limit: i64,
     ) -> Result<Vec<repo::StoredRoomMessage>> {
-        repo::search_room_messages(&self.db, room_id, query, limit)
+        // huddle 2.0.0 (F8): route through the FTS5 index. The repo helper
+        // self-falls-back to the legacy LIKE scan on any FTS error or an empty
+        // query, so this is strictly an upgrade (ranked, tokenized, prefix/
+        // boolean-capable matching) with no loss of coverage.
+        repo::search_room_messages_fts(&self.db, room_id, query, limit)
     }
 
     /// Create a new room. Returns its room_id.
