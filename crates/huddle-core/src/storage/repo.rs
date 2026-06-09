@@ -631,6 +631,72 @@ pub fn load_megolm_sessions_for_room(
 }
 
 // =========================================================================
+// Megolm rotation state (huddle 2.0.0, F4)
+//
+// The durable copy of the outbound epoch bookkeeping `RoomCrypto` keeps in
+// memory — `messages_since_rotation` (encrypt calls on the current outbound
+// session) and `last_rotation_at` (unix seconds the epoch began). These drive
+// the scheduled forward-only `RotationPolicy`; persisting them is what lets the
+// rotation schedule continue across a restart instead of resetting to 0/now.
+// The session *ratchet* itself lives in `room_megolm_sessions`; this is a
+// separate, advisory table that never affects encrypt/decrypt/replay.
+// =========================================================================
+
+/// huddle 2.0.0 (F4): persist a room's outbound Megolm epoch bookkeeping —
+/// the message counter and epoch start time — keyed by (room_id, fingerprint)
+/// so there is one row per room per local identity. Upsert (INSERT … ON
+/// CONFLICT) so repeated saves on the hot send path stay O(1).
+/// `messages_since_rotation` is a Megolm u32 stored as INTEGER.
+pub fn set_megolm_rotation_state(
+    db: &Db,
+    room_id: &str,
+    fingerprint: &str,
+    messages_since_rotation: u32,
+    last_rotation_at: i64,
+) -> Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "INSERT INTO room_megolm_rotation_state
+            (room_id, fingerprint, messages_since_rotation, last_rotation_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(room_id, fingerprint) DO UPDATE SET
+            messages_since_rotation = excluded.messages_since_rotation,
+            last_rotation_at = excluded.last_rotation_at",
+        params![
+            room_id,
+            fingerprint,
+            messages_since_rotation as i64,
+            last_rotation_at
+        ],
+    )?;
+    Ok(())
+}
+
+/// huddle 2.0.0 (F4): read back the persisted `(messages_since_rotation,
+/// last_rotation_at)` for a room's outbound session, or `None` when nothing has
+/// been persisted yet (a never-sent room — the caller keeps `RoomCrypto`'s
+/// fresh 0/now baseline). The app calls this right after `RoomCrypto::load` and
+/// feeds the result to `restore_rotation_state` so the rotation schedule
+/// continues across restarts rather than counting from zero again.
+pub fn get_megolm_rotation_state(
+    db: &Db,
+    room_id: &str,
+    fingerprint: &str,
+) -> Result<Option<(u32, i64)>> {
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare(
+        "SELECT messages_since_rotation, last_rotation_at
+         FROM room_megolm_rotation_state WHERE room_id = ?1 AND fingerprint = ?2",
+    )?;
+    let row = stmt
+        .query_row(params![room_id, fingerprint], |r| {
+            Ok((r.get::<_, i64>(0)? as u32, r.get::<_, i64>(1)?))
+        })
+        .ok();
+    Ok(row)
+}
+
+// =========================================================================
 // Content-layer replay protection (huddle 2.0.0, F2)
 //
 // A durable seen-set of (room_id, sender_fingerprint, session_id,
@@ -2897,5 +2963,44 @@ mod tests {
         assert!(search_room_messages(&db, &room.id, "secret", 10)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn megolm_rotation_state_round_trips_and_upserts() {
+        // huddle 2.0.0 (F4): the durable epoch bookkeeping survives a restart.
+        // Missing → None (caller keeps the in-memory 0/now baseline); a save
+        // round-trips exactly; a second save for the same (room, fingerprint)
+        // overwrites rather than duplicating; a different fingerprint is its
+        // own row.
+        let db = open_db_in_memory().unwrap();
+        let room = make_room("r");
+        insert_room(&db, &room).unwrap();
+
+        assert_eq!(get_megolm_rotation_state(&db, &room.id, "me-fp").unwrap(), None);
+
+        set_megolm_rotation_state(&db, &room.id, "me-fp", 7, 1000).unwrap();
+        assert_eq!(
+            get_megolm_rotation_state(&db, &room.id, "me-fp").unwrap(),
+            Some((7, 1000))
+        );
+
+        // Upsert: a fresh save for the same key overwrites (e.g. after a
+        // rotation resets the counter to 0/now).
+        set_megolm_rotation_state(&db, &room.id, "me-fp", 0, 2000).unwrap();
+        assert_eq!(
+            get_megolm_rotation_state(&db, &room.id, "me-fp").unwrap(),
+            Some((0, 2000))
+        );
+
+        // A different fingerprint is an independent row.
+        set_megolm_rotation_state(&db, &room.id, "other-fp", 42, 3000).unwrap();
+        assert_eq!(
+            get_megolm_rotation_state(&db, &room.id, "other-fp").unwrap(),
+            Some((42, 3000))
+        );
+        assert_eq!(
+            get_megolm_rotation_state(&db, &room.id, "me-fp").unwrap(),
+            Some((0, 2000))
+        );
     }
 }

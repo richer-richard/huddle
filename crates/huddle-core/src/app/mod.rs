@@ -1606,6 +1606,10 @@ impl AppHandle {
                 if let Some(c) = room.crypto.as_mut() {
                     if let Err(e) = c.rotate_outbound() {
                         warn!(%e, %room_id, "DM classical→hybrid upgrade: outbound rotate failed");
+                    } else {
+                        // F4: this rotation reset the epoch (0/now); persist it so
+                        // the new epoch's schedule survives a restart.
+                        self.persist_rotation_state(c);
                     }
                 }
                 info!(%room_id, %partner_fp, "DM upgraded classical→hybrid (post-quantum)");
@@ -1669,7 +1673,12 @@ impl AppHandle {
                 our_fp.clone(),
                 self.persist_key(),
             )? {
-                Some(c) => Some(c),
+                Some(mut c) => {
+                    // F4: continue the rotation schedule from where it left off
+                    // rather than resetting the counter to zero on this restart.
+                    self.rehydrate_rotation_state(&mut c);
+                    Some(c)
+                }
                 None => Some(RoomCrypto::new_for_room(
                     self.db.clone(),
                     room_id.to_string(),
@@ -1801,7 +1810,12 @@ impl AppHandle {
                 self.persist_key(),
             )?;
             Some(match existing {
-                Some(c) => c,
+                Some(mut c) => {
+                    // F4: resume the rotation schedule across this restart/re-join
+                    // instead of restarting the counter from zero.
+                    self.rehydrate_rotation_state(&mut c);
+                    c
+                }
                 None => RoomCrypto::new_for_room(
                     self.db.clone(),
                     room_id.to_string(),
@@ -2071,6 +2085,11 @@ impl AppHandle {
                         warn!(%e, %room_id, "F4: scheduled Megolm rotation failed");
                     }
                 }
+                // F4: persist the (possibly post-rotation) epoch bookkeeping so
+                // the count/age schedule survives a restart instead of resetting
+                // to zero. This is the after-each-encrypt save the policy relies
+                // on; rehydrated via `rehydrate_rotation_state` after load.
+                self.persist_rotation_state(crypto);
                 (msg, needs_rotation)
             } else {
                 // Plaintext rooms have no Megolm session to rotate.
@@ -2142,6 +2161,46 @@ impl AppHandle {
             .and_then(|s| s.parse::<i64>().ok())
             .unwrap_or(RotationPolicy::DEFAULT_MAX_HOURS);
         RotationPolicy::from_messages_and_hours(max_messages, max_hours)
+    }
+
+    /// huddle 2.0.0 (F4): persist a room's live outbound epoch bookkeeping
+    /// (`messages_since_rotation`, `last_rotation_at`) to the durable
+    /// `room_megolm_rotation_state` table. Called after each encrypt and after
+    /// every rotation so the scheduled-rotation timing survives a restart
+    /// (paired with `rehydrate_rotation_state` at the `RoomCrypto::load` sites).
+    /// Best-effort: a failed write only means the counter falls back to its
+    /// last persisted value next launch — it never blocks sending.
+    fn persist_rotation_state(&self, crypto: &RoomCrypto) {
+        if let Err(e) = repo::set_megolm_rotation_state(
+            &self.db,
+            crypto.room_id(),
+            crypto.our_fingerprint(),
+            crypto.messages_since_rotation(),
+            crypto.last_rotation_at(),
+        ) {
+            warn!(%e, room_id = %crypto.room_id(), "F4: persist Megolm rotation state failed");
+        }
+    }
+
+    /// huddle 2.0.0 (F4): rehydrate a freshly-`load`ed `RoomCrypto`'s epoch
+    /// bookkeeping from `room_megolm_rotation_state`. `RoomCrypto::load` only
+    /// restores the Megolm ratchet, so without this the message counter and
+    /// epoch start reset to 0/now every launch and the rotation schedule never
+    /// converges across restarts (a room most of the way to its message cap
+    /// would start counting from zero again). No-op when no row exists yet (a
+    /// never-sent room keeps the fresh 0/now baseline).
+    fn rehydrate_rotation_state(&self, crypto: &mut RoomCrypto) {
+        match repo::get_megolm_rotation_state(
+            &self.db,
+            crypto.room_id(),
+            crypto.our_fingerprint(),
+        ) {
+            Ok(Some((count, at))) => crypto.restore_rotation_state(count, at),
+            Ok(None) => {}
+            Err(e) => {
+                warn!(%e, room_id = %crypto.room_id(), "F4: restore Megolm rotation state failed")
+            }
+        }
     }
 
     /// huddle 2.0.0 (F4): the current scheduled-rotation config as
@@ -2485,7 +2544,12 @@ impl AppHandle {
                 continue;
             }
             match RoomCrypto::load(self.db.clone(), room.info.id.clone(), our_fp.clone(), *new_key) {
-                Ok(Some(c)) => room.crypto = Some(c),
+                Ok(Some(mut c)) => {
+                    // F4: a rekey reload must not lose the epoch bookkeeping —
+                    // rehydrate it so the rotation schedule keeps counting.
+                    self.rehydrate_rotation_state(&mut c);
+                    room.crypto = Some(c);
+                }
                 Ok(None) => {}
                 Err(e) => warn!(%e, room_id = %room.info.id, "F5: RoomCrypto reload after rekey failed"),
             }
@@ -3596,7 +3660,13 @@ impl AppHandle {
                             if let Some(c) = room.crypto.as_mut() {
                                 if c.should_rotate(&rotation_policy) {
                                     match c.rotate_outbound() {
-                                        Ok(()) => rotated.push(room.info.id.clone()),
+                                        Ok(()) => {
+                                            // F4: persist the reset (0/now) epoch so
+                                            // the schedule doesn't re-arm from
+                                            // scratch after a restart.
+                                            handle.persist_rotation_state(c);
+                                            rotated.push(room.info.id.clone());
+                                        }
                                         Err(e) => warn!(
                                             %e, room_id = %room.info.id,
                                             "F4: scheduled Megolm rotation failed in heartbeat"
@@ -6937,6 +7007,10 @@ impl AppHandle {
                 self.identity.fingerprint().to_string(),
                 self.persist_key(),
             )?;
+            // F4: this is a fresh epoch (0/now) — persist it so the durable
+            // counter doesn't keep the retired session's (possibly high) value
+            // and wrongly trip a rotation on the next restart.
+            self.persist_rotation_state(&new_crypto);
             room.crypto = Some(new_crypto);
             room.passphrase_key = Some(new_key);
             room.info.passphrase_salt = Some(new_salt.to_vec());

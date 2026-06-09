@@ -362,4 +362,26 @@ pub const MIGRATIONS: &[&str] = &[
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_room_messages_dedup
         ON room_messages(room_id, sender_fingerprint, client_msg_id)
         WHERE client_msg_id IS NOT NULL;",
+    // huddle 2.0.0 (F4): durable home for the outbound Megolm *epoch
+    // bookkeeping* `RoomCrypto` otherwise keeps only in memory — the message
+    // counter (`messages_since_rotation`) and the epoch start time
+    // (`last_rotation_at`). These are the inputs a `RotationPolicy` reads to
+    // decide when to mint a fresh forward-only epoch (after N messages or T
+    // hours). Without persistence they reset to 0/now on every launch, so a
+    // room 900 messages into a 1000-message policy would restart its count from
+    // zero after a restart and rotate ~900 messages too late (the original F4
+    // gap). The app persists this after each encrypt and after every rotation,
+    // and rehydrates it via `RoomCrypto::restore_rotation_state` right after
+    // `RoomCrypto::load`. Keyed by (room_id, fingerprint) — one row per room per
+    // local identity; FK cascade clears it when the room is left or deleted.
+    // Local-only, additive, zero wire-format impact: pre-2.0 peers never touch
+    // it and old DBs simply have no rows (the in-memory 0/now baseline holds
+    // until the first save).
+    "CREATE TABLE IF NOT EXISTS room_megolm_rotation_state (
+        room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+        fingerprint TEXT NOT NULL,
+        messages_since_rotation INTEGER NOT NULL,
+        last_rotation_at INTEGER NOT NULL,
+        PRIMARY KEY (room_id, fingerprint)
+    );",
 ];
