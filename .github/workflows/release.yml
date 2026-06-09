@@ -1,0 +1,129 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build artifacts for (e.g. v2.0.0)'
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Build the three binaries per OS and attach them to the GitHub release.
+  binaries:
+    name: binaries ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            ext: tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            ext: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: zip
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Linux build/GUI system deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config perl \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
+      - name: Install nasm (Windows vendored OpenSSL)
+        if: runner.os == 'Windows'
+        run: choco install nasm --no-progress -y
+      - name: Build release binaries
+        run: cargo build --release --workspace --bins
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          VER="${{ github.event.inputs.tag || github.ref_name }}"
+          NAME="huddle-${VER}-${{ matrix.target }}"
+          mkdir -p "dist/$NAME"
+          cp target/release/huddle target/release/huddle-gui target/release/huddle-server "dist/$NAME/"
+          cp README.md SECURITY.md LICENSE* "dist/$NAME/" 2>/dev/null || true
+          tar -C dist -czf "dist/$NAME.tar.gz" "$NAME"
+          (cd dist && shasum -a 256 "$NAME.tar.gz" > "$NAME.tar.gz.sha256")
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $VER = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { '${{ github.event.inputs.tag }}' }
+          $NAME = "huddle-$VER-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path "dist/$NAME" | Out-Null
+          Copy-Item target/release/huddle.exe,target/release/huddle-gui.exe,target/release/huddle-server.exe "dist/$NAME/"
+          Compress-Archive -Path "dist/$NAME" -DestinationPath "dist/$NAME.zip"
+          (Get-FileHash "dist/$NAME.zip" -Algorithm SHA256).Hash | Out-File "dist/$NAME.zip.sha256"
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+          fail_on_unmatched_files: false
+
+  sbom:
+    name: SBOM
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Generate CycloneDX SBOM
+        run: |
+          cargo install cargo-cyclonedx --locked
+          cargo cyclonedx --format json --all
+      - name: Collect SBOMs
+        run: |
+          mkdir -p sbom && find . -name '*.cdx.json' -exec cp {} sbom/ \; || true
+      - name: Attach SBOM to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: sbom/*.json
+          fail_on_unmatched_files: false
+
+  # Opt-in: publishes only if a CARGO_REGISTRY_TOKEN secret is configured, so it
+  # can never accidentally double-publish a manually-released version.
+  publish:
+    name: cargo publish (opt-in)
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'push' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Linux build/GUI system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config perl \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
+      - name: Publish workspace to crates.io
+        env:
+          TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "CARGO_REGISTRY_TOKEN not set — skipping publish (release was likely published manually)."
+            exit 0
+          fi
+          cargo publish --workspace --token "$TOKEN"

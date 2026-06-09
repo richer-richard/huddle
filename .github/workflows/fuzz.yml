@@ -1,0 +1,44 @@
+name: Fuzz smoke
+
+# A short fuzz smoke over the F12 cargo-fuzz targets (invite/RoomMessage/file_id
+# parsers). Weekly + on demand — not on every push (fuzzing is slow). A long
+# corpus-building campaign is out of scope here; this catches regressions that
+# make a parser trivially crash on malformed input.
+on:
+  schedule:
+    - cron: '0 6 * * 1'   # Mondays 06:00 UTC
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: 'Seconds per target'
+        default: '120'
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: cargo-fuzz smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: Build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config perl
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Run each target briefly
+        working-directory: crates/huddle-core
+        run: |
+          SECS="${{ github.event.inputs.seconds || '120' }}"
+          # The fuzz crate is a detached workspace under crates/huddle-core/fuzz.
+          targets=$(cargo fuzz list)
+          echo "Fuzz targets: $targets"
+          for t in $targets; do
+            echo "::group::fuzzing $t for ${SECS}s"
+            cargo fuzz run "$t" -- -max_total_time="$SECS" -rss_limit_mb=4096
+            echo "::endgroup::"
+          done

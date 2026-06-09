@@ -1,0 +1,17 @@
+version: 2
+updates:
+  # Rust dependencies — grouped so the heavy tree (libp2p, etc.) doesn't open a
+  # PR per crate. Security updates still come through individually.
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      patch-and-minor:
+        update-types: [minor, patch]
+  # Keep the GitHub Actions in these workflows current.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly

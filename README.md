@@ -1,5 +1,8 @@
 # Huddle
 
+[![CI](https://github.com/richer-richard/huddle/actions/workflows/ci.yml/badge.svg)](https://github.com/richer-richard/huddle/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/huddle.svg)](https://crates.io/crates/huddle)
+
 End-to-end-encrypted chat rooms over Tor — as a native desktop app
 (`huddle-gui`, egui/eframe) or a terminal UI (`huddle`). Both drive the same
 core, identity, and relay.

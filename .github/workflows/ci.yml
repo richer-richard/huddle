@@ -1,0 +1,164 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Heavy native build (libp2p + vendored OpenSSL/SQLCipher) — keep incremental
+  # off in CI for smaller, more cacheable artifacts.
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  # ---- fast, deterministic gates ----
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: rustfmt }
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: clippy }
+      - uses: Swatinem/rust-cache@v2
+      - name: Linux build/GUI system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config perl \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
+      # Gate on errors today. TODO: ratchet to `-- -D warnings` once the ~56
+      # pre-existing clippy warnings are triaged (tracked separately).
+      - run: cargo clippy --workspace --all-targets
+
+  # ---- cross-platform build + deterministic tests ----
+  test:
+    name: test ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Linux build/GUI system deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config perl \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
+      - name: Build (all targets)
+        run: cargo build --workspace --all-targets
+      # Deterministic suites only here (these never flake). The libp2p/mDNS
+      # integration tests run serially in a dedicated job below.
+      - name: Unit tests (lib)
+        run: cargo test --workspace --lib
+      - name: Hybrid DM e2e
+        run: cargo test -p huddle-core --test hybrid_dm
+      - name: Property tests
+        run: cargo test -p huddle-core --test properties
+
+  # ---- flaky-under-parallel libp2p tests: single OS, SERIAL ----
+  integration:
+    name: integration (serial)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Linux build/GUI system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config perl \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
+      # These spin up real libp2p swarms (mDNS) + a spawned huddle-server and
+      # flake under parallel port/mDNS contention; --test-threads=1 is required
+      # and authoritative (see docs / the project's test-flakiness notes).
+      - name: huddle-core integration (serial)
+        run: cargo test -p huddle-core --test integration -- --test-threads=1
+      - name: app_over_server (serial)
+        run: cargo test -p huddle-server --test app_over_server -- --test-threads=1
+
+  # ---- supply chain ----
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    # Informational until deny.toml's license allow-list is tuned against a real
+    # run (the heavy tree pulls many licenses + ring needs a clarification).
+    # Flip `continue-on-error` to false to make it a hard gate.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
+  audit:
+    name: cargo-audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  docs:
+    name: doc build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Linux build/GUI system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config perl \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
+      - run: cargo doc --workspace --no-deps --document-private-items
+
+  # ---- informational (don't block merges; surface platform/MSRV breakage) ----
+  windows:
+    name: build (windows, informational)
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # vendored OpenSSL (via SQLCipher) needs perl + nasm on MSVC.
+      - name: Install nasm
+        run: choco install nasm --no-progress -y
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace
+      - run: cargo test --workspace --lib
+
+  msrv:
+    name: MSRV 1.75 (informational)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.75.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Linux build/GUI system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config perl \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
+      - run: cargo check --workspace
