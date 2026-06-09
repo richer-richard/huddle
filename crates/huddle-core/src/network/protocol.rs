@@ -418,7 +418,8 @@ pub enum RoomMessage {
     /// signer is the original sender OR a current room owner (moderation).
     /// Last-write-wins. For encrypted rooms the replacement body rides as a
     /// fresh Megolm ciphertext in `new_ciphertext_b64` (decrypted exactly
-    /// like an `Encrypted` body); for plaintext rooms it rides as `new_body`.
+    /// like an `Encrypted` body, against the carried `session_id`); for
+    /// plaintext rooms it rides as `new_body`.
     Edit {
         sender_fingerprint: String,
         /// `client_msg_id` of the message being edited.
@@ -427,6 +428,18 @@ pub enum RoomMessage {
         /// rooms. Empty for plaintext rooms (which carry the new body in
         /// `new_body` instead).
         new_ciphertext_b64: String,
+        /// huddle 2.0 (F10): the Megolm `session_id` the editor encrypted
+        /// `new_ciphertext_b64` under, so receivers decrypt the edit against
+        /// the correct session — exactly like `Encrypted::session_id` — with
+        /// no reliance on an in-memory "last inbound session" guess (which
+        /// failed after a session rotation, after restart, from a second
+        /// device, or before any other message on the session). Empty (and
+        /// omitted on the wire) for plaintext rooms. `#[serde(default,
+        /// skip_serializing_if = "String::is_empty")]` keeps it additive: a
+        /// pre-session-id edit decodes to an empty string and is dropped
+        /// gracefully rather than mis-decrypted.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        session_id: String,
         /// Replacement plaintext body, for unencrypted rooms. `None` (and
         /// omitted on the wire) for encrypted rooms, whose new body lives in
         /// `new_ciphertext_b64`.
@@ -585,12 +598,14 @@ mod tests {
                 sender_fingerprint: "fp".into(),
                 target_msg_id: "cmid-1".into(),
                 new_ciphertext_b64: "ct2".into(),
+                session_id: "sid".into(),
                 new_body: None,
             },
             RoomMessage::Edit {
                 sender_fingerprint: "fp".into(),
                 target_msg_id: "cmid-1".into(),
                 new_ciphertext_b64: String::new(),
+                session_id: String::new(),
                 new_body: Some("edited body".into()),
             },
             RoomMessage::Delete {
@@ -669,6 +684,51 @@ mod tests {
             }
             other => panic!("expected Reaction, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn edit_missing_session_id_defaults_to_empty() {
+        // huddle 2.0.0 (F10): an `Edit` minted before `session_id` was added
+        // to the wire must decode to an empty `session_id` (graceful drop on
+        // the receive side) rather than fail to parse.
+        let json = serde_json::json!({
+            "Edit": {
+                "sender_fingerprint": "fp",
+                "target_msg_id": "cmid-1",
+                "new_ciphertext_b64": "ct2",
+            }
+        });
+        let back: RoomMessage = serde_json::from_value(json).unwrap();
+        match back {
+            RoomMessage::Edit { session_id, .. } => assert_eq!(session_id, ""),
+            other => panic!("expected Edit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn edit_empty_session_id_omitted_on_wire() {
+        // A plaintext-room edit has no session; `skip_serializing_if` keeps
+        // those wire bytes free of an empty `session_id`. The encrypted-room
+        // edit, by contrast, always carries one.
+        let plain = RoomMessage::Edit {
+            sender_fingerprint: "fp".into(),
+            target_msg_id: "cmid-1".into(),
+            new_ciphertext_b64: String::new(),
+            session_id: String::new(),
+            new_body: Some("edited".into()),
+        };
+        let v = serde_json::to_value(&plain).unwrap();
+        assert!(v["Edit"].get("session_id").is_none());
+
+        let enc = RoomMessage::Edit {
+            sender_fingerprint: "fp".into(),
+            target_msg_id: "cmid-1".into(),
+            new_ciphertext_b64: "ct2".into(),
+            session_id: "sid".into(),
+            new_body: None,
+        };
+        let v = serde_json::to_value(&enc).unwrap();
+        assert_eq!(v["Edit"]["session_id"], "sid");
     }
 
     #[test]

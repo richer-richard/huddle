@@ -400,14 +400,6 @@ pub struct AppHandle {
     /// Phase G: active SAS verifications. Keyed by tx_id (the random
     /// 16-byte salt picked by the initiator + base64'd).
     sas_flows: Arc<Mutex<HashMap<String, SasFlow>>>,
-    /// huddle 2.0.0 (F10): last Megolm `session_id` we successfully decrypted a
-    /// message under, keyed by `(room_id, sender_fingerprint)`. An inbound
-    /// `Edit` in an encrypted room carries a fresh ciphertext but no session id
-    /// (the wire `Edit` variant has none), so we decrypt it against the
-    /// sender's most-recently-seen session — which is exactly the outbound
-    /// session they edit under. Recorded on every successful `Encrypted`
-    /// decrypt; in-memory only.
-    last_inbound_session: Arc<Mutex<HashMap<(String, String), String>>>,
     /// Phase F: ephemeral X25519 secrets the joiner is holding while
     /// they wait for the owner's `CodeJoinResponse`. Keyed by
     /// `(room_id, joiner_fp)` so multiple joiners in the same room can
@@ -790,7 +782,6 @@ impl AppHandle {
             db,
             session_persist_key: Arc::new(Mutex::new(session_persist_key)),
             sas_flows: Arc::new(Mutex::new(HashMap::new())),
-            last_inbound_session: Arc::new(Mutex::new(HashMap::new())),
             pending_code_secrets: Arc::new(Mutex::new(HashMap::new())),
             pending_invite_dials: Arc::new(Mutex::new(HashMap::new())),
             nat_reachable_addrs: Arc::new(Mutex::new(HashSet::new())),
@@ -2296,7 +2287,7 @@ impl AppHandle {
             .active_room_info(room_id)
             .map(|r| r.encrypted)
             .unwrap_or(false);
-        let (new_ciphertext_b64, new_body_field) = if encrypted {
+        let (new_ciphertext_b64, session_id, new_body_field) = if encrypted {
             let mut rooms = self.active_rooms.lock().unwrap();
             let room = rooms
                 .get_mut(room_id)
@@ -2305,15 +2296,19 @@ impl AppHandle {
                 .crypto
                 .as_mut()
                 .ok_or_else(|| HuddleError::Session("encrypted room missing crypto".into()))?;
-            let (_session_id, ct) = crypto.encrypt(new_body.as_bytes())?;
-            (B64.encode(&ct), None)
+            // huddle 2.0.0 (F10): carry the exact session we encrypt under so the
+            // receiver decrypts the edit like an `Encrypted` body — no in-memory
+            // "last inbound session" guess (which broke across rotation/restart).
+            let (session_id, ct) = crypto.encrypt(new_body.as_bytes())?;
+            (B64.encode(&ct), session_id, None)
         } else {
-            (String::new(), Some(new_body.to_string()))
+            (String::new(), String::new(), Some(new_body.to_string()))
         };
         let msg = RoomMessage::Edit {
             sender_fingerprint: our_fp.clone(),
             target_msg_id: target_msg_id.to_string(),
             new_ciphertext_b64,
+            session_id,
             new_body: new_body_field,
         };
         let env = crate::crypto::sign_message(&self.identity, &msg)?;
@@ -4730,15 +4725,6 @@ impl AppHandle {
                     };
                     crypto.decrypt(&sender_fingerprint, &session_id, &ct_bytes)
                 };
-                // huddle 2.0.0 (F10): remember the session we just decoded this
-                // sender under, so a later `Edit` (which carries a fresh
-                // ciphertext but no session id) can be decrypted against it.
-                if plaintext.is_ok() {
-                    self.last_inbound_session.lock().unwrap().insert(
-                        (room_id.to_string(), sender_fingerprint.clone()),
-                        session_id.clone(),
-                    );
-                }
                 match plaintext {
                     Ok((pt, message_index)) => {
                         // huddle 2.0.0 (F2): content-layer replay protection.
@@ -5720,13 +5706,14 @@ impl AppHandle {
             // huddle 2.0.0 (F10): edit a message body, last-write-wins. Applied
             // only when the signer is the original sender OR a current room owner
             // (moderation). For encrypted rooms the new body rides as a fresh
-            // Megolm ciphertext decrypted against the sender's most-recent session
-            // (the wire `Edit` has no session id); for plaintext rooms it rides as
-            // `new_body`.
+            // Megolm ciphertext decrypted against the session the editor carries
+            // in `session_id` (exactly like `Encrypted`); for plaintext rooms it
+            // rides as `new_body`.
             RoomMessage::Edit {
                 sender_fingerprint,
                 target_msg_id,
                 new_ciphertext_b64,
+                session_id,
                 new_body,
             } => {
                 if sender_fingerprint == our_fp {
@@ -5761,7 +5748,11 @@ impl AppHandle {
                     Some(b) => b,
                     None => {
                         // Encrypted room: decrypt the fresh ciphertext against the
-                        // sender's last-seen session.
+                        // session the editor carried in `session_id` — exactly like
+                        // an `Encrypted` body. No in-memory "last inbound session"
+                        // cache, so this still works after a Megolm rotation, across
+                        // a restart, from a second device, or when the edit is the
+                        // first message we see on that session.
                         let ct = match B64.decode(&new_ciphertext_b64) {
                             Ok(c) => c,
                             Err(e) => {
@@ -5769,19 +5760,13 @@ impl AppHandle {
                                 return;
                             }
                         };
-                        let session_id = match self
-                            .last_inbound_session
-                            .lock()
-                            .unwrap()
-                            .get(&(room_id.to_string(), sender_fingerprint.clone()))
-                            .cloned()
-                        {
-                            Some(s) => s,
-                            None => {
-                                debug!(%room_id, %sender_fingerprint, "Edit: no known session for sender; dropping");
-                                return;
-                            }
-                        };
+                        if session_id.is_empty() {
+                            // A pre-session-id edit (e.g. an old 2.0.0-dev peer):
+                            // we can't know which session it was encrypted under,
+                            // so drop it gracefully rather than guess.
+                            debug!(%room_id, %sender_fingerprint, "Edit: missing session_id; dropping");
+                            return;
+                        }
                         let dec = {
                             let mut rooms = self.active_rooms.lock().unwrap();
                             let room = match rooms.get_mut(room_id) {
