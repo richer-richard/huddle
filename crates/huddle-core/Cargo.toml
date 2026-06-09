@@ -81,6 +81,10 @@ ml-kem = { version = "0.3.2", features = ["zeroize"] }
 # secret, and the master-passphrase-derived DB key — anywhere a secret
 # byte slice would otherwise linger on the heap until the next alloc.
 zeroize = { version = "1", features = ["derive"] }
+# huddle 2.0: BIP39 mnemonic export/import of the Ed25519 identity seed (F6).
+# Used only to render the 32-byte seed as a 24-word checksummed phrase and back;
+# we do NOT use its HD-wallet seed-stretching.
+bip39 = "2"
 # huddle 1.0: in-process Tor (Arti) for the `onion-arti` door. Optional;
 # only compiled under `--features arti`. rustls matches our existing TLS
 # stack; onion-service-client lets the client dial `.onion` services.
@@ -98,3 +102,5 @@ tor-rtcompat = { version = "0.42", optional = true, default-features = false, fe
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tempfile = "3"
+# huddle 2.0: property-based tests for the pure decision logic (F12).
+proptest = "1"
