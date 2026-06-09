@@ -1,11 +1,11 @@
 [package]
 name = "huddle-core"
-version = "1.3.4"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "Protocol, networking, crypto, and storage layer for huddle — a decentralized terminal chat app."
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/richer-richard/huddle"
-homepage = "https://github.com/richer-richard/huddle"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 readme = "README.md"
 keywords = ["chat", "p2p", "libp2p", "mdns", "encryption"]
 categories = ["network-programming", "cryptography"]

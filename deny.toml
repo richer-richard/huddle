@@ -1,0 +1,67 @@
+# cargo-deny configuration for huddle (2.0.0+).
+#
+# Run `cargo deny check` to audit the dependency tree for security advisories,
+# disallowed/unknown licenses, banned crates, and untrusted sources. huddle
+# pulls a heavy tree (libp2p, vodozemac, the RustCrypto post-quantum crates,
+# rustls/ring, vendored OpenSSL via SQLCipher), so a standing supply-chain gate
+# is worthwhile. Install once with `cargo install cargo-deny`.
+
+[graph]
+# Check the platforms huddle actually ships on.
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-apple-darwin" },
+    { triple = "x86_64-apple-darwin" },
+    { triple = "x86_64-pc-windows-msvc" },
+]
+all-features = false
+
+[advisories]
+# RustSec advisory database. Deny anything with a live advisory or a yanked
+# release; unmaintained/unsound default to warn so they surface without
+# breaking the build on a transitive dep we can't immediately replace.
+version = 2
+yanked = "deny"
+ignore = []
+
+[licenses]
+version = 2
+# huddle is MIT OR Apache-2.0; only accept permissive / weak-copyleft licenses
+# compatible with redistribution. Add to this list (with justification) if a new
+# dependency legitimately needs another permissive license.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "MPL-2.0",
+    "CC0-1.0",
+    "OpenSSL",
+    "BSL-1.0",
+]
+confidence-threshold = 0.8
+# The vendored OpenSSL (via SQLCipher) carries the OpenSSL+SSLeay license combo.
+[[licenses.clarify]]
+crate = "ring"
+expression = "MIT AND ISC AND OpenSSL"
+license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
+
+[bans]
+# A single wildcard or git-pinned dep is a supply-chain smell. Multiple versions
+# of the same crate is common in a big tree (libp2p), so only warn there.
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true       # path deps inside the workspace are fine
+highlight = "all"
+
+[sources]
+# Only crates.io and the explicitly-allowed git remotes are trusted.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

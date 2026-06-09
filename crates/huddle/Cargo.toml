@@ -1,11 +1,11 @@
 [package]
 name = "huddle"
-version = "1.3.4"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "Terminal-native chat over a self-hosted Tor onion relay (opt-in LAN mDNS / direct dial), all Megolm end-to-end encrypted."
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/richer-richard/huddle"
-homepage = "https://github.com/richer-richard/huddle"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 readme = "README.md"
 keywords = ["chat", "tui", "tor", "onion", "encryption"]
 categories = ["command-line-utilities", "network-programming"]
@@ -20,7 +20,7 @@ default = []
 arti = ["huddle-core/arti"]
 
 [dependencies]
-huddle-core = { path = "../huddle-core", version = "1.3.4" }
+huddle-core = { workspace = true }
 libp2p = { version = "0.56", features = ["ed25519"] }
 ratatui = "0.30"
 crossterm = "0.29"
