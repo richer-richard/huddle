@@ -365,8 +365,10 @@ privacy" goal huddle's built around.
 Both peers select each other in the Verify modal (`^V`), one presses
 `s` to start. Each generates an ephemeral X25519 keypair, exchanges
 pubkeys via signed envelopes, and derives a shared secret via ECDH.
-HKDF produces a Matrix MSC 2241-aligned 7-symbol + three-4-digit-group
-decimal code. The TUI shows the symbols as their **English words**
+HKDF produces a 7-symbol + three-4-digit-group decimal code. The decimal
+follows the Matrix MSC 2241 *shape*, but the 7-symbol table is huddle's
+own 49-entry subset and does **not** interoperate with Matrix SAS. The
+TUI shows the symbols as their **English words**
 (dog, cat, lion, … — emoji-free) plus the decimal; both peers compare
 OOB (call/SMS/in-person) and press
 `m` to match. A MITM substituting an ephemeral key gets a different
@@ -638,8 +640,10 @@ native dialog for a path-entry box.
 - Verified-only inbound mode trusts SAS-verified + previously-trusted
   fingerprints. Don't enable it before you've verified at least one
   peer you can re-bootstrap from.
-- The SAS emoji table follows Matrix MSC 2241 for future cross-client
-  compatibility but is not yet interop-tested against any other client.
+- The SAS symbol table is huddle-internal (a 49-entry subset derived by
+  rejection sampling) and does **not** interoperate with Matrix SAS — only
+  the decimal code follows the MSC 2241 shape, so SAS works huddle↔huddle
+  only (both ends on a compatible huddle version).
 - DM end-to-end encryption (huddle 0.7.1) re-derives the room wrap key
   from both peers' long-term Ed25519 identity keys via X25519 ECDH —
   it lacks forward secrecy at the room-key layer. A future identity-

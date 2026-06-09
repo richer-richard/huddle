@@ -85,7 +85,8 @@ own careful review.
   fingerprint is *re-derived from the signing key*, nobody can later
   claim an existing fingerprint with a different key, and a username
   cannot be spoofed by stuffing a string into a packet.
-- **SAS verification** (Matrix MSC 2241-aligned). Both peers run a
+- **SAS verification** (huddle-internal symbol table; not Matrix-interoperable
+  — see "Known limitations"). Both peers run a
   short-authentication-string exchange: each generates an ephemeral
   X25519 keypair, exchanges pubkeys inside signed envelopes, performs
   ECDH, and derives a 7-word + decimal code via HKDF with rejection
@@ -171,8 +172,11 @@ own careful review.
   `HKDF(salt = "huddle-hybrid-kem-v1"; ikm = ss_x25519 ‖ ss_mlkem; info = kem_ct ‖ room_id)`.
   Because both secrets feed the same KDF as input keying material, the output is
   a secure key if **either** primitive is unbroken, and it is never weaker than
-  the previous classical-only key. This is the construction Signal standardized
-  as PQXDH, scoped to huddle's static DM model.
+  the previous classical-only key. This follows the same hybrid-KEM *principle*
+  as Signal's PQXDH — a classical and a post-quantum secret mixed through one
+  KDF so the result is secure if either holds — but it is **not PQXDH itself**:
+  huddle's DM exchange is static and non-interactive and uses ML-KEM-768,
+  whereas PQXDH uses ephemeral one-time prekeys and ML-KEM-1024.
 - **What this defends: "harvest now, decrypt later".** A well-resourced
   adversary can record E2E ciphertext today and decrypt it years later once a
   cryptographically-relevant quantum computer can break X25519 (via Shor's
@@ -284,8 +288,12 @@ These are honest, deliberate tradeoffs — not oversights:
 - **Settings apply on next launch.** Several network-affecting toggles
   (LAN mDNS on/off, transport selection) take effect on the next launch
   rather than mid-session, to avoid a costly live behaviour rebuild.
-- **SAS table is not yet interop-tested** against other MSC 2241 clients;
-  both ends must run a compatible huddle version.
+- **SAS uses a huddle-internal symbol table — not Matrix-interoperable.**
+  The decimal code follows the MSC 2241 *shape*, but the 7-symbol table is
+  huddle's own 49-entry subset derived by rejection sampling, so it does
+  **not** interoperate with Matrix SAS (canonical MSC 2241 indexes a
+  64-entry table directly under its own info string). Both ends must run a
+  compatible huddle version.
 
 ## Reporting a vulnerability
 
