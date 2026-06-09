@@ -2434,17 +2434,29 @@ impl AppHandle {
     /// Change the master passphrase, re-encrypting everything at rest.
     ///
     /// Verifies `current` against the live persist key (constant-time), derives
-    /// a fresh random salt + new master key + new Megolm persist subkey,
-    /// re-encrypts every stored Megolm session pickle under the new subkey,
-    /// `PRAGMA rekey`s the SQLCipher database to the new master key, commits the
-    /// new salt, swaps the in-memory persist key, and reloads the active rooms'
-    /// `RoomCrypto`s so they continue under the new key. Emits
+    /// the new master key + Megolm persist subkey from the new passphrase
+    /// against the **existing** salt, re-encrypts every stored Megolm session
+    /// pickle under the new subkey, `PRAGMA rekey`s the SQLCipher database to the
+    /// new master key, swaps the in-memory persist key, and reloads the active
+    /// rooms' `RoomCrypto`s so they continue under the new key. Emits
     /// [`AppEvent::PassphraseChanged`] on success.
     ///
-    /// Ordering is load-bearing: the salt is rotated ONLY after the session
-    /// re-persist and DB rekey have committed, so any earlier failure leaves the
-    /// old salt on disk and the next launch recovers with the old passphrase
-    /// (the F5 rollback guarantee).
+    /// The salt is **never** rotated on a passphrase change (F5 CRITICAL fix).
+    /// Argon2id over the same salt with a different passphrase already yields a
+    /// different key, so a new salt buys nothing — but writing one would open an
+    /// unrecoverable window: if the salt write failed *after* `PRAGMA rekey`
+    /// committed, the on-disk salt would still derive the OLD key while the DB
+    /// is now encrypted under the NEW one, permanently bricking the database.
+    /// Keeping the salt fixed removes that failure window entirely; the only
+    /// remaining commit point is the atomic `PRAGMA rekey` itself, so an aborted
+    /// change always recovers with the old passphrase on the next launch.
+    ///
+    /// Concurrency (F5 HIGH fix): steps 3-6 run while the `active_rooms` lock is
+    /// held, quiescing the message pipeline. Every Megolm persist goes through a
+    /// `RoomCrypto` living inside `active_rooms`, so holding the guard for the
+    /// whole rotation guarantees no concurrent decrypt/encrypt advances a session
+    /// and writes it back under the old key while we re-encrypt the pickles —
+    /// which would otherwise be silently clobbered with stale pre-advance state.
     pub async fn change_master_passphrase(&self, current: &str, new: &str) -> Result<()> {
         if !self.has_master_passphrase() {
             return Err(HuddleError::Other(
@@ -2464,25 +2476,39 @@ impl AppHandle {
         if !ct_eq_32(&cur_subkey, &old_persist) {
             return Err(HuddleError::Other("incorrect current passphrase".into()));
         }
-        // 2. Derive a new salt + master key + persist subkey.
-        let new_salt = storage::keychain::generate_new_salt()?;
-        let new_master = storage::keychain::derive_master_key(new, &new_salt)?;
+        // 2. Derive the new master key + persist subkey from the new passphrase
+        //    against the EXISTING salt — we never rotate `keychain.salt` (see the
+        //    doc comment): a different passphrase already yields a different key,
+        //    and not writing a new salt removes the post-rekey salt-write failure
+        //    window that could otherwise brick the database.
+        let new_master = storage::keychain::derive_master_key(new, &salt)?;
         let new_persist = storage::keychain::derive_subkey(&new_master, b"megolm-persist");
-        // 3. Re-encrypt all Megolm session pickles old → new persist key, so they
-        //    survive the master-key rekey AND decrypt under the new persist key.
-        self.reencrypt_megolm_sessions(&old_persist, &new_persist)?;
-        // 4. PRAGMA rekey the SQLCipher DB (atomic, sentinel-verified).
+        // 3-6. Hold `active_rooms` for the whole rotation so no concurrent
+        //    decrypt/encrypt can advance a Megolm session and persist it under
+        //    the OLD key mid-rekey (the F5 HIGH race). Every crypto persist path
+        //    runs through a `RoomCrypto` inside this map, so the guard quiesces
+        //    them all. Nothing in the section `.await`s, so holding the std
+        //    Mutex across it is sound, and the lock order (active_rooms → db)
+        //    matches every message handler — no deadlock.
         {
-            let conn = self.db.lock().unwrap();
-            storage::rekey_db(&conn, &new_master)?;
+            let mut rooms = self.active_rooms.lock().unwrap();
+            // 3. Re-encrypt all Megolm session pickles old → new persist key, so
+            //    they survive the master-key rekey AND decrypt under the new key.
+            self.reencrypt_megolm_sessions(&old_persist, &new_persist)?;
+            // 4. PRAGMA rekey the SQLCipher DB (atomic, sentinel-verified). This
+            //    is now the single commit point of the whole rotation.
+            {
+                let conn = self.db.lock().unwrap();
+                storage::rekey_db(&conn, &new_master)?;
+            }
+            // 5. Swap the in-memory persist key and 6. reload the active rooms'
+            //    cryptos under it — still inside the quiesce window so disk and
+            //    in-memory session state stay consistent.
+            *self.session_persist_key.lock().unwrap() = new_persist;
+            self.reload_active_room_cryptos_locked(&mut rooms, &new_persist);
         }
-        // 5. Commit the new salt — only now that everything is under the new keys.
-        storage::keychain::rotate_salt(&new_salt)?;
-        // 6. Swap the in-memory persist key and reload active rooms under it.
-        *self.session_persist_key.lock().unwrap() = new_persist;
-        self.reload_active_room_cryptos(&new_persist);
         let _ = self.app_event_tx.send(AppEvent::PassphraseChanged);
-        info!("master passphrase changed and database re-keyed");
+        info!("master passphrase changed and database re-keyed (salt unchanged)");
         Ok(())
     }
 
@@ -2538,9 +2564,16 @@ impl AppHandle {
     /// `RoomCrypto` from the (now new-key-encrypted) pickles so in-memory
     /// sessions keep persisting under the new key. Lossless — every session is
     /// already on disk.
-    fn reload_active_room_cryptos(&self, new_key: &[u8; 32]) {
+    ///
+    /// Takes the already-held `active_rooms` guard rather than re-locking,
+    /// because `change_master_passphrase` holds it across the whole rotation to
+    /// quiesce the message pipeline (the std Mutex is not reentrant).
+    fn reload_active_room_cryptos_locked(
+        &self,
+        rooms: &mut HashMap<String, ActiveRoom>,
+        new_key: &[u8; 32],
+    ) {
         let our_fp = self.identity.fingerprint().to_string();
-        let mut rooms = self.active_rooms.lock().unwrap();
         for room in rooms.values_mut() {
             if !room.info.encrypted {
                 continue;

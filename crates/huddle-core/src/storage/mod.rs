@@ -53,16 +53,18 @@ pub fn open_db_in_memory() -> Result<Db> {
 ///
 /// `PRAGMA rekey` rewrites every page with the new key as one atomic
 /// SQLCipher operation; we then run the same sentinel query as `open_db` to
-/// prove the connection now decrypts under the new key before the caller
-/// commits the rest of the rotation (re-persisting the Megolm subkey and
-/// writing the new salt via `keychain::rotate_salt`). A botched rekey thus
+/// prove the connection now decrypts under the new key. The caller re-encrypts
+/// the Megolm session pickles under the new persist subkey *before* this call,
+/// so once the rekey commits the whole rotation is durable. A botched rekey
 /// surfaces here as a clean domain error rather than as a cryptic failure on
 /// the next unrelated statement.
 ///
 /// Rollback safety: SQLCipher's rekey is all-or-nothing, so a failure here
-/// leaves the database readable under the *old* key. Because the caller only
-/// rotates `keychain.salt` after this returns `Ok`, an aborted change always
-/// recovers to the previous passphrase on the next launch.
+/// leaves the database readable under the *old* key. The F5 change flow keeps
+/// `keychain.salt` fixed (it never rotates the salt), so the new master key is
+/// re-derived purely from the new passphrase — this `PRAGMA rekey` is the sole
+/// commit point, and an aborted change always recovers to the previous
+/// passphrase on the next launch with no salt-write window to brick the DB.
 pub fn rekey_db(conn: &Connection, new_key: &[u8; 32]) -> Result<()> {
     let pragma = format!("PRAGMA rekey = \"x'{}'\";", hex::encode(new_key));
     conn.execute_batch(&pragma)?;
@@ -144,5 +146,50 @@ mod tests {
         let conn = db.lock().unwrap();
         let v: String = conn.query_row("SELECT v FROM t", [], |r| r.get(0)).unwrap();
         assert_eq!(v, "hi");
+    }
+
+    // huddle 2.0.0 (F5 CRITICAL): a passphrase change re-derives the new master
+    // key from the new passphrase against the SAME salt, then rekeys — it must
+    // NOT rotate the salt. This proves the salt-free rotation round-trips end to
+    // end: the new passphrase opens the DB, the old no longer does, and the row
+    // survives. Because no salt is written, there is no post-rekey salt-write
+    // failure window that could leave the on-disk salt deriving the old key while
+    // the DB is encrypted under the new one (the bug this fix removes).
+    #[test]
+    fn passphrase_change_rekeys_without_rotating_the_salt() {
+        use keychain::{derive_master_key, derive_subkey};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rekey-fixed-salt.db");
+        // One fixed salt for both derivations — exactly what the change flow does.
+        let salt = [0x5au8; keychain::KEYCHAIN_SALT_LEN];
+
+        let old_master = derive_master_key("old-pass", &salt).unwrap();
+        let new_master = derive_master_key("new-pass", &salt).unwrap();
+        // Same salt + a different passphrase already yields a different key — the
+        // whole premise for never needing to rotate the salt.
+        assert_ne!(old_master, new_master);
+        // ...and a different Megolm persist subkey, so the pickles genuinely must
+        // be re-encrypted across the change (the work the held lock protects).
+        assert_ne!(
+            derive_subkey(&old_master, b"megolm-persist"),
+            derive_subkey(&new_master, b"megolm-persist")
+        );
+
+        {
+            let db = open_db(&path, Some(&old_master)).unwrap();
+            let conn = db.lock().unwrap();
+            conn.execute_batch("CREATE TABLE t (v TEXT); INSERT INTO t VALUES ('keep');")
+                .unwrap();
+            rekey_db(&conn, &new_master).unwrap();
+        }
+
+        // The old passphrase's key can no longer open it; the new one can and the
+        // row survived — all without ever touching the salt on disk.
+        assert!(open_db(&path, Some(&old_master)).is_err());
+        let db = open_db(&path, Some(&new_master)).unwrap();
+        let conn = db.lock().unwrap();
+        let v: String = conn.query_row("SELECT v FROM t", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, "keep");
     }
 }

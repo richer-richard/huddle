@@ -106,14 +106,18 @@ fn generate_and_persist_salt(path: &Path) -> Result<[u8; KEYCHAIN_SALT_LEN]> {
 
 /// Mint a fresh random 16-byte salt **without** writing it anywhere.
 ///
-/// huddle 2.0.0 (F5): factored out of `generate_and_persist_salt` so the
-/// master-passphrase change flow can derive a brand-new master key from a new
-/// salt *before* anything is committed to disk. The salt is only written via
-/// `rotate_salt` once `PRAGMA rekey` and the Megolm re-persistence have
-/// succeeded — generating and persisting are deliberately separate so a
-/// half-finished rotation never leaves a salt on disk that no longer matches
-/// the database's key. Returns `Result` only to compose with the persisting
-/// callers; the RNG draw itself cannot fail.
+/// Factored out of `generate_and_persist_salt` so minting and persisting are
+/// separable and independently unit-testable. Returns `Result` only to compose
+/// with the persisting callers; the RNG draw itself cannot fail.
+///
+/// huddle 2.0.0 (F5): the master-passphrase change flow deliberately does NOT
+/// call this. It re-derives the new master key from the new passphrase against
+/// the *existing* salt — Argon2id with the same salt but a different passphrase
+/// already yields a different key, so a new salt buys nothing. Rotating the salt
+/// there would instead open an unrecoverable window: if the salt write failed
+/// *after* `PRAGMA rekey` committed, the on-disk salt would still derive the OLD
+/// key while the DB is now encrypted under the NEW one, bricking the database.
+/// This helper is therefore only used for first-launch salt creation.
 pub fn generate_new_salt() -> Result<[u8; KEYCHAIN_SALT_LEN]> {
     let mut salt = [0u8; KEYCHAIN_SALT_LEN];
     rand::thread_rng().fill_bytes(&mut salt);
@@ -145,17 +149,13 @@ pub fn persist_salt(path: &Path, salt: &[u8; KEYCHAIN_SALT_LEN]) -> Result<()> {
     Ok(())
 }
 
-/// Overwrite the on-disk keychain salt with `new_salt` after a successful
-/// master-passphrase change (huddle 2.0.0, F5).
-///
-/// Ordering is load-bearing: callers MUST invoke this only once `PRAGMA rekey`
-/// and the Megolm re-persistence under the new subkey have committed. If any
-/// earlier step fails the salt is left untouched, so the next launch
-/// re-derives the *old* master key and recovers the database — the rollback
-/// guarantee the F5 design relies on. Atomic, via `persist_salt`.
-pub fn rotate_salt(new_salt: &[u8; KEYCHAIN_SALT_LEN]) -> Result<()> {
-    persist_salt(&keychain_salt_path(), new_salt)
-}
+// huddle 2.0.0 (F5): a `rotate_salt` helper used to live here, called by the
+// master-passphrase change flow to overwrite `keychain.salt` after a re-key. It
+// was removed: rotating the salt on a passphrase change is unnecessary (Argon2id
+// over the same salt with a different passphrase already derives a different
+// key) and actively dangerous — a salt write that failed after `PRAGMA rekey`
+// committed would brick the database. The change flow now keeps the salt fixed,
+// so there is no salt write to fail. See `app::change_master_passphrase`.
 
 /// Derive a 32-byte master key from passphrase + salt via Argon2id.
 /// Parameters follow the strong RFC 9106 / OWASP profile (64 MiB memory,
