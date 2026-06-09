@@ -369,6 +369,12 @@ pub const DEFAULT_TOR_SOCKS: &str = "127.0.0.1:9050";
 pub struct AppHandle {
     identity: Arc<Identity>,
     network: NetworkHandle,
+    /// huddle 2.0.0: set true by `shutdown()` so the relay-connection loop
+    /// (`spawn_server_connection`) stops connecting/reconnecting and exits —
+    /// otherwise it holds an `AppHandle` clone and keeps a live relay socket
+    /// open after shutdown (a leak, and across an in-process restart it lets a
+    /// stale instance race the new one on the shared on-disk DB).
+    shutting_down: Arc<std::sync::atomic::AtomicBool>,
     mode: NetworkMode,
     active_rooms: Arc<Mutex<HashMap<String, ActiveRoom>>>,
     discovered_rooms: Arc<Mutex<HashMap<String, DiscoveredRoom>>>,
@@ -774,6 +780,7 @@ impl AppHandle {
         let handle = Self {
             identity,
             network,
+            shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             mode,
             active_rooms,
             discovered_rooms,
@@ -2482,6 +2489,13 @@ impl AppHandle {
     }
 
     pub async fn shutdown(&self) {
+        // huddle 2.0.0: stop the relay-connection loop (it holds a clone of us
+        // and keeps a live socket open otherwise) BEFORE tearing down libp2p.
+        // The flag halts reconnects; detaching the server drops the client so
+        // its reader closes and the loop's `rx.recv()` returns None and exits.
+        self.shutting_down
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.network.detach_server();
         self.network.shutdown().await;
     }
 
@@ -3404,6 +3418,14 @@ impl AppHandle {
         tokio::spawn(async move {
             let mut backoff = 1u64;
             loop {
+                // huddle 2.0.0: once shutdown() trips the flag, stop reconnecting
+                // and let this task end (it holds the only live relay socket and
+                // an AppHandle clone — leaving it running leaks both and, across
+                // an in-process restart, races the new instance on the shared DB).
+                if handle.shutting_down.load(std::sync::atomic::Ordering::SeqCst) {
+                    handle.network.detach_server();
+                    return;
+                }
                 // huddle 1.0: the Hello room set is every active chat room
                 // PLUS our aux subscriptions (the contact inbox), so the relay
                 // re-registers inbox membership on every reconnect and flushes
@@ -3515,6 +3537,12 @@ impl AppHandle {
                     warn!("relay connection closed; reconnecting");
                 } else {
                     warn!("all relay doors failed; will retry");
+                }
+                // huddle 2.0.0: exit promptly on shutdown rather than sleeping
+                // the backoff and looping back to reconnect.
+                if handle.shutting_down.load(std::sync::atomic::Ordering::SeqCst) {
+                    handle.network.detach_server();
+                    return;
                 }
                 tokio::time::sleep(Duration::from_secs(backoff)).await;
                 backoff = (backoff * 2).min(30);
