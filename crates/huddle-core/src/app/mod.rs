@@ -813,6 +813,15 @@ impl AppHandle {
         if let Err(e) = repo::cleanup_expired_pending_contact_requests(&handle.db, now_unix()) {
             warn!(%e, "failed to sweep expired pending contact requests");
         }
+        // huddle 2.0.0 (F2): bound the content-replay seen-set by dropping rows
+        // older than the retention window. Once-at-startup like the sweeps above
+        // keeps it off the hot receive path; the FK cascade already clears a
+        // room's rows when it's left/deleted, so this only reaps long-lived
+        // sessions in still-active rooms.
+        let replay_cutoff = now_unix().saturating_sub(repo::CONTENT_REPLAY_RETENTION_SECS);
+        if let Err(e) = repo::gc_content_replay_seen(&handle.db, replay_cutoff) {
+            warn!(%e, "failed to sweep content-replay seen-set");
+        }
 
         Ok(handle)
     }
@@ -4026,9 +4035,50 @@ impl AppHandle {
                     crypto.decrypt(&sender_fingerprint, &session_id, &ct_bytes)
                 };
                 match plaintext {
-                    Ok(pt) => {
+                    Ok((pt, message_index)) => {
+                        // huddle 2.0.0 (F2): content-layer replay protection.
+                        // The Megolm message_index uniquely names this ciphertext
+                        // within (room, sender, session), so a durable seen-set
+                        // lets us silently drop a wire-level replay of an
+                        // already-processed content message — even across
+                        // restarts or a cross-transport re-broadcast. ONLY
+                        // content is deduped; control arms above/below skip this
+                        // so legitimate recurring re-announces keep working.
+                        match repo::check_content_replay_seen(
+                            &self.db,
+                            room_id,
+                            &sender_fingerprint,
+                            &session_id,
+                            message_index,
+                        ) {
+                            Ok(true) => {
+                                debug!(
+                                    %sender_fingerprint, %room_id, %session_id, message_index,
+                                    "dropping replayed Encrypted content"
+                                );
+                                return;
+                            }
+                            Ok(false) => {}
+                            Err(e) => {
+                                // Fail OPEN on a seen-set query error: a rare
+                                // duplicate is preferable to silently dropping a
+                                // genuine message because the DB hiccuped.
+                                warn!(%e, "content replay check failed; processing message");
+                            }
+                        }
                         let body = String::from_utf8_lossy(&pt).to_string();
                         let sent_at = now_unix();
+                        // Record BEFORE the insert so the seen-set is authoritative
+                        // even if a later step fails; INSERT OR IGNORE on the
+                        // composite PK keeps this idempotent under any race.
+                        let _ = repo::record_content_seen(
+                            &self.db,
+                            room_id,
+                            &sender_fingerprint,
+                            &session_id,
+                            message_index,
+                            sent_at,
+                        );
                         let _ = repo::insert_room_message(
                             &self.db,
                             room_id,

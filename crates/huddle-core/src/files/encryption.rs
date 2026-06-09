@@ -80,7 +80,11 @@ pub fn decrypt_file(
     let wrapped = B64
         .decode(&meta.wrapped_key_b64)
         .map_err(|e| HuddleError::Other(format!("bad wrapped_key_b64: {e}")))?;
-    let file_key_bytes = room_crypto.decrypt(sender_fingerprint, &meta.megolm_session_id, &wrapped)?;
+    // huddle 2.0.0 (F2): decrypt now also yields the Megolm message_index; the
+    // file-key unwrap doesn't dedup (the attachment lifecycle is keyed by
+    // file_id), so we only need the unwrapped key bytes here.
+    let (file_key_bytes, _message_index) =
+        room_crypto.decrypt(sender_fingerprint, &meta.megolm_session_id, &wrapped)?;
     if file_key_bytes.len() != 32 {
         return Err(HuddleError::Other(format!(
             "unwrapped file key is {} bytes, expected 32",

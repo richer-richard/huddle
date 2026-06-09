@@ -236,4 +236,27 @@ pub const MIGRATIONS: &[&str] = &[
     // re-announce exactly like `ed25519_pubkey`, so a later announce that omits
     // the field can't erase the pin. NULL for pre-1.3 peers and group members.
     "ALTER TABLE room_members ADD COLUMN mlkem_pubkey TEXT;",
+    // huddle 2.0.0 (F2): content-layer replay protection. A durable seen-set of
+    // (room_id, sender_fingerprint, session_id, message_index) lets us silently
+    // drop a wire-level replay of an already-processed *content* message — even
+    // across restarts or a cross-transport re-broadcast. Megolm's message_index
+    // is a monotonic ratchet position whose KDF output never repeats for a given
+    // (session, index) pair, so the tuple uniquely names one ciphertext for the
+    // lifetime of the session. ONLY content (RoomMessage::Encrypted) is recorded
+    // here — control messages (MemberAnnounce, RotateRoomKey, SasInit, …) are
+    // deliberately excluded so legitimate recurring control-plane re-broadcasts
+    // keep working. created_at is the local receive time, used by the bounded GC
+    // sweep (idx_content_replay_by_time). FK cascade clears rows when a room is
+    // left/deleted. Additive only; zero wire-format change — old peers never see
+    // this table and keep accepting replays as before.
+    "CREATE TABLE IF NOT EXISTS content_replay_seen (
+        room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+        sender_fingerprint TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        message_index INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (room_id, sender_fingerprint, session_id, message_index)
+    );
+    CREATE INDEX IF NOT EXISTS idx_content_replay_by_time
+        ON content_replay_seen(created_at);",
 ];

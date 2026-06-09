@@ -134,13 +134,21 @@ impl RoomCrypto {
         Ok((session_id, msg.to_bytes()))
     }
 
-    /// Decrypt a message from a specific sender.
+    /// Decrypt a message from a specific sender. Returns `(plaintext,
+    /// message_index)`.
+    ///
+    /// huddle 2.0.0 (F2): the Megolm `message_index` is surfaced alongside the
+    /// plaintext so the app layer can dedup replayed *content* against the
+    /// durable `content_replay_seen` set. It is a monotonic ratchet position
+    /// within the session whose KDF output never repeats for a given (session,
+    /// index) pair, so the tuple (room, sender, session, index) uniquely names
+    /// one ciphertext — see `app::mod::handle_room_message`'s `Encrypted` arm.
     pub fn decrypt(
         &mut self,
         sender_fingerprint: &str,
         session_id: &str,
         ciphertext: &[u8],
-    ) -> Result<Vec<u8>> {
+    ) -> Result<(Vec<u8>, u32)> {
         let key = (sender_fingerprint.to_string(), session_id.to_string());
         let session = self.inbound.get_mut(&key).ok_or_else(|| {
             HuddleError::Session(format!(
@@ -167,7 +175,7 @@ impl RoomCrypto {
             },
         )?;
 
-        Ok(decrypted.plaintext)
+        Ok((decrypted.plaintext, decrypted.message_index))
     }
 
     /// Add an inbound session from another member. `session_key_b64` is the
@@ -309,8 +317,10 @@ mod tests {
             .unwrap();
 
         let (session_id, ciphertext) = alice.encrypt(b"hello group").unwrap();
-        let plaintext = bob.decrypt("alice-fp", &session_id, &ciphertext).unwrap();
+        let (plaintext, index) = bob.decrypt("alice-fp", &session_id, &ciphertext).unwrap();
         assert_eq!(plaintext, b"hello group");
+        // First message on a fresh outbound session is message_index 0.
+        assert_eq!(index, 0);
     }
 
     #[test]
@@ -332,10 +342,10 @@ mod tests {
             .unwrap();
 
         let (sid_a, ct_a) = alice.encrypt(b"from alice").unwrap();
-        assert_eq!(bob.decrypt("a-fp", &sid_a, &ct_a).unwrap(), b"from alice");
+        assert_eq!(bob.decrypt("a-fp", &sid_a, &ct_a).unwrap().0, b"from alice");
 
         let (sid_b, ct_b) = bob.encrypt(b"from bob").unwrap();
-        assert_eq!(alice.decrypt("b-fp", &sid_b, &ct_b).unwrap(), b"from bob");
+        assert_eq!(alice.decrypt("b-fp", &sid_b, &ct_b).unwrap().0, b"from bob");
     }
 
     #[test]
@@ -353,6 +363,42 @@ mod tests {
             .unwrap()
             .expect("should have outbound session");
         assert_eq!(reloaded.our_session_id(), original_session_id);
+    }
+
+    #[test]
+    fn decrypt_surfaces_monotonic_message_index() {
+        // huddle 2.0.0 (F2): the message_index returned by decrypt is the
+        // Megolm ratchet position. It starts at 0 and increments per encrypt,
+        // and — because the inbound ratchet state is persisted on every
+        // decrypt — continues from where it left off after a reload. The app
+        // layer relies on (session_id, message_index) uniquely naming one
+        // ciphertext to dedup replays.
+        let db_alice = open_db_in_memory().unwrap();
+        let db_bob = open_db_in_memory().unwrap();
+        let room_id = setup_room(&db_alice, "test", "alice-fp");
+        setup_room(&db_bob, "test", "alice-fp");
+
+        let mut alice =
+            RoomCrypto::new_for_room(db_alice.clone(), room_id.clone(), "alice-fp".into(), [0u8; 32])
+                .unwrap();
+        let mut bob =
+            RoomCrypto::new_for_room(db_bob.clone(), room_id.clone(), "bob-fp".into(), [0u8; 32]).unwrap();
+        bob.add_inbound_session("alice-fp", &alice.our_session_key_b64())
+            .unwrap();
+
+        let (sid, ct0) = alice.encrypt(b"zero").unwrap();
+        assert_eq!(bob.decrypt("alice-fp", &sid, &ct0).unwrap().1, 0);
+        let (_, ct1) = alice.encrypt(b"one").unwrap();
+        assert_eq!(bob.decrypt("alice-fp", &sid, &ct1).unwrap().1, 1);
+
+        // Reload Bob's inbound session and decrypt the next message — the
+        // ratchet (and thus message_index) continues from the persisted state.
+        drop(bob);
+        let mut bob = RoomCrypto::load(db_bob.clone(), room_id.clone(), "bob-fp".into(), [0u8; 32])
+            .unwrap()
+            .expect("bob has a persisted outbound session");
+        let (_, ct2) = alice.encrypt(b"two").unwrap();
+        assert_eq!(bob.decrypt("alice-fp", &sid, &ct2).unwrap().1, 2);
     }
 
     #[test]
@@ -377,7 +423,7 @@ mod tests {
             .add_inbound_session("bob-fp", &bob.our_session_key_b64())
             .unwrap();
         let (sid1, ct1) = bob.encrypt(b"before rotate").unwrap();
-        assert_eq!(alice.decrypt("bob-fp", &sid1, &ct1).unwrap(), b"before rotate");
+        assert_eq!(alice.decrypt("bob-fp", &sid1, &ct1).unwrap().0, b"before rotate");
 
         let old_outbound = alice.our_session_id();
 
@@ -389,7 +435,7 @@ mod tests {
         // Inbound from Bob is preserved — Alice still decrypts his next message.
         let (sid2, ct2) = bob.encrypt(b"after rotate").unwrap();
         assert_eq!(
-            alice.decrypt("bob-fp", &sid2, &ct2).unwrap(),
+            alice.decrypt("bob-fp", &sid2, &ct2).unwrap().0,
             b"after rotate",
             "rotate_outbound must NOT discard inbound sessions"
         );

@@ -631,6 +631,124 @@ pub fn load_megolm_sessions_for_room(
 }
 
 // =========================================================================
+// Content-layer replay protection (huddle 2.0.0, F2)
+//
+// A durable seen-set of (room_id, sender_fingerprint, session_id,
+// message_index) for *content* (`RoomMessage::Encrypted`) messages. Megolm's
+// message_index is a monotonic ratchet position whose KDF output never repeats
+// for a given (session, index) pair, so the tuple uniquely names one ciphertext
+// for the life of the session: once recorded, any wire-level replay of that
+// ciphertext decrypts to the same plaintext but is dropped at the app layer
+// (see `app::mod::handle_room_message`'s `Encrypted` arm). Control messages are
+// deliberately NOT recorded here, so legitimate recurring re-broadcasts
+// (rotation re-announces, key-request heals, …) keep working.
+//
+// The table is bounded by a time-based GC sweep (`gc_content_replay_seen`, run
+// once at startup like the pending-request sweeps above) — see the schema.rs
+// migration and idx_content_replay_by_time.
+// =========================================================================
+
+/// Retention window for the content-replay seen-set, in seconds (90 days).
+/// [`gc_content_replay_seen`] drops rows whose `created_at` is older than this.
+/// Generous on purpose: a replay that arrives months late is still rejected,
+/// and at a busy 100 msg/day/room the table stays in the low tens of thousands
+/// of rows — trivially indexed. Entries from rotated-out sessions (a
+/// `RotateRoomKey` mints a new session_id, making the old indices irrelevant)
+/// also age out here rather than needing their own cleanup path.
+pub const CONTENT_REPLAY_RETENTION_SECS: i64 = 90 * 24 * 60 * 60;
+
+/// True when we've already processed the content message identified by
+/// (room_id, sender_fingerprint, session_id, message_index) — i.e. this is a
+/// replay and the caller should drop it silently.
+pub fn check_content_replay_seen(
+    db: &Db,
+    room_id: &str,
+    sender_fingerprint: &str,
+    session_id: &str,
+    message_index: u32,
+) -> Result<bool> {
+    let conn = db.lock().unwrap();
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM content_replay_seen
+         WHERE room_id = ?1 AND sender_fingerprint = ?2
+           AND session_id = ?3 AND message_index = ?4",
+        params![room_id, sender_fingerprint, session_id, message_index as i64],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+/// Record that we've processed a content message. Idempotent: a duplicate
+/// insert is silently ignored via the composite PRIMARY KEY (`INSERT OR
+/// IGNORE`), so a race between the check and the insert can neither error nor
+/// double-count. `message_index` is a Megolm u32; SQLite stores it as INTEGER.
+pub fn record_content_seen(
+    db: &Db,
+    room_id: &str,
+    sender_fingerprint: &str,
+    session_id: &str,
+    message_index: u32,
+    created_at: i64,
+) -> Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "INSERT OR IGNORE INTO content_replay_seen
+            (room_id, sender_fingerprint, session_id, message_index, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            room_id,
+            sender_fingerprint,
+            session_id,
+            message_index as i64,
+            created_at
+        ],
+    )?;
+    Ok(())
+}
+
+/// Drop seen-set rows older than `cutoff_ts` (`created_at < cutoff_ts`). Called
+/// once at startup with `now - CONTENT_REPLAY_RETENTION_SECS`. Returns the
+/// number of rows pruned. Backed by idx_content_replay_by_time so the sweep is
+/// cheap even on a large table.
+pub fn gc_content_replay_seen(db: &Db, cutoff_ts: i64) -> Result<usize> {
+    let conn = db.lock().unwrap();
+    let removed = conn.execute(
+        "DELETE FROM content_replay_seen WHERE created_at < ?1",
+        params![cutoff_ts],
+    )?;
+    Ok(removed)
+}
+
+/// Min/max recorded `message_index` for a (room, sender, session), or `None`
+/// when that session has no rows yet. Exposed for advanced GC / diagnostics
+/// (e.g. index-window pruning of a very long-lived session); not used on the
+/// hot receive path.
+pub fn content_seen_index_bounds(
+    db: &Db,
+    room_id: &str,
+    sender_fingerprint: &str,
+    session_id: &str,
+) -> Result<Option<(u32, u32)>> {
+    let conn = db.lock().unwrap();
+    // COUNT/MIN/MAX always return one row; MIN/MAX are NULL on an empty set.
+    let bounds = conn.query_row(
+        "SELECT MIN(message_index), MAX(message_index) FROM content_replay_seen
+         WHERE room_id = ?1 AND sender_fingerprint = ?2 AND session_id = ?3",
+        params![room_id, sender_fingerprint, session_id],
+        |row| {
+            Ok((
+                row.get::<_, Option<i64>>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+            ))
+        },
+    )?;
+    match bounds {
+        (Some(min), Some(max)) => Ok(Some((min as u32, max as u32))),
+        _ => Ok(None),
+    }
+}
+
+// =========================================================================
 // Room messages
 // =========================================================================
 
@@ -1911,5 +2029,136 @@ mod tests {
         // "_" likewise must not match an arbitrary single character.
         let underscore = search_room_messages(&db, &room.id, "_", 10).unwrap();
         assert!(underscore.is_empty());
+    }
+
+    // ---- F2: content-layer replay protection -------------------------------
+
+    #[test]
+    fn content_replay_seen_basic_record_and_check() {
+        let db = open_db_in_memory().unwrap();
+        let room = make_room("r");
+        insert_room(&db, &room).unwrap();
+
+        // Empty table: nothing is seen.
+        assert!(!check_content_replay_seen(&db, &room.id, "alice", "sess1", 0).unwrap());
+
+        // After recording, the same tuple reads back as seen.
+        record_content_seen(&db, &room.id, "alice", "sess1", 0, 1000).unwrap();
+        assert!(check_content_replay_seen(&db, &room.id, "alice", "sess1", 0).unwrap());
+
+        // A different message_index is NOT seen.
+        assert!(!check_content_replay_seen(&db, &room.id, "alice", "sess1", 1).unwrap());
+        // A different sender / session is NOT seen either.
+        assert!(!check_content_replay_seen(&db, &room.id, "bob", "sess1", 0).unwrap());
+        assert!(!check_content_replay_seen(&db, &room.id, "alice", "sess2", 0).unwrap());
+    }
+
+    #[test]
+    fn content_replay_record_is_idempotent() {
+        let db = open_db_in_memory().unwrap();
+        let room = make_room("r");
+        insert_room(&db, &room).unwrap();
+
+        // Recording the same tuple twice must not error (INSERT OR IGNORE on
+        // the composite PK) and must leave exactly one row.
+        record_content_seen(&db, &room.id, "alice", "s", 7, 1000).unwrap();
+        record_content_seen(&db, &room.id, "alice", "s", 7, 2000).unwrap();
+        assert!(check_content_replay_seen(&db, &room.id, "alice", "s", 7).unwrap());
+
+        let conn = db.lock().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM content_replay_seen WHERE room_id = ?1",
+                params![room.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "idempotent insert must not duplicate the row");
+    }
+
+    #[test]
+    fn content_replay_is_per_room() {
+        // Same (sender, session, index) in two different rooms are tracked
+        // independently — the seen-set is keyed by room_id.
+        let db = open_db_in_memory().unwrap();
+        let room_a = make_room("a");
+        let room_b = make_room("b");
+        insert_room(&db, &room_a).unwrap();
+        insert_room(&db, &room_b).unwrap();
+
+        record_content_seen(&db, &room_a.id, "alice", "s", 0, 1000).unwrap();
+        assert!(check_content_replay_seen(&db, &room_a.id, "alice", "s", 0).unwrap());
+        // Identical tuple in room B is still fresh.
+        assert!(!check_content_replay_seen(&db, &room_b.id, "alice", "s", 0).unwrap());
+    }
+
+    #[test]
+    fn content_replay_gc_drops_only_old_rows() {
+        let db = open_db_in_memory().unwrap();
+        let room = make_room("r");
+        insert_room(&db, &room).unwrap();
+
+        // 100 indices, created_at == index, across two sessions.
+        for i in 0..100u32 {
+            record_content_seen(&db, &room.id, "alice", "old", i, i as i64).unwrap();
+            record_content_seen(&db, &room.id, "alice", "new", i, 1000 + i as i64).unwrap();
+        }
+
+        // Cut at 50: rows with created_at < 50 are deleted (only the "old"
+        // session's indices 0..49). Everything >= 50 survives.
+        let removed = gc_content_replay_seen(&db, 50).unwrap();
+        assert_eq!(removed, 50);
+
+        assert!(!check_content_replay_seen(&db, &room.id, "alice", "old", 0).unwrap());
+        assert!(!check_content_replay_seen(&db, &room.id, "alice", "old", 49).unwrap());
+        assert!(check_content_replay_seen(&db, &room.id, "alice", "old", 50).unwrap());
+        assert!(check_content_replay_seen(&db, &room.id, "alice", "new", 0).unwrap());
+    }
+
+    #[test]
+    fn content_replay_cascades_on_room_delete() {
+        // The FK cascade clears a room's seen-set when the room is deleted, so
+        // re-joining a room can't accidentally inherit a stale seen-set.
+        let db = open_db_in_memory().unwrap();
+        let room = make_room("r");
+        insert_room(&db, &room).unwrap();
+        record_content_seen(&db, &room.id, "alice", "s", 0, 1000).unwrap();
+        assert!(check_content_replay_seen(&db, &room.id, "alice", "s", 0).unwrap());
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute("DELETE FROM rooms WHERE id = ?1", params![room.id])
+                .unwrap();
+        }
+        let conn = db.lock().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM content_replay_seen WHERE room_id = ?1",
+                params![room.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "FK cascade must clear the room's seen-set");
+    }
+
+    #[test]
+    fn content_replay_index_bounds() {
+        let db = open_db_in_memory().unwrap();
+        let room = make_room("r");
+        insert_room(&db, &room).unwrap();
+
+        // Empty session: no bounds.
+        assert_eq!(
+            content_seen_index_bounds(&db, &room.id, "alice", "s").unwrap(),
+            None
+        );
+
+        record_content_seen(&db, &room.id, "alice", "s", 3, 1000).unwrap();
+        record_content_seen(&db, &room.id, "alice", "s", 9, 1001).unwrap();
+        record_content_seen(&db, &room.id, "alice", "s", 5, 1002).unwrap();
+        assert_eq!(
+            content_seen_index_bounds(&db, &room.id, "alice", "s").unwrap(),
+            Some((3, 9))
+        );
     }
 }
