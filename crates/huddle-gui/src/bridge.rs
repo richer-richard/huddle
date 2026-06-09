@@ -15,6 +15,7 @@ use huddle_core::network::NetworkMode;
 use libp2p::Multiaddr;
 use std::future::Future;
 use std::path::PathBuf;
+use zeroize::Zeroizing;
 
 /// Everything the UI drains from the worker side, in one channel.
 pub enum Inbox {
@@ -91,8 +92,9 @@ pub struct BuildParams {
     /// huddle 2.0.0 (F6): on a fresh install, restore the identity from this
     /// 24-word BIP39 seed phrase before the handle generates a random one.
     /// `None` keeps the default (generate a new identity). Ignored when a
-    /// stored identity already exists.
-    pub import_phrase: Option<String>,
+    /// stored identity already exists. Wrapped in `Zeroizing` so the crown-jewel
+    /// phrase is scrubbed once the build consumes it.
+    pub import_phrase: Option<Zeroizing<String>>,
 }
 
 /// Handed back to the UI once the handle is up and the pump is running.

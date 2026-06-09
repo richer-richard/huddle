@@ -27,13 +27,17 @@ impl Identity {
     }
 
     fn from_signing_key(signing_key: SigningKey) -> Result<Self> {
-        let secret = signing_key.to_bytes();
+        // F6: both the extracted secret and the [secret || public] scratch buffer
+        // hold the crown-jewel seed. Wrap them in `Zeroizing` so they're scrubbed
+        // when this function returns rather than left on the stack. (`public` is
+        // not secret — it's the verifying key — so it stays a bare array.)
+        let secret = Zeroizing::new(signing_key.to_bytes());
         let public = signing_key.verifying_key().to_bytes();
-        let mut combined = [0u8; 64];
-        combined[..32].copy_from_slice(&secret);
+        let mut combined = Zeroizing::new([0u8; 64]);
+        combined[..32].copy_from_slice(&*secret);
         combined[32..].copy_from_slice(&public);
 
-        let ed25519_kp = identity::ed25519::Keypair::try_from_bytes(&mut combined)
+        let ed25519_kp = identity::ed25519::Keypair::try_from_bytes(&mut *combined)
             .map_err(|e| HuddleError::Identity(e.to_string()))?;
         let libp2p_keypair = Keypair::from(ed25519_kp);
         let peer_id = PeerId::from(libp2p_keypair.public());
@@ -114,7 +118,12 @@ impl Identity {
     /// migration. Takes the seed by `Zeroizing` value so the caller's copy is
     /// scrubbed on drop once we've turned it into key state.
     pub fn from_seed(seed: Zeroizing<[u8; 32]>) -> Result<Self> {
-        Self::from_secret_bytes(*seed)
+        // Build the signing key straight from the `Zeroizing` buffer by reference
+        // (`&seed` deref-coerces to `&[u8; 32]`) so the seed is never copied into
+        // a bare array on the stack en route — `from_signing_key` then scrubs the
+        // key material it derives (F6).
+        let signing_key = SigningKey::from_bytes(&seed);
+        Self::from_signing_key(signing_key)
     }
 }
 
@@ -289,8 +298,10 @@ mod tests {
         // as the "write it down, import on a fresh install" flow does.
         let id = Identity::generate().unwrap();
         let phrase = crate::crypto::mnemonic::seed_to_phrase(&id.seed());
+        // `phrase_to_seed` now hands back a `Zeroizing<[u8; 32]>`, which feeds
+        // straight into `from_seed` with no intermediate bare-array copy.
         let seed = crate::crypto::mnemonic::phrase_to_seed(&phrase).unwrap();
-        let restored = Identity::from_seed(Zeroizing::new(seed)).unwrap();
+        let restored = Identity::from_seed(seed).unwrap();
         assert_eq!(id.fingerprint(), restored.fingerprint());
         assert_eq!(id.peer_id(), restored.peer_id());
         assert_eq!(id.mlkem_public_bytes(), restored.mlkem_public_bytes());

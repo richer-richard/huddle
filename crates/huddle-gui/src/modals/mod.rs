@@ -167,7 +167,9 @@ fn export_seed(ctx: &egui::Context, s: &mut ExportSeedState, actions: &mut Vec<U
                 ui.label("Re-type the full 24-word phrase to confirm your backup:");
                 ui.add_space(8.0);
                 ui.add(
-                    TextEdit::multiline(&mut s.reentry)
+                    // `&mut *s.reentry` exposes the inner `String` to egui; the
+                    // `Zeroizing` wrapper still scrubs it on drop (F6).
+                    TextEdit::multiline(&mut *s.reentry)
                         .desired_width(f32::INFINITY)
                         .desired_rows(3)
                         .hint_text("word1 word2 … word24"),

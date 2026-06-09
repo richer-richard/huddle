@@ -18,6 +18,8 @@ use ratatui::prelude::*;
 use ratatui::Terminal;
 
 use base64::Engine;
+use zeroize::Zeroizing;
+
 use huddle_core::app::events::{AppEvent, DiscoveredRoom};
 use huddle_core::app::{AppHandle, KnownPeerStatus};
 use huddle_core::network::NetworkMode;
@@ -3014,7 +3016,7 @@ pub fn prompt_master_passphrase(is_new: bool) -> Result<AuthPrompt> {
 /// Validation is local: the phrase is decoded + checksum-checked via
 /// [`huddle_core::app::fingerprint_from_phrase`]; the derived HD-ID is previewed
 /// live so the user can confirm they pasted the right backup before committing.
-pub fn prompt_import_seed() -> Result<Option<String>> {
+pub fn prompt_import_seed() -> Result<Option<Zeroizing<String>>> {
     use crossterm::event::{KeyCode, KeyModifiers};
     use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
 
@@ -3026,11 +3028,15 @@ pub fn prompt_import_seed() -> Result<Option<String>> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut input = String::new();
+    // F6: the typed/pasted phrase IS the crown-jewel root secret. Hold it in a
+    // `Zeroizing<String>` so the backing bytes are scrubbed when this modal
+    // closes (or unwinds), not just length-reset, however long the user lingers.
+    let mut input = Zeroizing::new(String::new());
     let mut error: Option<String> = None;
     // Outer Option: None = still prompting. Inner Option: the resolved choice
-    // (Some(phrase) = import, None = skip).
-    let mut outcome: Option<Option<String>> = None;
+    // (Some(phrase) = import, None = skip). The imported phrase stays wrapped in
+    // `Zeroizing` all the way back to the caller.
+    let mut outcome: Option<Option<Zeroizing<String>>> = None;
 
     while outcome.is_none() {
         // Live preview: does the current input decode to a valid identity?
@@ -3071,7 +3077,7 @@ pub fn prompt_import_seed() -> Result<Option<String>> {
                         if input.is_empty() {
                             "word1 word2 … word24".to_string()
                         } else {
-                            input.clone()
+                            input.to_string()
                         },
                         if input.is_empty() {
                             Style::default().fg(Color::DarkGray)
@@ -3132,7 +3138,9 @@ pub fn prompt_import_seed() -> Result<Option<String>> {
                                 outcome = Some(None);
                             } else if huddle_core::app::fingerprint_from_phrase(input.trim()).is_ok()
                             {
-                                outcome = Some(Some(input.trim().to_string()));
+                                // Keep the returned phrase wrapped so the caller's
+                                // copy is scrubbed once it's been consumed.
+                                outcome = Some(Some(Zeroizing::new(input.trim().to_string())));
                             } else {
                                 error = Some(
                                     "that's not a valid 24-word phrase (checksum failed)".into(),

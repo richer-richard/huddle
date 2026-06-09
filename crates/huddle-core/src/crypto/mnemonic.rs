@@ -39,8 +39,10 @@ pub fn seed_to_phrase(seed: &[u8; 32]) -> String {
 /// Errors if any word is off the wordlist, the word count is wrong, or the
 /// checksum doesn't match — i.e. a corrupted or mistyped phrase. The returned
 /// seed is the sole input to `Identity::from_seed`, so a successful decode
-/// reproduces the original identity byte-for-byte.
-pub fn phrase_to_seed(phrase: &str) -> Result<[u8; 32]> {
+/// reproduces the original identity byte-for-byte. Handed back in `Zeroizing`
+/// (F6) so the crown-jewel seed never lands as an un-scrubbed `[u8; 32]` on the
+/// caller's stack — every recovery caller already wants it wrapped.
+pub fn phrase_to_seed(phrase: &str) -> Result<Zeroizing<[u8; 32]>> {
     let normalized = phrase.trim().to_lowercase();
     let mnemonic = Mnemonic::parse_in(Language::English, normalized)
         .map_err(|e| HuddleError::Identity(format!("invalid seed phrase: {e}")))?;
@@ -58,7 +60,9 @@ pub fn phrase_to_seed(phrase: &str) -> Result<[u8; 32]> {
         )));
     }
 
-    let mut seed = [0u8; 32];
+    // Copy straight into a `Zeroizing` target so the 32 seed bytes are never
+    // exposed as a bare array between here and the caller.
+    let mut seed = Zeroizing::new([0u8; 32]);
     seed.copy_from_slice(&raw[..32]);
     Ok(seed)
 }
@@ -82,8 +86,8 @@ mod tests {
         let phrase = seed_to_phrase(&[0u8; 32]);
         assert_eq!(phrase, zero_seed_phrase());
         assert_eq!(phrase.split_whitespace().count(), 24);
-        // …and decode it back to the all-zero seed.
-        assert_eq!(phrase_to_seed(&zero_seed_phrase()).unwrap(), [0u8; 32]);
+        // …and decode it back to the all-zero seed (deref the `Zeroizing`).
+        assert_eq!(*phrase_to_seed(&zero_seed_phrase()).unwrap(), [0u8; 32]);
     }
 
     #[test]
@@ -92,7 +96,7 @@ mod tests {
             let seed: [u8; 32] = rand::random();
             let phrase = seed_to_phrase(&seed);
             assert_eq!(phrase.split_whitespace().count(), 24);
-            assert_eq!(phrase_to_seed(&phrase).unwrap(), seed);
+            assert_eq!(*phrase_to_seed(&phrase).unwrap(), seed);
         }
     }
 
@@ -103,7 +107,7 @@ mod tests {
         // Upper-case the whole phrase and bury it in tabs / newlines / double
         // spaces — it must still decode to the same seed.
         let messy = format!("  \t {} \n  ", phrase.to_uppercase().replace(' ', "  "));
-        assert_eq!(phrase_to_seed(&messy).unwrap(), seed);
+        assert_eq!(*phrase_to_seed(&messy).unwrap(), seed);
     }
 
     #[test]
@@ -120,6 +124,18 @@ mod tests {
         let mut words = vec!["abandon"; 23];
         words.push("notabip39word");
         assert!(phrase_to_seed(&words.join(" ")).is_err());
+    }
+
+    #[test]
+    fn decode_returns_zeroizing_seed() {
+        // F6: `phrase_to_seed` hands the seed back already wrapped in
+        // `Zeroizing`, so callers can move it straight into `Identity::from_seed`
+        // without ever materializing a bare `[u8; 32]`. The wrapper derefs to the
+        // expected bytes; this also pins the return type at compile time.
+        let seed = [9u8; 32];
+        let phrase = seed_to_phrase(&seed);
+        let decoded: Zeroizing<[u8; 32]> = phrase_to_seed(&phrase).unwrap();
+        assert_eq!(*decoded, seed);
     }
 
     #[test]

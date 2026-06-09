@@ -33,6 +33,10 @@ tracing-appender = "0.2"
 dirs = "6"
 qrcode = "0.14"
 base64 = "0.22"
+# huddle 2.0.0 (F6): scrub the imported seed phrase from memory on drop —
+# `Zeroizing<String>` wraps the recovery-phrase input buffer so the crown-jewel
+# secret doesn't linger in the TUI's heap after the import completes.
+zeroize = "1"
 # huddle 0.6: opt-in update detection. ureq is lean (blocking,
 # rustls-based) — we call it from a tokio::spawn_blocking task once
 # per 24 h and parse the JSON response by substring (no serde_json

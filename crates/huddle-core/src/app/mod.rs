@@ -7430,8 +7430,10 @@ fn new_client_msg_id() -> String {
 /// [`AppHandle::verify_seed_reentry`]). Errors on an off-wordlist word, a bad
 /// checksum, or the wrong word count.
 pub fn fingerprint_from_phrase(phrase: &str) -> Result<String> {
+    // `phrase_to_seed` already returns the seed in `Zeroizing`, so hand it
+    // straight to `from_seed` — no second wrapper, no bare-array copy (F6).
     let seed = crate::crypto::mnemonic::phrase_to_seed(phrase)?;
-    let id = Identity::from_seed(zeroize::Zeroizing::new(seed))?;
+    let id = Identity::from_seed(seed)?;
     Ok(id.fingerprint().to_string())
 }
 
@@ -7441,7 +7443,7 @@ pub fn fingerprint_from_phrase(phrase: &str) -> Result<String> {
 /// and ML-KEM keypair).
 pub fn import_identity_from_phrase(phrase: &str) -> Result<Identity> {
     let seed = crate::crypto::mnemonic::phrase_to_seed(phrase)?;
-    Identity::from_seed(zeroize::Zeroizing::new(seed))
+    Identity::from_seed(seed)
 }
 
 /// huddle 0.5.1: parse `input` as a huddle ID — either `HD-`-prefixed

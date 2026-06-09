@@ -12,6 +12,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 
+use zeroize::Zeroizing;
+
 use huddle_core::app::events::{AppEvent, DiscoveredRoom};
 use huddle_core::app::{AppHandle, ContactView, KnownPeerStatus};
 use huddle_core::network::transport::{TransportId, TransportProfile};
@@ -404,8 +406,10 @@ pub struct ExportSeedState {
     /// Whether the phrase is currently revealed (hidden behind dots by default).
     pub revealed: bool,
     pub step: ExportSeedStep,
-    /// The user's re-typed phrase in the verify step.
-    pub reentry: String,
+    /// The user's re-typed phrase in the verify step. Wrapped in `Zeroizing` so
+    /// the re-entered secret is scrubbed from the heap when the modal closes
+    /// (F6) — unlike `phrase`, which is deliberately shown for paper backup.
+    pub reentry: Zeroizing<String>,
     pub error: Option<String>,
 }
 

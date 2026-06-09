@@ -30,6 +30,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 dirs = "6"
 base64 = "0.22"
+# huddle 2.0.0 (F6): scrub the imported / re-typed seed phrase from memory on
+# drop — `Zeroizing<String>` wraps the lock-screen import buffer and the export
+# re-entry field so the crown-jewel secret doesn't linger in the GUI's heap.
+zeroize = "1"
 # Identity QR (same crate the TUI uses).
 qrcode = "0.14"
 eframe = "0.34.3"

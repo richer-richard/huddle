@@ -8,6 +8,7 @@
 use std::time::{Duration, Instant};
 
 use egui::{Align, Layout, RichText};
+use zeroize::Zeroizing;
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
@@ -52,16 +53,19 @@ pub struct LockedForm {
     pub error: Option<String>,
     /// huddle 2.0.0 (F6): on a fresh install, optionally restore an existing
     /// identity from its 24-word BIP39 seed phrase instead of generating a new
-    /// one. Empty = generate a new random identity (the default).
-    pub import_phrase: String,
+    /// one. Empty = generate a new random identity (the default). Held in
+    /// `Zeroizing` so the typed phrase — the crown-jewel root secret — is
+    /// scrubbed from the heap when the lock form is dropped.
+    pub import_phrase: Zeroizing<String>,
     /// Whether the "Import existing identity" section is expanded.
     pub show_import: bool,
 }
 
 enum Transition {
     /// `(auth, display_name, import_seed_phrase)` — the seed phrase is `Some`
-    /// only on a fresh-install restore (F6).
-    Build(bridge::AuthChoice, Option<String>, Option<String>),
+    /// only on a fresh-install restore (F6), wrapped in `Zeroizing` so it's
+    /// scrubbed once the build consumes it.
+    Build(bridge::AuthChoice, Option<String>, Option<Zeroizing<String>>),
     Ready(ReadyParts),
     FailedAuth(String),
 }
@@ -112,7 +116,7 @@ impl HuddleApp {
         &mut self,
         auth: bridge::AuthChoice,
         name: Option<String>,
-        import_phrase: Option<String>,
+        import_phrase: Option<Zeroizing<String>>,
     ) {
         let params = bridge::BuildParams {
             explicit_mode: self.cli.mode,
@@ -968,7 +972,7 @@ impl Ready {
                         phrase,
                         revealed: false,
                         step: ExportSeedStep::Reveal,
-                        reentry: String::new(),
+                        reentry: Zeroizing::new(String::new()),
                         error: None,
                     });
                 }
@@ -1279,7 +1283,7 @@ fn copy_row(ui: &mut egui::Ui, actions: &mut Vec<UiAction>, label: &str, value: 
 fn render_locked(
     ui: &mut egui::Ui,
     form: &mut LockedForm,
-) -> Option<(String, Option<String>, Option<String>)> {
+) -> Option<(String, Option<String>, Option<Zeroizing<String>>)> {
     let mut submit = false;
     egui::CentralPanel::default().show_inside(ui, |ui| {
         ui.add_space(56.0);
@@ -1352,7 +1356,10 @@ fn render_locked(
                         .color(palette().text_dim),
                     );
                     ui.add(
-                        egui::TextEdit::multiline(&mut form.import_phrase)
+                        // `&mut *form.import_phrase` hands egui the inner `String`
+                        // (the `TextBuffer`); the `Zeroizing` wrapper still scrubs
+                        // it on drop.
+                        egui::TextEdit::multiline(&mut *form.import_phrase)
                             .desired_width(w)
                             .desired_rows(3)
                             .hint_text("word1 word2 … word24"),
@@ -1425,7 +1432,9 @@ fn render_locked(
             form.error = Some("the seed phrase is invalid — check the 24 words".into());
             return None;
         } else {
-            Some(trimmed.to_string())
+            // Keep the phrase wrapped so its copy is scrubbed once the build
+            // pipeline consumes it.
+            Some(Zeroizing::new(trimmed.to_string()))
         }
     } else {
         None
