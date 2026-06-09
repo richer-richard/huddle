@@ -1,6 +1,6 @@
 # Security
 
-This document describes huddle's security model as of **1.3.4**: what is
+This document describes huddle's security model as of **2.0.0**: what is
 protected, how, and — just as importantly — what is *not*. Read the
 "Known limitations / by-design tradeoffs" section before trusting huddle
 with anything that matters.
@@ -231,8 +231,11 @@ own careful review.
     un-pinned partner can still decrypt that partner's classical traffic, so the
     decrypt-miss key-request heal does not probe it; capability is only ever
     learned from a `MemberAnnounce` that carries the ML-KEM key). It is not
-    eliminable without an out-of-band capability anchor — binding PQ capability
-    into SAS / the verified-peers store is the planned real fix.
+    eliminable without an out-of-band capability anchor — and **2.0.0 adds that
+    anchor** (see "2.0 changes" below): once you SAS-verify a peer or accept a
+    signed v4 invite, their PQ capability is pinned in `verified_peers` and the
+    classical fallback is refused thereafter, so this residual now only applies
+    *before* any out-of-band verification/invite with that peer.
   - A *malicious endpoint* (the peer you are actually talking to) can still
     withhold its own ML-KEM key to keep the DM classical, but that only weakens
     that peer's own traffic. A deliberate same-identity 1.3→pre-1.3 binary
@@ -247,6 +250,58 @@ own careful review.
   fix. Group-room key delivery under a passphrase is already post-quantum
   (Argon2id + ChaCha20-Poly1305 are symmetric); the ECDH-wrapped code-join path
   remains classical for now.
+
+## 2.0 changes — capability anchoring, replay protection, rotation, recovery
+
+- **PQ-capability binding (closes the 1.3 downgrade residual).** A peer's
+  ML-KEM-768 encapsulation-key hash is now folded into the **SAS transcript**
+  (`derive_sas_code`'s HKDF `info`) and into a new **v4 signed invite**
+  (`mlkem_ek_b64`, covered by the Ed25519 signature). The first time a peer's PQ
+  capability is observed via SAS or a v4 invite it is persisted
+  (`verified_peers.pq_capable`, fail-secure: a DB error refuses the downgrade
+  rather than allowing it), and the classical fallback is refused for that peer
+  from then on. So a relay can no longer silently downgrade a peer you have
+  verified or been invited by. (Both ends must be 2.0+ for the SAS binding; a
+  capability mismatch makes the SAS codes diverge — i.e. it fails *loud*, never
+  silently weak.)
+- **Content-layer replay protection.** A durable seen-set keyed by
+  `(room, sender, megolm_session_id, message_index)` drops a wire-level replay of
+  an already-processed **content** message, even across a restart or a
+  cross-transport re-broadcast. The Megolm message index is a monotonic ratchet
+  position whose KDF output never repeats for a `(session, index)` pair, so the
+  tuple uniquely names one ciphertext. **Only content is recorded** — control
+  messages (`MemberAnnounce`, `RotateRoomKey`, the SAS handshake, …) are
+  deliberately excluded so legitimate recurring re-announces keep working.
+- **Forward-only Megolm epoch rotation.** A room's outbound session rotates on a
+  schedule (every N messages / T hours) and on membership change. This bounds the
+  history a single session-key compromise exposes — a step toward forward secrecy
+  short of the full Double Ratchet (roadmap). Rotation is forward-only; peers pick
+  up the new session over the existing key-delivery path.
+- **At-rest rekey + passphrase change.** Changing the master passphrase
+  re-derives the Argon2id key and `PRAGMA rekey`s SQLCipher, re-wrapping the
+  Megolm-persistence subkey. The new salt is written **only after** the rekey
+  commits, so an interrupted change re-derives the *old* key on next launch and
+  recovers the database (rollback-safe). `--no-master-passphrase` (plaintext) DBs
+  are never PRAGMA-rekeyed.
+- **Identity recovery via BIP39.** The 32-byte Ed25519 seed — the single root of
+  the identity, the ML-KEM key, and all DM keys — can be exported as a 24-word
+  checksummed mnemonic (shown once, re-entry-verified, held in `Zeroizing`) and
+  re-imported to restore the identity exactly. The seed remains the crown jewel:
+  anyone with the phrase **is** you, so it is never persisted or logged.
+- **At-least-once relay delivery.** The relay keeps a queued mailbox row until the
+  recipient ACKs durable receipt (after it has been persisted), closing the
+  drop-mid-drain loss window. The recipient's identity is still proven at the
+  relay before any mailbox is drained, and the ACK carries only the row id (which
+  the relay scopes to that recipient's own mailbox).
+- **Cooperative delete (honest about it).** "Delete for everyone" broadcasts a
+  signed tombstone that honest clients honour by blanking the message body (and
+  dropping it from the search index); it is **best-effort** — an adversarial
+  client cannot be forced to forget. Edits show an "edited" marker so history is
+  not silently rewritten. Edit/Delete are accepted only from the original
+  sender's signed envelope (delete also from a room owner).
+- **Disappearing messages** auto-delete locally after a per-room TTL — really
+  removed from the database, and (composing with replay protection) an expired
+  message cannot be resurrected by a replay.
 
 ## Known limitations / by-design tradeoffs
 

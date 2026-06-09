@@ -206,7 +206,7 @@ per-OS app directory:
 
 ```
 +----------------------------------------------------------------------+
-| huddle 1.3.4  ·  745e-fe8a-…  ·  relay ●               12:34 UTC     |
+| huddle 2.0.0  ·  745e-fe8a-…  ·  relay ●               12:34 UTC     |
 +------------------------+---------------------------------------------+
 | ▾ Profile              | # general                                   |
 |   alice  HD-AAAA-…  ●  |   4 members · encrypted                     |
@@ -644,13 +644,84 @@ native dialog for a path-entry box.
   rejection sampling) and does **not** interoperate with Matrix SAS — only
   the decimal code follows the MSC 2241 shape, so SAS works huddle↔huddle
   only (both ends on a compatible huddle version).
-- DM end-to-end encryption (huddle 0.7.1) re-derives the room wrap key
-  from both peers' long-term Ed25519 identity keys via X25519 ECDH —
-  it lacks forward secrecy at the room-key layer. A future identity-
-  key compromise unlocks historical DM session keys between those
-  two parties (Megolm message keys still ratchet, but the wrap key
-  doesn't). Per-DM ephemeral ratchets (Double Ratchet-style) are a
-  candidate follow-up.
+- DM/group wrap keys still derive from long-term identity material, so
+  there is **no full forward secrecy at the wrap-key layer** yet — an
+  identity-key compromise can unlock historical session keys (Megolm
+  message keys ratchet, but the wrap key doesn't). **2.0.0 narrows this**
+  with forward-only Megolm **epoch rotation** (the outbound session
+  rotates on a schedule + on membership change), bounding the exposure
+  window; the full fix — a Double Ratchet seeded from the hybrid root key —
+  is sequenced in `docs/ROADMAP-2.0-and-beyond.md`.
+
+## What's new in 2.0.0 — forward secrecy steps, recovery, and richer chat
+
+A major release that adds a layer of long-wanted capabilities on top of the
+1.3.x hardened base. All wire additions are **backward-compatible** — new
+`RoomMessage` variants and fields are optional, so a pre-2.0 peer simply ignores
+them and old database rows still decode; new behaviour is **2.0+-only** where
+both ends must understand it. The whole feature set was built by a waved
+multi-agent fleet and then put through an adversarial multi-agent bug scan.
+
+**Security & cryptography**
+
+- **Post-quantum downgrade residual closed.** The inviter's/partner's ML-KEM-768
+  capability is now bound into the **SAS verification transcript** and into a new
+  **v4 signed invite** (`mlkem_ek_b64`), and a peer's PQ capability is persisted
+  in `verified_peers`. So once you've verified or been invited by a peer, a
+  malicious relay can no longer silently force the classical fallback — the one
+  first-contact gap `SECURITY.md` documented for 1.3.
+- **Forward-only Megolm epoch rotation.** A room's outbound session now rotates
+  on a schedule (every N messages / T hours, and on membership change), bounding
+  how much history a single key compromise can expose — a concrete step toward
+  forward secrecy without the full ratchet (see the roadmap).
+- **Content-layer replay protection.** A durable per-`(room, sender, session,
+  message-index)` seen-set silently drops a wire-level replay of an
+  already-processed message — even across a restart or a cross-transport
+  re-broadcast. Only content is deduped; control re-announces still work.
+- **Master-passphrase change + at-rest rekey.** You can change your master
+  passphrase: huddle re-derives the key and `PRAGMA rekey`s the SQLCipher
+  database atomically (rollback-safe), re-wrapping the Megolm-persistence subkey.
+- **Safety-number-change alarm.** A pinned identity-key change (TOFU drift) now
+  raises a loud, explicit warning prompting re-verification instead of a silent
+  drop.
+
+**Recovery**
+
+- **BIP39 seed phrase.** Export your identity as a 24-word checksummed mnemonic
+  (shown once, re-entry-verified) and import it on a new machine to fully restore
+  your identity — PeerId, ML-KEM key, and DM keys all derive from the one seed.
+
+**Reliability**
+
+- **At-least-once relay delivery.** The relay now tags each mailbox delivery with
+  a row id and keeps the row until the client ACKs durable receipt, closing the
+  window where a socket drop mid-drain could lose a queued message. Pre-2.0
+  clients (no ACK capability) keep the classical delete-on-deliver behaviour.
+
+**Product**
+
+- **Full-text search.** Local message search is now backed by **SQLite FTS5**
+  (ranked, tokenized, prefix/boolean queries) over the at-rest-encrypted body —
+  no new exposure, just faster and better than the old substring scan.
+- **Disappearing messages.** A per-room TTL (off by default) auto-deletes
+  messages locally after the window — really removed from the database, and a
+  replay can't resurrect an expired message.
+- **Reactions, replies, edits, and deletes.** React with an emoji, reply
+  in-thread, edit your own messages (with an "edited" marker), and delete for
+  everyone (best-effort — an honest client honours it; an adversarial one can't
+  be forced to). Each is an additive signed message keyed to a sender-minted
+  stable message id.
+
+**Engineering**
+
+- Single-sourced workspace version (`[workspace.package]`) so a release is one
+  bump, not seven. Added `proptest` property tests + `cargo-fuzz` targets for the
+  wire/crypto decision logic, a Prometheus `/metrics` endpoint on the relay, and
+  a `cargo-deny` supply-chain gate.
+
+See `docs/ROADMAP-2.0-and-beyond.md` for the sequenced heavy work (MLS groups, a
+full Double Ratchet, hybrid PQ authentication, metadata blinding, multi-device,
+mobile) this release deliberately set the foundation for.
 
 ## What's new in 1.3.4 — security & DoS hardening (73-agent audit of 1.3.3)
 
