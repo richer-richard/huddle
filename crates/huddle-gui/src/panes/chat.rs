@@ -2,15 +2,15 @@
 //! members side panel, sender-grouped message list with day separators and
 //! avatars, inline attachment cards, and the composer.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use egui::{Align, Id, Key, Label, Layout, RichText, TextEdit};
+use egui::{Align, Id, Key, Label, Layout, RichText, Sense, TextEdit};
 use huddle_core::app::{AppHandle, RoomTransport};
 use huddle_core::storage::repo::{AttachmentStatus, RoomKind};
 
 use crate::fmt;
-use crate::model::{UiAction, ViewModel};
+use crate::model::{ttl_label, UiAction, ViewModel};
 use crate::theme::palette;
 use crate::widgets;
 
@@ -69,6 +69,14 @@ pub fn render(
                     .small()
                     .color(palette().text_dim),
             );
+            // huddle 2.0.0 (F9): disappearing-messages indicator.
+            if let Some(secs) = room.ttl_secs {
+                ui.label(
+                    RichText::new(format!("· ⏲ disappears in {}", ttl_label(secs)))
+                        .small()
+                        .color(palette().warn),
+                );
+            }
             // Per-chat transport badge (lan / relay / offline) — status only.
             let (glyph, label, color) = match transport {
                 RoomTransport::LanDirect => ("●", "lan", palette().success),
@@ -103,6 +111,14 @@ pub fn render(
                 if ui.button("Search").clicked() {
                     actions.push(UiAction::OpenSearch(room_id.to_string()));
                 }
+                // huddle 2.0.0 (F9): per-room disappearing-messages TTL.
+                if ui
+                    .button("Timer")
+                    .on_hover_text("disappearing messages")
+                    .clicked()
+                {
+                    actions.push(UiAction::OpenDisappearing(room_id.to_string()));
+                }
                 if ui.button("Attach").clicked() {
                     actions.push(UiAction::AttachFile(room_id.to_string()));
                 }
@@ -136,17 +152,43 @@ pub fn render(
                     .color(palette().error),
             );
         }
+        // huddle 2.0.0 (F10): reply / edit context banners above the composer.
+        // Snapshotted so the send routing below can read them after `room.input`
+        // is taken.
+        let editing = room.edit_target.clone();
+        let replying = room.reply_to.clone();
+        if editing.is_some() {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("editing message").small().color(palette().accent));
+                if ui.small_button("cancel").clicked() {
+                    actions.push(UiAction::CancelEdit(room_id.to_string()));
+                }
+            });
+        } else if let Some((_, preview)) = &replying {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(format!("replying to: {preview}"))
+                        .small()
+                        .color(palette().text_dim),
+                );
+                if ui.small_button("cancel").clicked() {
+                    actions.push(UiAction::CancelReply(room_id.to_string()));
+                }
+            });
+        }
         ui.horizontal(|ui| {
             let btn_w = 64.0;
             let resp = ui.add_sized(
                 [ui.available_width() - btn_w - 8.0, 28.0],
-                TextEdit::singleline(&mut room.input).hint_text(if can_send {
-                    "message…"
-                } else {
+                TextEdit::singleline(&mut room.input).hint_text(if !can_send {
                     "waiting for connection…"
+                } else if editing.is_some() {
+                    "edit your message…"
+                } else {
+                    "message…"
                 }),
             );
-            if resp.changed() && !room.input.is_empty() && can_send {
+            if resp.changed() && !room.input.is_empty() && can_send && editing.is_none() {
                 let now = Instant::now();
                 let due = room
                     .last_typing_sent
@@ -157,13 +199,28 @@ pub fn render(
                 }
             }
             let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-            let clicked = ui.add_enabled(can_send, egui::Button::new("Send")).clicked();
+            let send_label = if editing.is_some() { "Save" } else { "Send" };
+            let clicked = ui.add_enabled(can_send, egui::Button::new(send_label)).clicked();
             if can_send && (enter || clicked) && !room.input.trim().is_empty() {
                 let body = std::mem::take(&mut room.input);
-                actions.push(UiAction::SendMessage {
-                    room_id: room_id.to_string(),
-                    body,
-                });
+                if let Some(target) = editing.clone() {
+                    actions.push(UiAction::SendEdit {
+                        room_id: room_id.to_string(),
+                        target_msg_id: target,
+                        new_body: body,
+                    });
+                } else if let Some((target, _)) = replying.clone() {
+                    actions.push(UiAction::SendReply {
+                        room_id: room_id.to_string(),
+                        body,
+                        reply_to: target,
+                    });
+                } else {
+                    actions.push(UiAction::SendMessage {
+                        room_id: room_id.to_string(),
+                        body,
+                    });
+                }
                 room.stick_to_bottom = true;
                 resp.request_focus();
             }
@@ -260,6 +317,30 @@ pub fn render(
             // timestamps keep arrival order.
             let mut ordered: Vec<&_> = room.messages.iter().collect();
             ordered.sort_by_key(|m| m.sent_at);
+            // huddle 2.0.0 (F10): index messages by their stable id so a reply can
+            // render a quote of its target (attribution + one-line preview).
+            let by_id: HashMap<String, (String, String)> = room
+                .messages
+                .iter()
+                .filter_map(|mm| {
+                    mm.client_msg_id.as_deref().map(|id| {
+                        let who = if mm.sender_fingerprint == our_fp {
+                            "you".to_string()
+                        } else {
+                            peer_labels
+                                .get(&mm.sender_fingerprint)
+                                .cloned()
+                                .unwrap_or_else(|| fmt::display_id(&mm.sender_fingerprint))
+                        };
+                        let preview = if mm.deleted_at.is_some() {
+                            "[deleted]".to_string()
+                        } else {
+                            msg_preview(&mm.body)
+                        };
+                        (id.to_string(), (who, preview))
+                    })
+                })
+                .collect();
             for m in ordered {
                 let day = fmt::day_bucket(m.sent_at);
                 let day_changed = last_day != Some(day);
@@ -312,7 +393,109 @@ pub fn render(
                         );
                     });
                 }
-                ui.add(Label::new(&m.body).wrap());
+
+                // huddle 2.0.0 (F10): reply quote — the targeted message's
+                // attribution + a one-line preview above this message.
+                if let Some(rt) = m.reply_to.as_deref() {
+                    if let Some((who, preview)) = by_id.get(rt) {
+                        ui.horizontal(|ui| {
+                            ui.add_space(6.0);
+                            ui.label(
+                                RichText::new(format!("↩ {who}: {preview}"))
+                                    .small()
+                                    .italics()
+                                    .color(palette().text_dim),
+                            );
+                        });
+                    }
+                }
+
+                // huddle 2.0.0 (F10): deleted messages render as a tombstone —
+                // no body, reactions, or affordances.
+                if m.deleted_at.is_some() {
+                    ui.label(
+                        RichText::new("[deleted]")
+                            .italics()
+                            .color(palette().text_dim),
+                    );
+                    continue;
+                }
+
+                // Body (right-click for actions), with an [edited] marker.
+                let body_resp = ui.add(Label::new(&m.body).wrap().sense(Sense::click()));
+                if m.edited_at.is_some() {
+                    ui.label(RichText::new("(edited)").small().color(palette().text_dim));
+                }
+
+                // Affordances + reaction badges only exist for messages carrying
+                // a stable id (pre-2.0 peers' messages can't be targeted).
+                if let Some(cid) = m.client_msg_id.clone() {
+                    let preview = msg_preview(&m.body);
+                    let body = m.body.clone();
+                    body_resp.context_menu(|ui| {
+                        if ui.button("React…").clicked() {
+                            actions.push(UiAction::OpenEmojiPicker {
+                                room_id: room_id.to_string(),
+                                target_msg_id: cid.clone(),
+                            });
+                            ui.close();
+                        }
+                        if ui.button("Reply").clicked() {
+                            actions.push(UiAction::StartReply {
+                                room_id: room_id.to_string(),
+                                target_msg_id: cid.clone(),
+                                preview: preview.clone(),
+                            });
+                            ui.close();
+                        }
+                        // Edit is sender-only; delete is sender-or-owner (the core
+                        // re-checks and rejects otherwise).
+                        if is_me && ui.button("Edit").clicked() {
+                            actions.push(UiAction::StartEdit {
+                                room_id: room_id.to_string(),
+                                target_msg_id: cid.clone(),
+                                body: body.clone(),
+                            });
+                            ui.close();
+                        }
+                        if (is_me || we_own) && ui.button("Delete").clicked() {
+                            actions.push(UiAction::OpenConfirmDelete {
+                                room_id: room_id.to_string(),
+                                target_msg_id: cid.clone(),
+                                preview: preview.clone(),
+                            });
+                            ui.close();
+                        }
+                    });
+
+                    // Reaction pills (click to toggle) + quick react / reply.
+                    let groups = room.reactions_for(&cid, &our_fp);
+                    ui.horizontal_wrapped(|ui| {
+                        for (emoji, count, mine) in &groups {
+                            if ui.selectable_label(*mine, format!("{emoji} {count}")).clicked() {
+                                actions.push(UiAction::SendReaction {
+                                    room_id: room_id.to_string(),
+                                    target_msg_id: cid.clone(),
+                                    emoji: emoji.clone(),
+                                    removed: *mine,
+                                });
+                            }
+                        }
+                        if ui.small_button("+ react").clicked() {
+                            actions.push(UiAction::OpenEmojiPicker {
+                                room_id: room_id.to_string(),
+                                target_msg_id: cid.clone(),
+                            });
+                        }
+                        if ui.small_button("reply").clicked() {
+                            actions.push(UiAction::StartReply {
+                                room_id: room_id.to_string(),
+                                target_msg_id: cid.clone(),
+                                preview: preview.clone(),
+                            });
+                        }
+                    });
+                }
             }
 
             // Attachment cards.
@@ -324,6 +507,18 @@ pub fn render(
                 }
             }
         });
+}
+
+/// huddle 2.0.0 (F10): one-line, length-capped preview of a message body for
+/// reply quotes and the delete confirmation.
+fn msg_preview(body: &str) -> String {
+    let single: String = body.chars().map(|c| if c == '\n' { ' ' } else { c }).collect();
+    let trimmed = single.trim();
+    if trimmed.chars().count() > 60 {
+        format!("{}…", trimmed.chars().take(57).collect::<String>())
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn attachment_card(

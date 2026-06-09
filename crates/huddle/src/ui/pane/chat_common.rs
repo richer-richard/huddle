@@ -56,6 +56,12 @@ pub fn render_messages(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme, r
     let inner_w = area.width.saturating_sub(4) as usize;
     let body_w = inner_w.saturating_sub(MSG_PREFIX_WIDTH).max(8);
 
+    // huddle 2.0.0 (F10): grouped reaction badges (target id → [(emoji, count)]),
+    // and the `client_msg_id` of the currently-selected message (for the
+    // react/reply/edit/delete cursor highlight).
+    let reactions = reaction_counts(app, room_id);
+    let selected_id = selected_msg_client_id(r);
+
     enum Row<'a> {
         Text(&'a huddle_core::storage::repo::StoredRoomMessage),
         Card(&'a huddle_core::storage::repo::StoredAttachment, bool),
@@ -108,11 +114,52 @@ pub fn render_messages(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme, r
                 };
                 let is_verified = !is_me && verified.contains(&m.sender_fingerprint);
                 let time = format_time(m.sent_at);
-                let chunks = wrap_body(&m.body, body_w);
+                // huddle 2.0.0 (F10): is this the message the affordance
+                // keybindings currently target?
+                let is_selected = match (&selected_id, &m.client_msg_id) {
+                    (Some(sel), Some(id)) => sel == id,
+                    _ => false,
+                };
+                let deleted = m.deleted_at.is_some();
+                let edited = m.edited_at.is_some() && !deleted;
+
+                // huddle 2.0.0 (F10): reply context — an indented quote of the
+                // message this one replies to, rendered above it.
+                if let Some(reply_to) = &m.reply_to {
+                    if let Some(preview) = reply_preview(r, app, reply_to, &me) {
+                        lines.push(Line::from(vec![
+                            Span::styled(" ".repeat(MSG_PREFIX_WIDTH), theme.dim()),
+                            Span::styled(format!("┊ {}", preview), theme.dim()),
+                        ]));
+                    }
+                }
+
+                // Deleted messages render a tombstone in place of the body;
+                // otherwise wrap the (possibly edited) plaintext.
+                let body_style = if deleted {
+                    theme.dim().add_modifier(Modifier::ITALIC)
+                } else {
+                    theme.text_style()
+                };
+                let chunks = if deleted {
+                    vec!["[deleted]".to_string()]
+                } else {
+                    wrap_body(&m.body, body_w)
+                };
+                let last = chunks.len().saturating_sub(1);
                 for (i, chunk) in chunks.iter().enumerate() {
                     if i == 0 {
+                        // huddle 2.0.0 (F10): the 2-col lead doubles as the
+                        // selection cursor (▸) without shifting alignment.
+                        let lead = if is_selected { "▸ " } else { "  " };
+                        let lead_style = if is_selected {
+                            theme.warn_style()
+                        } else {
+                            theme.dim()
+                        };
                         let mut spans = vec![
-                            Span::styled(format!("  {}  ", time), theme.dim()),
+                            Span::styled(lead, lead_style),
+                            Span::styled(format!("{}  ", time), theme.dim()),
                             Span::styled(
                                 format!("{:<width$}", label, width = MSG_LABEL_WIDTH),
                                 label_style,
@@ -122,13 +169,39 @@ pub fn render_messages(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme, r
                         if is_verified {
                             spans.push(Span::styled("✓ ", theme.ok()));
                         }
-                        spans.push(Span::styled(chunk.clone(), theme.text_style()));
+                        spans.push(Span::styled(chunk.clone(), body_style));
+                        if edited && i == last {
+                            spans.push(Span::styled("  [edited]", theme.dim()));
+                        }
                         lines.push(Line::from(spans));
                     } else {
-                        lines.push(Line::from(vec![
+                        let mut spans = vec![
                             Span::styled(" ".repeat(MSG_PREFIX_WIDTH), theme.dim()),
-                            Span::styled(chunk.clone(), theme.text_style()),
-                        ]));
+                            Span::styled(chunk.clone(), body_style),
+                        ];
+                        if edited && i == last {
+                            spans.push(Span::styled("  [edited]", theme.dim()));
+                        }
+                        lines.push(Line::from(spans));
+                    }
+                }
+
+                // huddle 2.0.0 (F10): reaction badges under the message.
+                if !deleted {
+                    if let Some(id) = &m.client_msg_id {
+                        if let Some(badges) = reactions.get(id) {
+                            if !badges.is_empty() {
+                                let mut spans: Vec<Span> =
+                                    vec![Span::styled(" ".repeat(MSG_PREFIX_WIDTH), theme.dim())];
+                                for (emoji, count) in badges {
+                                    spans.push(Span::styled(
+                                        format!("{} {}  ", emoji, count),
+                                        theme.warn_style(),
+                                    ));
+                                }
+                                lines.push(Line::from(spans));
+                            }
+                        }
                     }
                 }
             }
@@ -333,6 +406,82 @@ mod tests {
         );
         assert_eq!(format_time(86_399), "23:59:59");
     }
+}
+
+/// huddle 2.0.0 (F9): format a disappearing-messages TTL for the room header
+/// indicator — whole days / hours / minutes when they divide evenly, else
+/// seconds. Best-effort, human-readable ("1 hour", "7 days").
+pub fn format_ttl(secs: u32) -> String {
+    let s = secs as u64;
+    if s >= 86_400 && s % 86_400 == 0 {
+        let d = s / 86_400;
+        format!("{} day{}", d, if d == 1 { "" } else { "s" })
+    } else if s >= 3_600 && s % 3_600 == 0 {
+        let h = s / 3_600;
+        format!("{} hour{}", h, if h == 1 { "" } else { "s" })
+    } else if s >= 60 && s % 60 == 0 {
+        format!("{} min", s / 60)
+    } else {
+        format!("{}s", s)
+    }
+}
+
+/// huddle 2.0.0 (F10): group a room's reactions by target message into
+/// `(emoji, count)` badges, preserving first-seen emoji order.
+fn reaction_counts(
+    app: &TuiApp,
+    room_id: &str,
+) -> std::collections::HashMap<String, Vec<(String, usize)>> {
+    let mut map: std::collections::HashMap<String, Vec<(String, usize)>> =
+        std::collections::HashMap::new();
+    for rx in app.handle.room_reactions(room_id) {
+        let entry = map.entry(rx.target_client_msg_id.clone()).or_default();
+        if let Some(slot) = entry.iter_mut().find(|(e, _)| *e == rx.emoji) {
+            slot.1 += 1;
+        } else {
+            entry.push((rx.emoji.clone(), 1));
+        }
+    }
+    map
+}
+
+/// huddle 2.0.0 (F10): the `client_msg_id` of the explicitly-selected message
+/// in this room, if the user has moved the selection cursor (`[` / `]`). Returns
+/// `None` when no explicit selection is active so the cursor marker stays hidden
+/// during ordinary reading.
+fn selected_msg_client_id(r: &OpenRoom) -> Option<String> {
+    let idx = r.selected_msg?;
+    let m = r.messages.get(idx)?;
+    if m.client_msg_id.is_some() && m.deleted_at.is_none() {
+        m.client_msg_id.clone()
+    } else {
+        None
+    }
+}
+
+/// huddle 2.0.0 (F10): a one-line preview of the message `reply_to` points at,
+/// shown as an indented quote above a reply. `None` when the target isn't in the
+/// loaded history (pre-2.0, since-pruned, or never received).
+fn reply_preview(r: &OpenRoom, app: &TuiApp, reply_to: &str, me: &str) -> Option<String> {
+    let target = r
+        .messages
+        .iter()
+        .find(|m| m.client_msg_id.as_deref() == Some(reply_to))?;
+    let who = if target.sender_fingerprint.as_str() == me || target.direction == "out" {
+        app.handle.display_name().unwrap_or_else(|| "you".to_string())
+    } else {
+        app.handle
+            .lookup_username(&target.sender_fingerprint)
+            .unwrap_or_else(|| "[anonymous]".to_string())
+    };
+    let who: String = who.chars().take(MSG_LABEL_WIDTH).collect();
+    let body = if target.deleted_at.is_some() {
+        "[deleted]".to_string()
+    } else {
+        let flat = target.body.replace('\n', " ");
+        flat.chars().take(48).collect()
+    };
+    Some(format!("{}: {}", who, body))
 }
 
 /// huddle 0.7: render the typing indicator (used by both DM and Group headers).

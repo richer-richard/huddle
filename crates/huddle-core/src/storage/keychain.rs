@@ -10,7 +10,8 @@
 //!     (replaces the hardcoded all-zero key from Phase 1)
 
 use std::fs;
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use argon2::{Algorithm, Argon2, Params, Version};
 use hkdf::Hkdf;
@@ -97,12 +98,63 @@ fn classify_existing_salt(bytes: &[u8]) -> SaltState {
 
 /// Generate a fresh random salt and persist it. Only called when there is no
 /// usable existing salt to protect (first launch / empty file).
-fn generate_and_persist_salt(path: &PathBuf) -> Result<[u8; KEYCHAIN_SALT_LEN]> {
-    config::ensure_data_dir()?;
+fn generate_and_persist_salt(path: &Path) -> Result<[u8; KEYCHAIN_SALT_LEN]> {
+    let salt = generate_new_salt()?;
+    persist_salt(path, &salt)?;
+    Ok(salt)
+}
+
+/// Mint a fresh random 16-byte salt **without** writing it anywhere.
+///
+/// huddle 2.0.0 (F5): factored out of `generate_and_persist_salt` so the
+/// master-passphrase change flow can derive a brand-new master key from a new
+/// salt *before* anything is committed to disk. The salt is only written via
+/// `rotate_salt` once `PRAGMA rekey` and the Megolm re-persistence have
+/// succeeded — generating and persisting are deliberately separate so a
+/// half-finished rotation never leaves a salt on disk that no longer matches
+/// the database's key. Returns `Result` only to compose with the persisting
+/// callers; the RNG draw itself cannot fail.
+pub fn generate_new_salt() -> Result<[u8; KEYCHAIN_SALT_LEN]> {
     let mut salt = [0u8; KEYCHAIN_SALT_LEN];
     rand::thread_rng().fill_bytes(&mut salt);
-    fs::write(path, salt).map_err(|e| HuddleError::Other(format!("write salt: {e}")))?;
     Ok(salt)
+}
+
+/// Write `salt` to `path` atomically: stage it in a sibling temp file, fsync,
+/// then rename into place. The rename is the single commit point, so an
+/// interrupted write can never leave a truncated salt — precisely the
+/// "present but wrong length" corruption that `load_or_create_salt` now
+/// refuses to clobber (huddle 1.3.4). Creates the parent directory if needed.
+pub fn persist_salt(path: &Path, salt: &[u8; KEYCHAIN_SALT_LEN]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| HuddleError::Other(format!("create salt dir: {e}")))?;
+    }
+    // Stage beside the destination so the rename stays on one filesystem
+    // (a cross-device rename is not atomic).
+    let tmp = path.with_extension("salt.tmp");
+    {
+        let mut f = fs::File::create(&tmp)
+            .map_err(|e| HuddleError::Other(format!("stage salt: {e}")))?;
+        f.write_all(salt)
+            .map_err(|e| HuddleError::Other(format!("write salt: {e}")))?;
+        f.sync_all()
+            .map_err(|e| HuddleError::Other(format!("sync salt: {e}")))?;
+    }
+    fs::rename(&tmp, path).map_err(|e| HuddleError::Other(format!("commit salt: {e}")))?;
+    Ok(())
+}
+
+/// Overwrite the on-disk keychain salt with `new_salt` after a successful
+/// master-passphrase change (huddle 2.0.0, F5).
+///
+/// Ordering is load-bearing: callers MUST invoke this only once `PRAGMA rekey`
+/// and the Megolm re-persistence under the new subkey have committed. If any
+/// earlier step fails the salt is left untouched, so the next launch
+/// re-derives the *old* master key and recovers the database — the rollback
+/// guarantee the F5 design relies on. Atomic, via `persist_salt`.
+pub fn rotate_salt(new_salt: &[u8; KEYCHAIN_SALT_LEN]) -> Result<()> {
+    persist_salt(&keychain_salt_path(), new_salt)
 }
 
 /// Derive a 32-byte master key from passphrase + salt via Argon2id.
@@ -161,6 +213,39 @@ mod tests {
         let a = derive_subkey(&mk, b"megolm-persist");
         let b = derive_subkey(&mk, b"db-encryption");
         assert_ne!(a, b);
+    }
+
+    // huddle 2.0.0 (F5): a freshly minted salt is exactly the right length
+    // and never collides with the previous one (rainbow-table reset).
+    #[test]
+    fn generate_new_salt_is_random() {
+        let a = generate_new_salt().unwrap();
+        let b = generate_new_salt().unwrap();
+        assert_eq!(a.len(), KEYCHAIN_SALT_LEN);
+        // Collision probability is ~2^-128 — a failure here means a broken RNG.
+        assert_ne!(a, b);
+    }
+
+    // huddle 2.0.0 (F5): persist must round-trip verbatim, leave no temp file
+    // behind, and overwrite cleanly so a later read never sees a partial salt.
+    #[test]
+    fn persist_salt_round_trips_atomically() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keychain.salt");
+
+        let salt = generate_new_salt().unwrap();
+        persist_salt(&path, &salt).unwrap();
+        let back = fs::read(&path).unwrap();
+        assert_eq!(back.len(), KEYCHAIN_SALT_LEN);
+        assert_eq!(back, salt);
+        // The staging file is consumed by the rename, never left dangling.
+        assert!(!path.with_extension("salt.tmp").exists());
+
+        // Rotating to a different salt overwrites in place, no leftovers.
+        let salt2 = generate_new_salt().unwrap();
+        persist_salt(&path, &salt2).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), salt2);
+        assert!(!path.with_extension("salt.tmp").exists());
     }
 
     // huddle 1.3.4: corruption must be detected, never silently overwritten.

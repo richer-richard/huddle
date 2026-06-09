@@ -220,4 +220,65 @@ pub enum AppEvent {
     /// huddle 1.2.1: a connect code we tried to redeem was invalid or expired
     /// (or the relay wasn't reachable). `reason` is a short human message.
     ConnectCodeFailed { reason: String },
+    /// huddle 2.0 (F3): TOFU drift — a signed message arrived for `fingerprint`
+    /// whose Ed25519 pubkey differs from the one we pinned for this room. The
+    /// offending message has already been dropped (never dispatched); the UI
+    /// surfaces a modal letting the user re-verify (SAS), accept the new key, or
+    /// block the peer. `display_name` is the peer's last-known label, if any.
+    /// Fires only on the receiver side; old peers silently dropped (no event).
+    SafetyNumberChanged {
+        room_id: String,
+        fingerprint: String,
+        /// base64 Ed25519 pubkey we had pinned for this fingerprint.
+        old_pubkey_b64: String,
+        /// base64 Ed25519 pubkey the new (verified-signature) envelope carried.
+        new_pubkey_b64: String,
+        display_name: Option<String>,
+    },
+    /// huddle 2.0 (F5): the master passphrase was changed and the SQLCipher
+    /// database + Megolm session pickles were re-keyed under the new key. The
+    /// UI shows a transient "passphrase updated" confirmation.
+    PassphraseChanged,
+    /// huddle 2.0 (F10): a reaction was added (`removed = false`) or cleared
+    /// (`removed = true`) on the message named by `message_id` (its sender-minted
+    /// `client_msg_id`). Fired both for our own reactions and for inbound ones;
+    /// the UI re-reads `AppHandle::room_reactions` to refresh the badges.
+    ReactionAdded {
+        room_id: String,
+        message_id: String,
+        sender_fingerprint: String,
+        emoji: String,
+        removed: bool,
+    },
+    /// huddle 2.0 (F10): the message named by `message_id` was edited (its body
+    /// replaced, last-write-wins). `new_body` is the post-edit plaintext.
+    /// `editor_fingerprint` is who applied the edit (the original sender or a
+    /// room owner). The UI re-renders the message with an `[edited]` marker.
+    MessageEdited {
+        room_id: String,
+        message_id: String,
+        editor_fingerprint: String,
+        new_body: String,
+    },
+    /// huddle 2.0 (F10): the message named by `message_id` was deleted
+    /// (tombstoned — its body blanked). `deleter_fingerprint` is who deleted it
+    /// (the original sender or a room owner). The UI renders `[deleted]`.
+    MessageDeleted {
+        room_id: String,
+        message_id: String,
+        deleter_fingerprint: String,
+    },
+    /// huddle 2.0 (F9): the per-room disappearing-messages TTL changed (locally
+    /// or via a signed `RoomSetting` from a room owner). `ttl_secs = None` means
+    /// expiry was turned OFF; `Some(secs)` arms it. The UI refreshes the room
+    /// header indicator.
+    RoomTtlChanged {
+        room_id: String,
+        ttl_secs: Option<u32>,
+    },
+    /// huddle 2.0 (F9): the disappearing-messages pruner physically deleted
+    /// `count` expired messages (across all rooms) on its last sweep. The UI
+    /// treats it as a nudge to re-fetch the open room's history so vanished
+    /// messages disappear from view.
+    MessagesExpired { count: usize },
 }

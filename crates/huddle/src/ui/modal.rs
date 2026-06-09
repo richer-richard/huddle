@@ -2,11 +2,12 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
 
 use crate::app::{
-    AcceptRotationState, AttachPathState, AttachPickerState, ConfirmInviteState, DialPeerState,
-    InboundDialState, JoinRoomState, JoinWithCodeState, MemberActionKind, MemberActionState,
-    PasteInviteState,
-    RotateRoomState, SasStage, SasState, SearchState, ShowInviteState, ShowJoinCodeState,
-    StartField, StartRoomState, VerifyState, ATTACH_VISIBLE_ROWS,
+    AcceptRotationState, AttachPathState, AttachPickerState, ChangePassphraseState,
+    ConfirmDeleteState, ConfirmInviteState, DialPeerState, EmojiPickerState, ExportSeedState,
+    ExportStep, InboundDialState, JoinRoomState, JoinWithCodeState, MemberActionKind,
+    MemberActionState, PassField, PasteInviteState, RotateRoomState, SafetyNumberChangedState,
+    SasStage, SasState, SearchState, ShowInviteState, ShowJoinCodeState, StartField, StartRoomState,
+    VerifyState, ATTACH_VISIBLE_ROWS, REACTION_EMOJIS,
 };
 use crate::ui::centered_rect;
 
@@ -2169,5 +2170,381 @@ pub fn render_invite_picker(f: &mut Frame, s: &crate::app::InvitePickerState) {
                     Style::default().fg(Color::Cyan).bold(),
                 )),
         );
+    f.render_widget(para, area);
+}
+
+// =========================================================================
+// huddle 2.0.0 (F3): safety-number-change alarm
+// =========================================================================
+
+/// Render the TOFU-drift alarm. The offending message was already dropped by
+/// the core; this surfaces the change loudly and offers the two cryptographically
+/// safe responses — re-verify out-of-band (SAS) or block. Dismiss (Esc) leaves
+/// the pinned key unchanged, so the user stays protected by default.
+pub fn render_safety_number_changed(f: &mut Frame, s: &SafetyNumberChangedState) {
+    let area = centered_rect(70, 18, f.area());
+    f.render_widget(Clear, area);
+
+    let who = s
+        .display_name
+        .clone()
+        .unwrap_or_else(|| super::display_id(&s.fingerprint));
+
+    let opt = |label: &str, key: &str, focused: bool, color: Color| -> Line<'static> {
+        let marker = if focused { "▶" } else { " " };
+        let style = if focused {
+            Style::default().fg(color).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        Line::from(vec![
+            Span::styled(format!("  {} ", marker), style),
+            Span::styled(format!("[{}] {}", key, label), style),
+        ])
+    };
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("  the identity key for {} CHANGED.", who),
+            Style::default().fg(Color::Red).bold(),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  someone may be impersonating them, or they reinstalled /",
+            Style::default().fg(Color::White),
+        )),
+        Line::from(Span::styled(
+            "  recovered onto a new device. their last message was DROPPED.",
+            Style::default().fg(Color::White),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  old key  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(short_key(&s.old_pubkey_b64), Style::default().fg(Color::DarkGray)),
+        ]),
+        Line::from(vec![
+            Span::styled("  new key  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(short_key(&s.new_pubkey_b64), Style::default().fg(Color::Yellow)),
+        ]),
+        Line::from(""),
+        opt("re-verify out-of-band (SAS)", "v", s.focus == 0, Color::Cyan),
+        opt("block this peer", "b", s.focus == 1, Color::Red),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" Tab/↑↓", Style::default().fg(Color::Yellow)),
+            Span::styled(" move  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Enter", Style::default().fg(Color::Yellow)),
+            Span::styled(" choose  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Esc", Style::default().fg(Color::Yellow)),
+            Span::styled(" dismiss (stay safe)", Style::default().fg(Color::DarkGray)),
+        ]),
+    ];
+
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow))
+            .padding(Padding::uniform(1))
+            .title(Span::styled(
+                format!(" ⚠ safety number changed: {} ", who),
+                Style::default().fg(Color::Yellow).bold(),
+            )),
+    );
+    f.render_widget(para, area);
+}
+
+/// First two base64 groups of a pubkey — enough to read the change at a glance
+/// without dumping 44 characters into the modal.
+fn short_key(b64: &str) -> String {
+    let head: String = b64.chars().take(12).collect();
+    format!("{}…", head)
+}
+
+// =========================================================================
+// huddle 2.0.0 (F5): change master passphrase
+// =========================================================================
+
+pub fn render_change_passphrase(f: &mut Frame, s: &ChangePassphraseState) {
+    let area = centered_rect(64, 16, f.area());
+    f.render_widget(Clear, area);
+
+    let pass_field = |label: &str, value: &str, focused: bool| -> Line<'static> {
+        let masked = "•".repeat(value.chars().count());
+        let cursor = if focused { "_" } else { "" };
+        let value_style = if focused {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        Line::from(vec![
+            Span::styled(format!("  {:<14}", label), Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("[ {}{} ]", masked, cursor), value_style),
+        ])
+    };
+
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "  re-encrypts the local database under a new key.",
+            Style::default().fg(Color::White),
+        )),
+        Line::from(Span::styled(
+            "  there is NO recovery if you forget the new passphrase.",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(""),
+        pass_field("current", &s.current, s.focus == PassField::Current),
+        pass_field("new", &s.new_pass, s.focus == PassField::New),
+        pass_field("confirm new", &s.confirm, s.focus == PassField::Confirm),
+    ];
+    if let Some(err) = &s.error {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("  ✗ {}", err),
+            Style::default().fg(Color::Red).bold(),
+        )));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled(" Tab", Style::default().fg(Color::Yellow)),
+        Span::styled(" next field  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Enter", Style::default().fg(Color::Yellow)),
+        Span::styled(" change  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Esc", Style::default().fg(Color::Yellow)),
+        Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
+    ]));
+
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .padding(Padding::uniform(1))
+            .title(Span::styled(
+                " change master passphrase ",
+                Style::default().fg(Color::Cyan).bold(),
+            )),
+    );
+    f.render_widget(para, area);
+}
+
+// =========================================================================
+// huddle 2.0.0 (F6): export identity seed phrase
+// =========================================================================
+
+pub fn render_export_seed(f: &mut Frame, s: &ExportSeedState) {
+    let area = centered_rect(72, 22, f.area());
+    f.render_widget(Clear, area);
+
+    let mut lines: Vec<Line> = Vec::new();
+    match s.step {
+        ExportStep::Reveal => {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "  these 24 words ARE your identity. anyone who reads them",
+                Style::default().fg(Color::Red).bold(),
+            )));
+            lines.push(Line::from(Span::styled(
+                "  can impersonate you. write them down offline — never type",
+                Style::default().fg(Color::White),
+            )));
+            lines.push(Line::from(Span::styled(
+                "  them into a website or share a photo.",
+                Style::default().fg(Color::White),
+            )));
+            lines.push(Line::from(""));
+            if s.revealed {
+                for line in numbered_phrase(&s.phrase) {
+                    lines.push(line);
+                }
+            } else {
+                lines.push(Line::from(Span::styled(
+                    "  •••  hidden — press Space to reveal  •••",
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled(" Space", Style::default().fg(Color::Yellow)),
+                Span::styled(" reveal/hide  ", Style::default().fg(Color::DarkGray)),
+                Span::styled("Enter", Style::default().fg(Color::Yellow)),
+                Span::styled(" I've saved it →  ", Style::default().fg(Color::DarkGray)),
+                Span::styled("Esc", Style::default().fg(Color::Yellow)),
+                Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
+            ]));
+        }
+        ExportStep::Reentry => {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "  type the 24 words back to confirm you saved them correctly:",
+                Style::default().fg(Color::White),
+            )));
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled("  > ", Style::default().fg(Color::Cyan).bold()),
+                Span::styled(
+                    if s.reentry.is_empty() {
+                        "word1 word2 … word24".to_string()
+                    } else {
+                        s.reentry.clone()
+                    },
+                    if s.reentry.is_empty() {
+                        Style::default().fg(Color::DarkGray)
+                    } else {
+                        Style::default().fg(Color::White)
+                    },
+                ),
+            ]));
+            if let Some(err) = &s.error {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    format!("  ✗ {}", err),
+                    Style::default().fg(Color::Red).bold(),
+                )));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled(" Enter", Style::default().fg(Color::Yellow)),
+                Span::styled(" verify  ", Style::default().fg(Color::DarkGray)),
+                Span::styled("Esc", Style::default().fg(Color::Yellow)),
+                Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
+            ]));
+        }
+        ExportStep::Done => {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "  ✓ verified — your backup matches your identity.",
+                Style::default().fg(Color::Green).bold(),
+            )));
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "  store the words somewhere safe and offline. import them on",
+                Style::default().fg(Color::White),
+            )));
+            lines.push(Line::from(Span::styled(
+                "  a fresh install to recover this identity.",
+                Style::default().fg(Color::White),
+            )));
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled(" Enter", Style::default().fg(Color::Yellow)),
+                Span::styled(" close", Style::default().fg(Color::DarkGray)),
+            ]));
+        }
+    }
+
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Magenta))
+            .padding(Padding::uniform(1))
+            .title(Span::styled(
+                " export seed phrase ",
+                Style::default().fg(Color::Magenta).bold(),
+            )),
+    );
+    f.render_widget(para, area);
+}
+
+/// Render a space-separated phrase as numbered words, two per line, so the
+/// user can read the 24 words off without ambiguity.
+fn numbered_phrase(phrase: &str) -> Vec<Line<'static>> {
+    let words: Vec<&str> = phrase.split_whitespace().collect();
+    let mut out: Vec<Line> = Vec::new();
+    for pair in words.chunks(3) {
+        let mut spans: Vec<Span> = vec![Span::raw("   ")];
+        for (i, w) in pair.iter().enumerate() {
+            let n = out.len() * 3 + i + 1;
+            spans.push(Span::styled(
+                format!("{:>2}. ", n),
+                Style::default().fg(Color::DarkGray),
+            ));
+            spans.push(Span::styled(
+                format!("{:<12}", w),
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ));
+        }
+        out.push(Line::from(spans));
+    }
+    out
+}
+
+// =========================================================================
+// huddle 2.0.0 (F10): emoji picker + delete confirmation
+// =========================================================================
+
+pub fn render_emoji_picker(f: &mut Frame, s: &EmojiPickerState) {
+    let area = centered_rect(52, 8, f.area());
+    f.render_widget(Clear, area);
+
+    let mut spans: Vec<Span> = vec![Span::raw("  ")];
+    for (i, e) in REACTION_EMOJIS.iter().enumerate() {
+        let selected = i == s.selected;
+        let style = if selected {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD | Modifier::REVERSED)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        spans.push(Span::styled(format!(" {} ", e), style));
+    }
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(spans),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" ←/→", Style::default().fg(Color::Yellow)),
+            Span::styled(" pick  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Enter", Style::default().fg(Color::Yellow)),
+            Span::styled(" react  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Esc", Style::default().fg(Color::Yellow)),
+            Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
+        ]),
+    ];
+
+    let para = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .padding(Padding::uniform(1))
+            .title(Span::styled(
+                " react ",
+                Style::default().fg(Color::Cyan).bold(),
+            )),
+    );
+    f.render_widget(para, area);
+}
+
+pub fn render_confirm_delete(f: &mut Frame, _s: &ConfirmDeleteState) {
+    let area = centered_rect(58, 9, f.area());
+    f.render_widget(Clear, area);
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "  delete this message?",
+            Style::default().fg(Color::White).bold(),
+        )),
+        Line::from(Span::styled(
+            "  it's tombstoned everywhere (best effort) and shows as [deleted].",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" y / Enter", Style::default().fg(Color::Red).bold()),
+            Span::styled(" delete   ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Esc", Style::default().fg(Color::Yellow)),
+            Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
+        ]),
+    ];
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Red))
+            .padding(Padding::uniform(1))
+            .title(Span::styled(
+                " delete message ",
+                Style::default().fg(Color::Red).bold(),
+            )),
+    );
     f.render_widget(para, area);
 }

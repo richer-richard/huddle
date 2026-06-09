@@ -196,6 +196,15 @@ async fn main() -> Result<()> {
             );
         }
         let is_new = !salt_exists;
+        // huddle 2.0.0 (F6): on a fresh launch, offer to recover an existing
+        // identity from a BIP39 seed phrase before the user picks a (local)
+        // master passphrase. The phrase recovers the Ed25519 identity; the
+        // passphrase still encrypts the local database.
+        let imported_seed_phrase = if is_new {
+            app::prompt_import_seed()?
+        } else {
+            None
+        };
         let prompt = app::prompt_master_passphrase(is_new)?;
         if prompt.passphrase.is_empty() {
             return Ok(());
@@ -207,6 +216,12 @@ async fn main() -> Result<()> {
         let salt = keychain::load_or_create_salt().map_err(|e| anyhow!(e))?;
         let key =
             keychain::derive_master_key(&prompt.passphrase, &salt).map_err(|e| anyhow!(e))?;
+        // huddle 2.0.0 (F6): persist the recovered identity into the freshly
+        // created (encrypted) database before the AppHandle would otherwise
+        // generate a random one.
+        if let Some(phrase) = &imported_seed_phrase {
+            import_identity_into_db(&key, phrase)?;
+        }
         (Some(key), prompt.username)
     };
 
@@ -315,6 +330,29 @@ async fn main() -> Result<()> {
         }
     }
     app::run_tui(handle).await
+}
+
+/// huddle 2.0.0 (F6): persist a seed-recovered identity into the (just-created)
+/// encrypted database so the AppHandle loads it instead of generating a fresh
+/// random one. Opens the DB with the master key, validates + decodes the phrase,
+/// and writes the identity only if none exists yet (defensive — a fresh launch
+/// has none). The connection is dropped before `start_with_options` reopens the
+/// same file.
+fn import_identity_into_db(master_key: &[u8; 32], phrase: &str) -> Result<()> {
+    use huddle_core::storage::{self, repo};
+
+    let id = huddle_core::app::import_identity_from_phrase(phrase).map_err(|e| anyhow!(e))?;
+    let db = storage::open_db(&huddle_core::config::db_path(), Some(master_key))
+        .map_err(|e| anyhow!(e))?;
+    if repo::load_identity(&db).map_err(|e| anyhow!(e))?.is_none() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        repo::save_identity(&db, &id.secret_bytes(), now).map_err(|e| anyhow!(e))?;
+        tracing::info!(fingerprint = %id.fingerprint(), "recovered identity from seed phrase");
+    }
+    Ok(())
 }
 
 /// huddle 0.6: print a diagnostic snapshot — version, build target,

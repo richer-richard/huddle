@@ -48,6 +48,35 @@ pub fn open_db_in_memory() -> Result<Db> {
     Ok(Arc::new(Mutex::new(conn)))
 }
 
+/// Re-encrypt the open SQLCipher database in place under `new_key` for the
+/// huddle 2.0.0 master-passphrase change (F5).
+///
+/// `PRAGMA rekey` rewrites every page with the new key as one atomic
+/// SQLCipher operation; we then run the same sentinel query as `open_db` to
+/// prove the connection now decrypts under the new key before the caller
+/// commits the rest of the rotation (re-persisting the Megolm subkey and
+/// writing the new salt via `keychain::rotate_salt`). A botched rekey thus
+/// surfaces here as a clean domain error rather than as a cryptic failure on
+/// the next unrelated statement.
+///
+/// Rollback safety: SQLCipher's rekey is all-or-nothing, so a failure here
+/// leaves the database readable under the *old* key. Because the caller only
+/// rotates `keychain.salt` after this returns `Ok`, an aborted change always
+/// recovers to the previous passphrase on the next launch.
+pub fn rekey_db(conn: &Connection, new_key: &[u8; 32]) -> Result<()> {
+    let pragma = format!("PRAGMA rekey = \"x'{}'\";", hex::encode(new_key));
+    conn.execute_batch(&pragma)?;
+    // Sentinel: force a page decryption under the freshly-installed key.
+    if let Err(e) = conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| {
+        r.get::<_, i64>(0)
+    }) {
+        return Err(HuddleError::Session(format!(
+            "database rekey did not verify under the new master key: {e}"
+        )));
+    }
+    Ok(())
+}
+
 /// Apply pending schema migrations, tracked by `PRAGMA user_version`.
 /// Each entry in `schema::MIGRATIONS` runs exactly once, in order; the
 /// version cursor advances after each so a real SQL error aborts startup
@@ -83,4 +112,37 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // huddle 2.0.0 (F5): rekey must atomically swap the master key — the old
+    // key can no longer open the DB, the new key can, and no rows are lost.
+    #[test]
+    fn rekey_swaps_the_master_key_without_data_loss() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rekey.db");
+        let old_key = [0x11u8; 32];
+        let new_key = [0x22u8; 32];
+
+        // Create an encrypted DB under the old key, write a row, then rekey.
+        {
+            let db = open_db(&path, Some(&old_key)).unwrap();
+            let conn = db.lock().unwrap();
+            conn.execute_batch("CREATE TABLE t (v TEXT); INSERT INTO t VALUES ('hi');")
+                .unwrap();
+            rekey_db(&conn, &new_key).unwrap();
+        }
+
+        // The old key must no longer open it — a clean error, not a panic.
+        assert!(open_db(&path, Some(&old_key)).is_err());
+
+        // The new key opens it and the data survived the rekey intact.
+        let db = open_db(&path, Some(&new_key)).unwrap();
+        let conn = db.lock().unwrap();
+        let v: String = conn.query_row("SELECT v FROM t", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, "hi");
+    }
 }

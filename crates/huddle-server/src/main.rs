@@ -21,6 +21,7 @@
 //!   RUST_LOG            (default info)
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -107,6 +108,15 @@ enum ClientMsg {
         signature_b64: String,
         #[serde(default)]
         rooms: Vec<String>,
+        /// huddle 2.0: capability bit — the client implements at-least-once
+        /// mailbox ACKs (it answers each queued `Message` with a `ClientMsg::Ack`
+        /// carrying the row's `mailbox_id`). When `true` the relay tags each
+        /// mailbox delivery with its row id and keeps the row until the matching
+        /// `Ack` arrives. When `false` (pre-2.0 clients — the serde default) the
+        /// relay falls back to the classical delete-on-deliver behavior so an old
+        /// client that never ACKs can't wedge its queue into endless redelivery.
+        #[serde(default)]
+        acks: bool,
     },
     Subscribe {
         room: String,
@@ -147,6 +157,12 @@ enum ClientMsg {
     },
     /// Re-drain the mailbox on demand.
     Fetch,
+    /// huddle 2.0: client acknowledges durable receipt of a relay-delivered
+    /// mailbox message. The relay deletes the mailbox row only after receiving
+    /// this ACK (at-least-once delivery). `mailbox_id` is the server-assigned
+    /// row id from the `ServerMsg::Message` the client persisted. Scoped to the
+    /// authenticated fingerprint, so an identity can only drop its own queue.
+    Ack { mailbox_id: i64 },
     Ping,
 }
 
@@ -157,7 +173,20 @@ enum ServerMsg {
     /// to prove control of its identity key before it can do anything.
     Challenge { nonce_b64: String },
     Ready { fingerprint: String },
-    Message { room: String, id: String, payload_b64: String },
+    /// A room message delivered live or from the offline mailbox. huddle 2.0:
+    /// `mailbox_id` is `Some(row_id)` when the message came from the relay's
+    /// on-disk queue AND the recipient advertised ACK support in its `Hello`
+    /// (the client must `Ack` after persisting so the relay can delete the row);
+    /// it is `None` for live fan-out and for pre-2.0 clients that get classical
+    /// delete-on-deliver. `skip_serializing_if` keeps the field off the wire for
+    /// live/legacy messages so old clients see exactly the bytes they expect.
+    Message {
+        room: String,
+        id: String,
+        payload_b64: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mailbox_id: Option<i64>,
+    },
     Sent { id: String, delivered: usize, queued: usize },
     /// huddle 1.2.1: a freshly minted connect code + its lifetime (seconds).
     ConnectToken { token: String, ttl_secs: u64 },
@@ -209,6 +238,29 @@ impl ConnectTokens {
     }
 }
 
+/// huddle 2.0 (F13): lock-free operational counters exposed at `GET /metrics`
+/// in the Prometheus text exposition format. All updates are `Relaxed` — these
+/// are coarse operability gauges/counters, not synchronization primitives, so
+/// no ordering guarantees are needed across them.
+#[derive(Default)]
+struct Metrics {
+    /// Gauge: accepted sockets currently inside a connection handler (bounded by
+    /// `MAX_TOTAL_CONNECTIONS`). Includes brief HTTP probes such as the scrape
+    /// that reads this very counter.
+    active_connections: AtomicU64,
+    /// Counter: room/direct messages fanned out live to a connected recipient.
+    publish_delivered: AtomicU64,
+    /// Counter: messages queued to an offline recipient's on-disk mailbox.
+    publish_queued: AtomicU64,
+    /// Counter: fan-out sends dropped because a live recipient's bounded
+    /// outbound queue (`OUTBOUND_CAP`) was full; the message is mailboxed
+    /// instead (memory-amplification DoS defense, see `OUTBOUND_CAP`).
+    outbound_cap_drops: AtomicU64,
+    /// Counter: connections dropped for not completing the auth handshake before
+    /// the `PRE_AUTH_TIMEOUT_SECS` deadline (idle pre-auth DoS defense).
+    pre_auth_timeouts: AtomicU64,
+}
+
 struct Shared {
     db: Mutex<Connection>,
     /// fingerprint → the live socket senders for that identity (a user may
@@ -216,6 +268,8 @@ struct Shared {
     conns: Mutex<HashMap<String, Vec<Tx>>>,
     /// huddle 1.2.1: short-lived connect codes (the DM "add by code" feature).
     tokens: Mutex<ConnectTokens>,
+    /// huddle 2.0 (F13): operational counters rendered at `GET /metrics`.
+    metrics: Metrics,
 }
 
 #[tokio::main]
@@ -236,6 +290,7 @@ async fn main() -> Result<()> {
         db: Mutex::new(conn),
         conns: Mutex::new(HashMap::new()),
         tokens: Mutex::new(ConnectTokens::default()),
+        metrics: Metrics::default(),
     });
 
     // huddle 1.1.4: periodic mailbox GC. Every hour drop queued ciphertext
@@ -262,7 +317,7 @@ async fn main() -> Result<()> {
     }
 
     let listener = TcpListener::bind(&bind).await?;
-    info!(%bind, db = %db_path, "huddle-server listening (WebSocket + /health)");
+    info!(%bind, db = %db_path, "huddle-server listening (WebSocket + /health + /metrics)");
 
     // huddle 1.3.4: bound the number of concurrent connections. A permit is
     // acquired per accepted socket and released when its handler returns.
@@ -284,9 +339,14 @@ async fn main() -> Result<()> {
         tokio::spawn(async move {
             // Hold the permit for the whole connection lifetime.
             let _permit = permit;
-            if let Err(e) = handle_conn(stream, shared).await {
+            // huddle 2.0 (F13): count this accepted socket as an active
+            // connection for the lifetime of its handler so `/metrics` can
+            // report live concurrency against `MAX_TOTAL_CONNECTIONS`.
+            shared.metrics.active_connections.fetch_add(1, Ordering::Relaxed);
+            if let Err(e) = handle_conn(stream, shared.clone()).await {
                 debug!(error = %e, "connection ended");
             }
+            shared.metrics.active_connections.fetch_sub(1, Ordering::Relaxed);
         });
     }
 }
@@ -309,7 +369,16 @@ async fn handle_conn(stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
     // for a multiple of the documented budget.
     let dur = std::time::Duration::from_secs(PRE_AUTH_TIMEOUT_SECS);
     let pre_ws_deadline = tokio::time::Instant::now() + dur;
-    let n = tokio::time::timeout_at(pre_ws_deadline, stream.peek(&mut buf)).await??;
+    // huddle 2.0 (F13): a slowloris that opens TCP and dribbles (or sends
+    // nothing) trips this deadline; count it as a pre-auth timeout, alongside
+    // the post-upgrade auth-handshake timeout in `serve_ws`.
+    let n = match tokio::time::timeout_at(pre_ws_deadline, stream.peek(&mut buf)).await {
+        Ok(r) => r?,
+        Err(_) => {
+            shared.metrics.pre_auth_timeouts.fetch_add(1, Ordering::Relaxed);
+            return Ok(());
+        }
+    };
     let head = String::from_utf8_lossy(&buf[..n]);
     if head.to_ascii_lowercase().contains("upgrade: websocket") {
         // huddle 1.3.1: cap the inbound message/frame size at the WS layer so an
@@ -323,20 +392,31 @@ async fn handle_conn(stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
             max_frame_size: Some(512 * 1024),
             ..Default::default()
         };
-        let ws = tokio::time::timeout_at(
+        let ws = match tokio::time::timeout_at(
             pre_ws_deadline,
             tokio_tungstenite::accept_async_with_config(stream, Some(config)),
         )
-        .await??;
+        .await
+        {
+            Ok(r) => r?,
+            Err(_) => {
+                // A partial WebSocket upgrade that never completes is the same
+                // idle-pre-auth abuse; count it too (huddle 2.0, F13).
+                shared.metrics.pre_auth_timeouts.fetch_add(1, Ordering::Relaxed);
+                return Ok(());
+            }
+        };
         serve_ws(ws, shared).await
     } else {
-        // Plain HTTP. `/health` keeps the JSON probe contract; every other
-        // path (notably `/`) serves the static landing page so a browser
-        // visiting the onion sees something intentional instead of raw
+        // Plain HTTP. `/health` keeps the JSON probe contract; `/metrics`
+        // exposes the Prometheus-format operational counters (huddle 2.0, F13);
+        // every other path (notably `/`) serves the static landing page so a
+        // browser visiting the onion sees something intentional instead of raw
         // bytes. The relay protocol lives on the WebSocket upgrade above —
         // clients (the CLI, and any future frontend) hit `/ws`.
         match request_target(&head) {
             "/health" => serve_health(stream).await,
+            "/metrics" => serve_metrics(stream, &shared).await,
             _ => serve_landing(stream).await,
         }
     }
@@ -346,6 +426,61 @@ async fn serve_health(mut stream: TcpStream) -> Result<()> {
     let body = r#"{"ok":true,"service":"huddle-server"}"#;
     let resp = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    stream.write_all(resp.as_bytes()).await?;
+    stream.flush().await?;
+    Ok(())
+}
+
+/// huddle 2.0 (F13): serve the operational counters at `GET /metrics` in the
+/// Prometheus text exposition format (v0.0.4). Hand-rendered from the
+/// `AtomicU64` gauges/counters plus a live `COUNT(*)` of the mailbox table — no
+/// extra dependency. Like `/health`, this is a one-shot HTTP response on the
+/// same port the WebSocket relay rides; an operator points Prometheus (or
+/// `curl`) at it directly, or via the onion. It exposes only aggregate counts,
+/// never room ids, fingerprints, or ciphertext.
+async fn serve_metrics(mut stream: TcpStream, shared: &Arc<Shared>) -> Result<()> {
+    let m = &shared.metrics;
+    let active = m.active_connections.load(Ordering::Relaxed);
+    let delivered = m.publish_delivered.load(Ordering::Relaxed);
+    let queued = m.publish_queued.load(Ordering::Relaxed);
+    let cap_drops = m.outbound_cap_drops.load(Ordering::Relaxed);
+    let pre_auth = m.pre_auth_timeouts.load(Ordering::Relaxed);
+    // Total queued rows across every recipient. A read-only aggregate; on any
+    // error we report 0 rather than failing the scrape.
+    let mailbox_rows: i64 = {
+        let db = shared.db.lock().await;
+        db.query_row("SELECT COUNT(*) FROM mailbox", [], |r| r.get(0))
+            .unwrap_or(0)
+    };
+    let body = format!(
+        "# HELP huddle_active_connections Accepted sockets currently being handled.\n\
+         # TYPE huddle_active_connections gauge\n\
+         huddle_active_connections {active}\n\
+         # HELP huddle_max_connections Configured ceiling on concurrent connections.\n\
+         # TYPE huddle_max_connections gauge\n\
+         huddle_max_connections {max_conns}\n\
+         # HELP huddle_mailbox_rows Queued mailbox rows across all recipients.\n\
+         # TYPE huddle_mailbox_rows gauge\n\
+         huddle_mailbox_rows {mailbox_rows}\n\
+         # HELP huddle_publish_delivered_total Messages fanned out live to a connected recipient.\n\
+         # TYPE huddle_publish_delivered_total counter\n\
+         huddle_publish_delivered_total {delivered}\n\
+         # HELP huddle_publish_queued_total Messages queued to an offline recipient's mailbox.\n\
+         # TYPE huddle_publish_queued_total counter\n\
+         huddle_publish_queued_total {queued}\n\
+         # HELP huddle_outbound_cap_drops_total Fan-out sends dropped because a recipient's outbound queue was full.\n\
+         # TYPE huddle_outbound_cap_drops_total counter\n\
+         huddle_outbound_cap_drops_total {cap_drops}\n\
+         # HELP huddle_pre_auth_timeouts_total Connections dropped for not authenticating before the deadline.\n\
+         # TYPE huddle_pre_auth_timeouts_total counter\n\
+         huddle_pre_auth_timeouts_total {pre_auth}\n",
+        max_conns = MAX_TOTAL_CONNECTIONS,
+    );
+    let resp = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         body.len(),
         body
     );
@@ -437,6 +572,11 @@ async fn serve_ws(ws: WebSocketStream<TcpStream>, shared: Arc<Shared>) -> Result
     // can bind it into the code (lets a redeemer TOFU-pin the owner's key).
     let mut proven_pubkey: Option<String> = None;
     let mut authenticated = false;
+    // huddle 2.0 (F7): whether this connection's client advertised ACK support in
+    // its `Hello` (the `acks` capability bit). When true the relay uses
+    // at-least-once mailbox delivery (tag each row with its id, delete only on
+    // `Ack`); when false it keeps the classical delete-on-deliver behavior.
+    let mut acks_enabled = false;
     // Drop a connection that never finishes the handshake within the deadline
     // (idle pre-auth DoS defense). Disabled once authenticated.
     let auth_deadline = tokio::time::sleep(std::time::Duration::from_secs(PRE_AUTH_TIMEOUT_SECS));
@@ -446,6 +586,7 @@ async fn serve_ws(ws: WebSocketStream<TcpStream>, shared: Arc<Shared>) -> Result
         let frame = tokio::select! {
             _ = &mut auth_deadline, if !authenticated => {
                 debug!("client did not authenticate within the timeout; dropping");
+                shared.metrics.pre_auth_timeouts.fetch_add(1, Ordering::Relaxed);
                 break;
             }
             f = stream.next() => match f {
@@ -506,7 +647,10 @@ async fn serve_ws(ws: WebSocketStream<TcpStream>, shared: Arc<Shared>) -> Result
                 }
             }
         }
-        if let Err(e) = handle_client_msg(msg, &mut fingerprint, &proven_pubkey, &tx, &shared).await {
+        if let Err(e) =
+            handle_client_msg(msg, &mut fingerprint, &proven_pubkey, &mut acks_enabled, &tx, &shared)
+                .await
+        {
             let _ = tx
                 .send(ServerMsg::Error {
                     message: e.to_string(),
@@ -533,11 +677,12 @@ async fn handle_client_msg(
     msg: ClientMsg,
     fingerprint: &mut Option<String>,
     proven_pubkey: &Option<String>,
+    acks_enabled: &mut bool,
     tx: &Tx,
     shared: &Arc<Shared>,
 ) -> Result<()> {
     match msg {
-        ClientMsg::Hello { rooms, .. } => {
+        ClientMsg::Hello { rooms, acks, .. } => {
             // huddle 1.1.4: the routing fingerprint is the one PROVEN during
             // the auth handshake (bound by serve_ws from the verified pubkey),
             // NOT the client-claimed `fingerprint` field — which we ignore here
@@ -577,8 +722,12 @@ async fn handle_client_msg(
                     }
                 }
             }
+            // huddle 2.0 (F7): pin this connection's at-least-once capability from
+            // the Hello bit. A re-Hello may flip it (e.g. a client that upgraded
+            // mid-session), but in practice it's constant for a socket's life.
+            *acks_enabled = acks;
             let _ = tx.send(ServerMsg::Ready { fingerprint: fp.clone() }).await;
-            flush_mailbox(&fp, tx, shared).await?;
+            flush_mailbox(&fp, tx, shared, acks).await?;
         }
         ClientMsg::Subscribe { room } => {
             let fp = require_fp(fingerprint)?;
@@ -619,30 +768,32 @@ async fn handle_client_msg(
                 let online = {
                     let conns = shared.conns.lock().await;
                     match conns.get(&member) {
+                        // huddle 1.1.4: `try_send` on the bounded outbound queue —
+                        // a slow/stalled recipient (Full) or a gone one (Closed)
+                        // counts as not-live, so we mailbox it instead of blocking
+                        // the publisher or buffering unboundedly. huddle 2.0 (F13):
+                        // a Full drop is the OUTBOUND_CAP back-pressure metric.
                         Some(senders) => {
                             let out = ServerMsg::Message {
                                 room: room.clone(),
                                 id: id.clone(),
                                 payload_b64: payload_b64.clone(),
+                                // Live fan-out is never mailboxed, so no row id.
+                                mailbox_id: None,
                             };
-                            // huddle 1.1.4: `try_send` on the bounded outbound
-                            // queue — a slow/stalled recipient (Full) or a gone
-                            // one (Closed) counts as not-live, so we mailbox it
-                            // instead of blocking the publisher or buffering
-                            // unboundedly.
-                            senders
-                                .iter()
-                                .fold(false, |acc, s| acc | s.try_send(out.clone()).is_ok())
+                            fan_out(senders, &out, &shared.metrics)
                         }
                         None => false,
                     }
                 };
                 if online {
                     delivered += 1;
+                    shared.metrics.publish_delivered.fetch_add(1, Ordering::Relaxed);
                 } else {
                     let db = shared.db.lock().await;
                     enqueue(&db, &member, &room, &id, &payload_b64)?;
                     queued += 1;
+                    shared.metrics.publish_queued.fetch_add(1, Ordering::Relaxed);
                 }
             }
             let _ = tx.send(ServerMsg::Sent { id, delivered, queued }).await;
@@ -677,19 +828,21 @@ async fn handle_client_msg(
                             room: room.clone(),
                             id: id.clone(),
                             payload_b64: payload_b64.clone(),
+                            // Live direct delivery is never mailboxed.
+                            mailbox_id: None,
                         };
-                        senders
-                            .iter()
-                            .fold(false, |acc, s| acc | s.try_send(out.clone()).is_ok())
+                        fan_out(senders, &out, &shared.metrics)
                     }
                     None => false,
                 }
             };
             let (delivered, queued) = if online {
+                shared.metrics.publish_delivered.fetch_add(1, Ordering::Relaxed);
                 (1usize, 0usize)
             } else {
                 let db = shared.db.lock().await;
                 enqueue(&db, &to, &room, &id, &payload_b64)?;
+                shared.metrics.publish_queued.fetch_add(1, Ordering::Relaxed);
                 (0usize, 1usize)
             };
             let _ = tx.send(ServerMsg::Sent { id, delivered, queued }).await;
@@ -762,7 +915,21 @@ async fn handle_client_msg(
         }
         ClientMsg::Fetch => {
             let fp = require_fp(fingerprint)?;
-            flush_mailbox(&fp, tx, shared).await?;
+            flush_mailbox(&fp, tx, shared, *acks_enabled).await?;
+        }
+        ClientMsg::Ack { mailbox_id } => {
+            // huddle 2.0 (F7): the client durably handled a mailbox-delivered
+            // message; delete exactly that row. Scoped to the authenticated
+            // fingerprint so an identity can only drop its OWN queued rows — a
+            // bare `id` is not capability enough to delete a stranger's mailbox.
+            // A no-op when the row is already gone (duplicate/late ACK, or it was
+            // swept by the TTL GC) — safe and idempotent.
+            let fp = require_fp(fingerprint)?;
+            let db = shared.db.lock().await;
+            db.execute(
+                "DELETE FROM mailbox WHERE id = ?1 AND fingerprint = ?2",
+                params![mailbox_id, fp],
+            )?;
         }
         ClientMsg::Ping => {
             let _ = tx.send(ServerMsg::Pong).await;
@@ -771,33 +938,69 @@ async fn handle_client_msg(
     Ok(())
 }
 
-async fn flush_mailbox(fp: &str, tx: &Tx, shared: &Arc<Shared>) -> Result<()> {
-    // huddle 1.1.4: peek (do NOT delete) the queue, deliver into the bounded
-    // outbound channel, and delete ONLY the rows that were accepted. If the
-    // socket is gone, `tx.send` errors and we stop — the rest stay in the DB
-    // with their original `created_at` for the next connection, so there's no
-    // silent loss and no TTL reset. Residual: a row accepted into the bounded
-    // buffer but not yet written when the socket dies can still be lost
-    // (bounded by OUTBOUND_CAP). True at-least-once needs per-message writer
-    // acks — tracked in docs/ROADMAP-forward-secrecy-and-rekey.md (§3).
+/// huddle 2.0 (F13): deliver `out` to one recipient's live sockets, counting any
+/// `OUTBOUND_CAP`-full drop. Returns `true` when at least one socket accepted
+/// it; a `false` return means the caller should mailbox the message. A `Closed`
+/// send (gone socket) is silent — it's just a not-live connection.
+fn fan_out(senders: &[Tx], out: &ServerMsg, metrics: &Metrics) -> bool {
+    let mut any_ok = false;
+    for s in senders {
+        match s.try_send(out.clone()) {
+            Ok(()) => any_ok = true,
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                metrics.outbound_cap_drops.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {}
+        }
+    }
+    any_ok
+}
+
+/// Drain a recipient's offline mailbox onto its live socket.
+///
+/// huddle 1.1.4: peek (do NOT delete) the queue, deliver into the bounded
+/// outbound channel, and delete ONLY the rows that were accepted. If the socket
+/// is gone, `tx.send` errors and we stop — the rest stay in the DB with their
+/// original `created_at` for the next connection, so there's no silent loss and
+/// no TTL reset.
+///
+/// huddle 2.0 (F7): `acks` selects the delivery discipline:
+/// - `false` (pre-2.0 clients): classical delete-on-deliver — tag the row with
+///   no `mailbox_id` and delete it once the writer accepts it. The residual is
+///   that a row accepted into the bounded buffer but not yet written when the
+///   socket dies can still be lost (bounded by OUTBOUND_CAP), but the queue can
+///   never wedge: an old client that never ACKs still drains its mailbox.
+/// - `true` (2.0+ clients): at-least-once — tag each row with its `id` and keep
+///   it on disk. The client `Ack`s after durably persisting, and only then does
+///   the relay delete the row (see the `Ack` handler). A lost ACK simply means
+///   the row is redelivered on the next drain (an accepted, rare duplicate),
+///   bounded by the existing TTL GC.
+async fn flush_mailbox(fp: &str, tx: &Tx, shared: &Arc<Shared>, acks: bool) -> Result<()> {
     let items = {
         let db = shared.db.lock().await;
         peek_mailbox(&db, fp)?
     };
     let mut delivered_ids: Vec<i64> = Vec::new();
     for (row_id, room, msg_id, payload_b64) in items {
+        // At-least-once clients get the row id to ACK; legacy clients get `None`
+        // and the delete-on-deliver path below.
+        let mailbox_id = if acks { Some(row_id) } else { None };
         if tx
             .send(ServerMsg::Message {
                 room,
                 id: msg_id,
                 payload_b64,
+                mailbox_id,
             })
             .await
             .is_err()
         {
             break; // socket gone — keep the remaining rows for next time
         }
-        delivered_ids.push(row_id);
+        // Only the legacy path deletes here; at-least-once waits for the `Ack`.
+        if !acks {
+            delivered_ids.push(row_id);
+        }
     }
     if !delivered_ids.is_empty() {
         let db = shared.db.lock().await;
@@ -1007,7 +1210,66 @@ fn delete_mailbox_ids(c: &Connection, ids: &[i64]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::request_target;
+    use super::{request_target, ClientMsg, ServerMsg};
+
+    #[test]
+    fn message_serializes_mailbox_id_only_when_present() {
+        // huddle 2.0 (F7): a live message carries no `mailbox_id` on the wire, so
+        // a pre-2.0 client decodes exactly the fields it expects (backward-compat
+        // via skip_serializing_if).
+        let live = ServerMsg::Message {
+            room: "r".into(),
+            id: "i".into(),
+            payload_b64: "p".into(),
+            mailbox_id: None,
+        };
+        let s = serde_json::to_string(&live).unwrap();
+        assert!(
+            !s.contains("mailbox_id"),
+            "live message must omit mailbox_id for old-client compat: {s}"
+        );
+        // A queued (at-least-once) delivery carries the row id to ACK.
+        let queued = ServerMsg::Message {
+            room: "r".into(),
+            id: "i".into(),
+            payload_b64: "p".into(),
+            mailbox_id: Some(42),
+        };
+        let s = serde_json::to_string(&queued).unwrap();
+        assert!(
+            s.contains("\"mailbox_id\":42"),
+            "queued message must carry its mailbox_id: {s}"
+        );
+    }
+
+    #[test]
+    fn parses_ack() {
+        // huddle 2.0 (F7): the relay must accept the new ACK variant.
+        let m: ClientMsg = serde_json::from_str(r#"{"type":"ack","mailbox_id":7}"#).unwrap();
+        match m {
+            ClientMsg::Ack { mailbox_id } => assert_eq!(mailbox_id, 7),
+            other => panic!("expected ack, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hello_acks_capability_defaults_false() {
+        // A pre-2.0 Hello (no `acks` field) must decode with the bit off, so the
+        // relay keeps the classical delete-on-deliver behavior for old clients.
+        let m: ClientMsg =
+            serde_json::from_str(r#"{"type":"hello","fingerprint":"fp"}"#).unwrap();
+        match m {
+            ClientMsg::Hello { acks, .. } => assert!(!acks),
+            other => panic!("expected hello, got {other:?}"),
+        }
+        // A 2.0 client opts in explicitly.
+        let m: ClientMsg =
+            serde_json::from_str(r#"{"type":"hello","fingerprint":"fp","acks":true}"#).unwrap();
+        match m {
+            ClientMsg::Hello { acks, .. } => assert!(acks),
+            other => panic!("expected hello, got {other:?}"),
+        }
+    }
 
     #[test]
     fn parses_plain_paths() {

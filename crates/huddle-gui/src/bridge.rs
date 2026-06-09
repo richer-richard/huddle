@@ -42,6 +42,10 @@ pub enum ReqTag {
     SasStart { room_id: String, partner: String },
     SendFile,
     GoDark,
+    /// huddle 2.0.0 (F5): change the master passphrase. A failure (wrong current
+    /// passphrase) routes back to the modal's inline error; success arrives as
+    /// AppEvent::PassphraseChanged.
+    ChangePassphrase,
 }
 
 /// The payload of a successful return-value command.
@@ -84,6 +88,11 @@ pub struct BuildParams {
     pub transport_order: Option<Vec<String>>,
     pub auth: AuthChoice,
     pub name: Option<String>,
+    /// huddle 2.0.0 (F6): on a fresh install, restore the identity from this
+    /// 24-word BIP39 seed phrase before the handle generates a random one.
+    /// `None` keeps the default (generate a new identity). Ignored when a
+    /// stored identity already exists.
+    pub import_phrase: Option<String>,
 }
 
 /// Handed back to the UI once the handle is up and the pump is running.
@@ -156,15 +165,53 @@ async fn build_inner(ctx: egui::Context, params: BuildParams) -> Result<ReadyPar
         pin: params.transport_pin,
         order: params.transport_order,
     };
-    let handle = AppHandle::start_with_options(
-        mode,
-        params.port,
-        key.as_ref(),
-        params.relays,
-        transports,
-    )
-    .await
-    .map_err(|e| e.to_string())?;
+    let handle = match params.import_phrase {
+        // huddle 2.0.0 (F6): fresh-install identity restore. Seed the DB with the
+        // imported identity BEFORE the handle loads it, then start on that same
+        // DB. This mirrors `AppHandle::start_with_options`' own
+        // `open_db → start_with_db_and_options` funnel, with one extra step (save
+        // the imported secret). The `load_identity` guard makes it a no-op if an
+        // identity already exists, so a stray import phrase can never overwrite
+        // one.
+        Some(phrase) => {
+            use huddle_core::storage::repo;
+            huddle_core::config::ensure_data_dir().map_err(|e| e.to_string())?;
+            let persist = match key {
+                Some(mk) => keychain::derive_subkey(&mk, b"megolm-persist"),
+                None => [0u8; 32],
+            };
+            let db = huddle_core::storage::open_db(&huddle_core::config::db_path(), key.as_ref())
+                .map_err(|e| e.to_string())?;
+            if repo::load_identity(&db).map_err(|e| e.to_string())?.is_none() {
+                let id = huddle_core::app::import_identity_from_phrase(&phrase)
+                    .map_err(|e| e.to_string())?;
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                repo::save_identity(&db, &id.secret_bytes(), now).map_err(|e| e.to_string())?;
+            }
+            AppHandle::start_with_db_and_options(
+                db,
+                mode,
+                params.port,
+                persist,
+                params.relays,
+                transports,
+            )
+            .await
+            .map_err(|e| e.to_string())?
+        }
+        None => AppHandle::start_with_options(
+            mode,
+            params.port,
+            key.as_ref(),
+            params.relays,
+            transports,
+        )
+        .await
+        .map_err(|e| e.to_string())?,
+    };
 
     if let Some(n) = params.name {
         let trimmed = n.trim();

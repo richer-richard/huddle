@@ -101,6 +101,14 @@ fn render_header(f: &mut Frame, area: Rect, app: &TuiApp, theme: &Theme, room_id
         spans.push(Span::raw("  "));
         spans.push(Span::styled("(read-only)", theme.dim()));
     }
+    // huddle 2.0.0 (F9): disappearing-messages indicator.
+    if let Some(secs) = app.handle.room_disappearing_ttl(room_id) {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            format!("⧖ expires in {}", chat_common::format_ttl(secs)),
+            theme.warn_style(),
+        ));
+    }
 
     let mut lines = vec![Line::from(spans)];
     if let Some(t) = chat_common::typing_line(app, theme, room_id) {

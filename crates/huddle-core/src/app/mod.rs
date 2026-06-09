@@ -327,6 +327,14 @@ struct SasFlow {
     /// huddle 1.3.1: unix insert time, so the discovered-room pruner can reap
     /// abandoned flows (TTL) and bound this otherwise-unbounded map.
     created_at: i64,
+    /// huddle 2.0.0 (F1): `true` iff we bound the partner's ML-KEM
+    /// encapsulation key into this SAS code (the partner is post-quantum
+    /// capable and we held their ek when we derived the code). Carried into
+    /// `add_verified_peer(.., pq_capable = …)` on success so the durable
+    /// `verified_peers.pq_capable` anchor records that this peer was verified
+    /// PQ-capable — `ensure_dm_key` then refuses any later classical-only DM
+    /// fallback for them, defeating a post-verification relay downgrade.
+    partner_pq_capable: bool,
 }
 
 /// huddle 0.8: the canonical centralized server, reachable only as a Tor
@@ -377,10 +385,23 @@ pub struct AppHandle {
     /// 32-byte key Megolm session pickles are encrypted under at rest —
     /// an HKDF subkey of the master key, or all-zero on the
     /// `--no-master-passphrase` / unencrypted-DB path.
-    session_persist_key: [u8; 32],
+    ///
+    /// huddle 2.0.0 (F5): behind a `Mutex` so `change_master_passphrase` can
+    /// swap it in place after re-deriving it from the new passphrase — the
+    /// AppHandle (and every clone) keeps working without a rebuild. Read via
+    /// `persist_key()`; all RoomCrypto construction goes through that accessor.
+    session_persist_key: Arc<Mutex<[u8; 32]>>,
     /// Phase G: active SAS verifications. Keyed by tx_id (the random
     /// 16-byte salt picked by the initiator + base64'd).
     sas_flows: Arc<Mutex<HashMap<String, SasFlow>>>,
+    /// huddle 2.0.0 (F10): last Megolm `session_id` we successfully decrypted a
+    /// message under, keyed by `(room_id, sender_fingerprint)`. An inbound
+    /// `Edit` in an encrypted room carries a fresh ciphertext but no session id
+    /// (the wire `Edit` variant has none), so we decrypt it against the
+    /// sender's most-recently-seen session — which is exactly the outbound
+    /// session they edit under. Recorded on every successful `Encrypted`
+    /// decrypt; in-memory only.
+    last_inbound_session: Arc<Mutex<HashMap<(String, String), String>>>,
     /// Phase F: ephemeral X25519 secrets the joiner is holding while
     /// they wait for the owner's `CodeJoinResponse`. Keyed by
     /// `(room_id, joiner_fp)` so multiple joiners in the same room can
@@ -760,8 +781,9 @@ impl AppHandle {
             connected_dial_addrs,
             file_manager,
             db,
-            session_persist_key,
+            session_persist_key: Arc::new(Mutex::new(session_persist_key)),
             sas_flows: Arc::new(Mutex::new(HashMap::new())),
+            last_inbound_session: Arc::new(Mutex::new(HashMap::new())),
             pending_code_secrets: Arc::new(Mutex::new(HashMap::new())),
             pending_invite_dials: Arc::new(Mutex::new(HashMap::new())),
             nat_reachable_addrs: Arc::new(Mutex::new(HashSet::new())),
@@ -1125,7 +1147,7 @@ impl AppHandle {
                 self.db.clone(),
                 room_id.clone(),
                 creator_fp.clone(),
-                self.session_persist_key,
+                self.persist_key(),
             )?)
         } else {
             None
@@ -1300,7 +1322,7 @@ impl AppHandle {
             self.db.clone(),
             room_id.clone(),
             our_fp.clone(),
-            self.session_persist_key,
+            self.persist_key(),
         )?);
 
         self.active_rooms.lock().unwrap().insert(
@@ -1391,6 +1413,25 @@ impl AppHandle {
     /// `is_first || is_upgrade` rule (upgrade is classical→hybrid only). Every
     /// interleaving converges to hybrid with no downgrade and at most one
     /// `rotate_outbound` — so do not weaken the commit re-check.
+
+    /// huddle 2.0.0 (F1): the partner's pinned ML-KEM-768 encapsulation key
+    /// bytes (decoded from the durable `room_members.mlkem_pubkey` pin), or
+    /// `None` if we've never observed it. Bound into the SAS transcript so a
+    /// verified peer's post-quantum capability becomes part of the out-of-band
+    /// trust anchor — see [`crate::crypto::sas::derive_sas_code`]. A malformed
+    /// (wrong-length) pin is treated as absent.
+    fn partner_mlkem_ek_bytes(&self, fingerprint: &str) -> Option<Vec<u8>> {
+        let b64 = repo::lookup_peer_mlkem_pubkey(&self.db, fingerprint)
+            .ok()
+            .flatten()?;
+        let bytes = B64.decode(&b64).ok()?;
+        if bytes.len() == crate::crypto::pqc::MLKEM_EK_LEN {
+            Some(bytes)
+        } else {
+            None
+        }
+    }
+
     fn ensure_dm_key(
         &self,
         room_id: &str,
@@ -1427,7 +1468,25 @@ impl AppHandle {
             .ok()
             .flatten();
         let ek_b64: Option<String> = partner_mlkem_b64.map(|s| s.to_string()).or(stored_ek);
-        let partner_pq_capable = ek_b64.is_some();
+        let have_mlkem_ek = ek_b64.is_some();
+        // huddle 2.0.0 (F1): the SAS verified-peer anchor is the THIRD capability
+        // source, and the strongest — it survives a relay stripping both the live
+        // announce key and the room_members pin. Folding it into
+        // `partner_pq_capable` makes `plan_dm_key` refuse a classical fallback for
+        // a peer we once SAS-verified as PQ-capable: with no ek available the plan
+        // yields a hybrid action that can't derive (→ Noop, wait for a genuine
+        // hybrid announce) rather than locking in a quantum-unsafe classical key.
+        // `get_verified_peer_pq_capable` is fail-secure (reports `true` on a DB
+        // error), so `.unwrap_or(true)` keeps the same loud-fail-over-silent-
+        // downgrade posture. This is exactly `dm::must_refuse_classical_fallback`.
+        let verified_pq_capable =
+            repo::get_verified_peer_pq_capable(&self.db, partner_fp).unwrap_or(true);
+        let partner_pq_capable = have_mlkem_ek || verified_pq_capable;
+        debug_assert_eq!(
+            crate::crypto::dm::must_refuse_classical_fallback(partner_pq_capable, have_mlkem_ek),
+            partner_pq_capable && !have_mlkem_ek,
+            "F1 downgrade guard must agree with the folded capability inputs"
+        );
         let we_are_initiator = self.identity.fingerprint() < partner_fp;
 
         // The whole downgrade/upgrade policy lives in this pure decision.
@@ -1597,14 +1656,14 @@ impl AppHandle {
                 self.db.clone(),
                 room_id.to_string(),
                 our_fp.clone(),
-                self.session_persist_key,
+                self.persist_key(),
             )? {
                 Some(c) => Some(c),
                 None => Some(RoomCrypto::new_for_room(
                     self.db.clone(),
                     room_id.to_string(),
                     our_fp.clone(),
-                    self.session_persist_key,
+                    self.persist_key(),
                 )?),
             };
             (pk, c)
@@ -1728,7 +1787,7 @@ impl AppHandle {
                 self.db.clone(),
                 room_id.to_string(),
                 our_fp.clone(),
-                self.session_persist_key,
+                self.persist_key(),
             )?;
             Some(match existing {
                 Some(c) => c,
@@ -1736,7 +1795,7 @@ impl AppHandle {
                     self.db.clone(),
                     room_id.to_string(),
                     our_fp,
-                    self.session_persist_key,
+                    self.persist_key(),
                 )?,
             })
         } else {
@@ -1922,9 +1981,44 @@ impl AppHandle {
         Ok(dispatched)
     }
 
+    /// Send a top-level message to a room. huddle 2.0.0 (F10): mints a stable
+    /// `client_msg_id` so the message can later be reacted to / edited / deleted
+    /// / replied to across peers.
     pub async fn send_room_message(&self, room_id: &str, body: &str) -> Result<()> {
+        self.send_room_message_inner(room_id, body, None).await
+    }
+
+    /// huddle 2.0.0 (F10): send a reply to an existing message. `reply_to` is the
+    /// `client_msg_id` of the message being replied to (the target may itself be
+    /// a pre-2.0 message with no id or a since-deleted one — the UI degrades to a
+    /// plain message then). Otherwise identical to [`send_room_message`].
+    pub async fn send_reply(
+        &self,
+        room_id: &str,
+        body: &str,
+        reply_to: &str,
+    ) -> Result<()> {
+        self.send_room_message_inner(room_id, body, Some(reply_to))
+            .await
+    }
+
+    /// Shared send path for top-level messages and replies. Mints the
+    /// `client_msg_id`, encrypts (or not), publishes, persists with the id +
+    /// `reply_to`, and — huddle 2.0.0 (F4) — rotates the outbound Megolm epoch
+    /// after the configured message/age threshold, re-sharing the fresh session
+    /// key via a `MemberAnnounce`.
+    async fn send_room_message_inner(
+        &self,
+        room_id: &str,
+        body: &str,
+        reply_to: Option<&str>,
+    ) -> Result<()> {
         let our_fp = self.identity.fingerprint().to_string();
-        let msg = {
+        let client_msg_id = new_client_msg_id();
+        // F4: read the rotation policy before taking the active_rooms lock (it
+        // touches the DB) so we never nest the DB lock under active_rooms.
+        let policy = self.megolm_rotation_policy();
+        let (msg, needs_rotation) = {
             let mut rooms = self.active_rooms.lock().unwrap();
             let room = rooms
                 .get_mut(room_id)
@@ -1942,19 +2036,40 @@ impl AppHandle {
                     .as_mut()
                     .ok_or_else(|| HuddleError::Session("encrypted room missing crypto".into()))?;
                 let (session_id, ct_bytes) = crypto.encrypt(body.as_bytes())?;
-                RoomMessage::Encrypted {
+                // F4: the message we're about to send used `session_id` (the
+                // current epoch). Decide rotation AFTER the encrypt so the
+                // counter includes this message; rotate the outbound session
+                // in-place (sync) and re-announce the fresh key below, after we
+                // publish this message under the old session the peers can decrypt.
+                let needs_rotation = policy.is_enabled() && crypto.should_rotate(&policy);
+                let msg = RoomMessage::Encrypted {
                     sender_fingerprint: our_fp.clone(),
                     session_id,
                     ciphertext_b64: base64::Engine::encode(
                         &base64::engine::general_purpose::STANDARD,
                         &ct_bytes,
                     ),
+                    client_msg_id: Some(client_msg_id.clone()),
+                    reply_to: reply_to.map(|s| s.to_string()),
+                };
+                if needs_rotation {
+                    if let Err(e) = crypto.rotate_outbound() {
+                        // Non-fatal: the message still goes out on the old epoch;
+                        // we just didn't advance. The time/count trigger will fire
+                        // again on the next send or heartbeat.
+                        warn!(%e, %room_id, "F4: scheduled Megolm rotation failed");
+                    }
                 }
+                (msg, needs_rotation)
             } else {
-                RoomMessage::Plain {
+                // Plaintext rooms have no Megolm session to rotate.
+                let msg = RoomMessage::Plain {
                     sender_fingerprint: our_fp.clone(),
                     body: body.to_string(),
-                }
+                    client_msg_id: Some(client_msg_id.clone()),
+                    reply_to: reply_to.map(|s| s.to_string()),
+                };
+                (msg, false)
             }
         };
 
@@ -1963,9 +2078,29 @@ impl AppHandle {
             .publish_room_message(room_id.to_string(), bytes)
             .await;
 
+        // F4: share the post-rotation session key. Done AFTER the message above
+        // so peers receive (old-session message, then new-session announce) in
+        // order — the rotation is forward-only, so they keep the old inbound
+        // session to decrypt the message we just sent.
+        if needs_rotation {
+            if let Err(e) = self.broadcast_member_announce(room_id).await {
+                warn!(%e, %room_id, "F4: post-rotation MemberAnnounce failed");
+            } else {
+                info!(%room_id, "F4: rotated outbound Megolm epoch and re-announced");
+            }
+        }
+
         let now = now_unix();
-        let msg_id =
-            repo::insert_room_message(&self.db, room_id, &our_fp, "out", body, now)?;
+        let msg_id = repo::insert_room_message(
+            &self.db,
+            room_id,
+            &our_fp,
+            "out",
+            body,
+            now,
+            Some(client_msg_id.as_str()),
+            reply_to,
+        )?;
         repo::update_room_last_active(&self.db, room_id, now)?;
 
         let _ = self.app_event_tx.send(AppEvent::MessageSent {
@@ -1975,6 +2110,375 @@ impl AppHandle {
         });
 
         Ok(())
+    }
+
+    /// huddle 2.0.0 (F4): the scheduled forward-only Megolm rotation policy,
+    /// read from `app_settings` (`megolm_rotation_max_messages`,
+    /// `megolm_rotation_max_hours`) and defaulting to the blueprint's 1000
+    /// messages / 24 hours when unset or unparsable. A `0` for either bound
+    /// disables that trigger; both `0` disables scheduled rotation entirely
+    /// (pre-2.0.0 behaviour).
+    fn megolm_rotation_policy(&self) -> crate::crypto::megolm::RotationPolicy {
+        use crate::crypto::megolm::RotationPolicy;
+        let max_messages = repo::get_setting(&self.db, "megolm_rotation_max_messages")
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(RotationPolicy::DEFAULT_MAX_MESSAGES);
+        let max_hours = repo::get_setting(&self.db, "megolm_rotation_max_hours")
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(RotationPolicy::DEFAULT_MAX_HOURS);
+        RotationPolicy::from_messages_and_hours(max_messages, max_hours)
+    }
+
+    /// huddle 2.0.0 (F4): the current scheduled-rotation config as
+    /// `(max_messages, max_hours)` for Settings → Encryption to display.
+    pub fn megolm_rotation_config(&self) -> (u32, i64) {
+        let p = self.megolm_rotation_policy();
+        (p.max_messages, p.max_age_secs / 3600)
+    }
+
+    /// huddle 2.0.0 (F4): set the message-count rotation threshold (0 disables
+    /// the count trigger). Persisted to `app_settings`.
+    pub fn set_megolm_rotation_max_messages(&self, n: u32) -> Result<()> {
+        repo::set_setting(&self.db, "megolm_rotation_max_messages", &n.to_string())
+    }
+
+    /// huddle 2.0.0 (F4): set the age rotation threshold in hours (0 disables
+    /// the time trigger). Persisted to `app_settings`.
+    pub fn set_megolm_rotation_max_hours(&self, hours: i64) -> Result<()> {
+        repo::set_setting(
+            &self.db,
+            "megolm_rotation_max_hours",
+            &hours.max(0).to_string(),
+        )
+    }
+
+    // -------------------------------------------------------------------
+    // huddle 2.0.0 (F10): reactions, edits, deletes
+    // -------------------------------------------------------------------
+
+    /// All reactions currently stored for a room (oldest first), for the UI to
+    /// group by `target_client_msg_id` into per-emoji counts.
+    pub fn room_reactions(&self, room_id: &str) -> Vec<repo::StoredReaction> {
+        repo::list_room_reactions(&self.db, room_id).unwrap_or_default()
+    }
+
+    /// huddle 2.0.0 (F10): react to a message. `removed = false` adds the emoji,
+    /// `true` toggles it off. Signs + broadcasts a `Reaction` and applies it
+    /// locally so our own badge updates immediately. `target_msg_id` is the
+    /// message's `client_msg_id`.
+    pub async fn send_reaction(
+        &self,
+        room_id: &str,
+        target_msg_id: &str,
+        emoji: &str,
+        removed: bool,
+    ) -> Result<()> {
+        let our_fp = self.identity.fingerprint().to_string();
+        let msg = RoomMessage::Reaction {
+            sender_fingerprint: our_fp.clone(),
+            target_msg_id: target_msg_id.to_string(),
+            emoji: emoji.to_string(),
+            removed,
+        };
+        let env = crate::crypto::sign_message(&self.identity, &msg)?;
+        let bytes = crate::network::protocol::encode_wire_signed(&env)?;
+        self.network
+            .publish_room_message(room_id.to_string(), bytes)
+            .await;
+        if removed {
+            repo::remove_reaction(&self.db, room_id, target_msg_id, &our_fp, emoji)?;
+        } else {
+            repo::add_reaction(&self.db, room_id, target_msg_id, &our_fp, emoji, now_unix())?;
+        }
+        let _ = self.app_event_tx.send(AppEvent::ReactionAdded {
+            room_id: room_id.to_string(),
+            message_id: target_msg_id.to_string(),
+            sender_fingerprint: our_fp,
+            emoji: emoji.to_string(),
+            removed,
+        });
+        Ok(())
+    }
+
+    /// huddle 2.0.0 (F10): edit the body of a message we sent (or, as a room
+    /// owner, anyone's). For encrypted rooms the new body is re-encrypted under
+    /// our outbound Megolm session; for plaintext rooms it rides in the clear.
+    /// Applied locally + broadcast as a signed `Edit` (last-write-wins).
+    pub async fn edit_message(
+        &self,
+        room_id: &str,
+        target_msg_id: &str,
+        new_body: &str,
+    ) -> Result<()> {
+        let our_fp = self.identity.fingerprint().to_string();
+        let target = repo::find_message_by_client_id(&self.db, room_id, target_msg_id)?
+            .ok_or_else(|| HuddleError::Other("edit target message not found".into()))?;
+        if target.sender_fingerprint != our_fp && !self.we_are_owner(room_id) {
+            return Err(HuddleError::Other(
+                "not authorized to edit this message (not the sender or a room owner)".into(),
+            ));
+        }
+        let encrypted = self
+            .active_room_info(room_id)
+            .map(|r| r.encrypted)
+            .unwrap_or(false);
+        let (new_ciphertext_b64, new_body_field) = if encrypted {
+            let mut rooms = self.active_rooms.lock().unwrap();
+            let room = rooms
+                .get_mut(room_id)
+                .ok_or_else(|| HuddleError::Other(format!("not in room {room_id}")))?;
+            let crypto = room
+                .crypto
+                .as_mut()
+                .ok_or_else(|| HuddleError::Session("encrypted room missing crypto".into()))?;
+            let (_session_id, ct) = crypto.encrypt(new_body.as_bytes())?;
+            (B64.encode(&ct), None)
+        } else {
+            (String::new(), Some(new_body.to_string()))
+        };
+        let msg = RoomMessage::Edit {
+            sender_fingerprint: our_fp.clone(),
+            target_msg_id: target_msg_id.to_string(),
+            new_ciphertext_b64,
+            new_body: new_body_field,
+        };
+        let env = crate::crypto::sign_message(&self.identity, &msg)?;
+        let bytes = crate::network::protocol::encode_wire_signed(&env)?;
+        self.network
+            .publish_room_message(room_id.to_string(), bytes)
+            .await;
+        repo::apply_message_edit(&self.db, room_id, target_msg_id, new_body, now_unix_ms())?;
+        let _ = self.app_event_tx.send(AppEvent::MessageEdited {
+            room_id: room_id.to_string(),
+            message_id: target_msg_id.to_string(),
+            editor_fingerprint: our_fp,
+            new_body: new_body.to_string(),
+        });
+        Ok(())
+    }
+
+    /// huddle 2.0.0 (F10): delete (tombstone) a message we sent (or, as a room
+    /// owner, anyone's). Broadcast as a signed `Delete`; the body is blanked
+    /// everywhere and rendered as `[deleted]`.
+    pub async fn delete_message(&self, room_id: &str, target_msg_id: &str) -> Result<()> {
+        let our_fp = self.identity.fingerprint().to_string();
+        let target = repo::find_message_by_client_id(&self.db, room_id, target_msg_id)?
+            .ok_or_else(|| HuddleError::Other("delete target message not found".into()))?;
+        if target.sender_fingerprint != our_fp && !self.we_are_owner(room_id) {
+            return Err(HuddleError::Other(
+                "not authorized to delete this message (not the sender or a room owner)".into(),
+            ));
+        }
+        let msg = RoomMessage::Delete {
+            sender_fingerprint: our_fp.clone(),
+            target_msg_id: target_msg_id.to_string(),
+        };
+        let env = crate::crypto::sign_message(&self.identity, &msg)?;
+        let bytes = crate::network::protocol::encode_wire_signed(&env)?;
+        self.network
+            .publish_room_message(room_id.to_string(), bytes)
+            .await;
+        repo::mark_message_deleted(&self.db, room_id, target_msg_id, now_unix_ms())?;
+        let _ = self.app_event_tx.send(AppEvent::MessageDeleted {
+            room_id: room_id.to_string(),
+            message_id: target_msg_id.to_string(),
+            deleter_fingerprint: our_fp,
+        });
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------
+    // huddle 2.0.0 (F9): disappearing messages — per-room TTL
+    // -------------------------------------------------------------------
+
+    /// The room's disappearing-messages TTL in seconds, or `None` when OFF.
+    pub fn room_disappearing_ttl(&self, room_id: &str) -> Option<u32> {
+        repo::get_room_disappearing_ttl(&self.db, room_id)
+            .ok()
+            .flatten()
+    }
+
+    /// huddle 2.0.0 (F9): set (or clear, with `None`) the room's
+    /// disappearing-messages TTL. Persists locally, then broadcasts a signed
+    /// `RoomSetting` so other members adopt it. Honest receivers apply it only
+    /// when we're the room creator or an owner; the pruner then auto-deletes
+    /// expired messages locally on every peer.
+    pub async fn set_room_disappearing_ttl(
+        &self,
+        room_id: &str,
+        ttl_secs: Option<u32>,
+    ) -> Result<()> {
+        repo::set_room_disappearing_ttl(&self.db, room_id, ttl_secs)?;
+        let our_fp = self.identity.fingerprint().to_string();
+        let msg = RoomMessage::RoomSetting {
+            sender_fingerprint: our_fp,
+            disappearing_ttl_secs: ttl_secs.map(u64::from).unwrap_or(0),
+        };
+        let env = crate::crypto::sign_message(&self.identity, &msg)?;
+        let bytes = crate::network::protocol::encode_wire_signed(&env)?;
+        self.network
+            .publish_room_message(room_id.to_string(), bytes)
+            .await;
+        let _ = self.app_event_tx.send(AppEvent::RoomTtlChanged {
+            room_id: room_id.to_string(),
+            ttl_secs,
+        });
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------
+    // huddle 2.0.0 (F6): BIP39 seed-phrase export / import
+    // -------------------------------------------------------------------
+
+    /// huddle 2.0.0 (F6): export this identity's 32-byte Ed25519 seed as a
+    /// 24-word BIP39 phrase. Gated on a master passphrase being set — the seed
+    /// is the crown jewel, so we refuse to surface it for an unencrypted-DB
+    /// session. The UI shows it once and re-entry-verifies via
+    /// [`Self::verify_seed_reentry`].
+    pub fn export_seed_phrase(&self) -> Result<String> {
+        if !self.has_master_passphrase() {
+            return Err(HuddleError::Other(
+                "seed export requires a master passphrase to protect the exported phrase".into(),
+            ));
+        }
+        Ok(crate::crypto::mnemonic::seed_to_phrase(&self.identity.seed()))
+    }
+
+    /// huddle 2.0.0 (F6): does `phrase` decode to OUR identity? Used by the
+    /// export modal's re-entry step to confirm the user transcribed it
+    /// correctly before they rely on it for recovery.
+    pub fn verify_seed_reentry(&self, phrase: &str) -> Result<bool> {
+        Ok(fingerprint_from_phrase(phrase)? == self.identity.fingerprint())
+    }
+
+    // -------------------------------------------------------------------
+    // huddle 2.0.0 (F5): master passphrase change + at-rest re-key
+    // -------------------------------------------------------------------
+
+    /// Change the master passphrase, re-encrypting everything at rest.
+    ///
+    /// Verifies `current` against the live persist key (constant-time), derives
+    /// a fresh random salt + new master key + new Megolm persist subkey,
+    /// re-encrypts every stored Megolm session pickle under the new subkey,
+    /// `PRAGMA rekey`s the SQLCipher database to the new master key, commits the
+    /// new salt, swaps the in-memory persist key, and reloads the active rooms'
+    /// `RoomCrypto`s so they continue under the new key. Emits
+    /// [`AppEvent::PassphraseChanged`] on success.
+    ///
+    /// Ordering is load-bearing: the salt is rotated ONLY after the session
+    /// re-persist and DB rekey have committed, so any earlier failure leaves the
+    /// old salt on disk and the next launch recovers with the old passphrase
+    /// (the F5 rollback guarantee).
+    pub async fn change_master_passphrase(&self, current: &str, new: &str) -> Result<()> {
+        if !self.has_master_passphrase() {
+            return Err(HuddleError::Other(
+                "this session has no master passphrase to change \
+                 (started with --no-master-passphrase)"
+                    .into(),
+            ));
+        }
+        if new.is_empty() {
+            return Err(HuddleError::Other("new passphrase must not be empty".into()));
+        }
+        // 1. Verify the current passphrase against the live persist key.
+        let salt = storage::keychain::load_or_create_salt()?;
+        let cur_master = storage::keychain::derive_master_key(current, &salt)?;
+        let cur_subkey = storage::keychain::derive_subkey(&cur_master, b"megolm-persist");
+        let old_persist = self.persist_key();
+        if !ct_eq_32(&cur_subkey, &old_persist) {
+            return Err(HuddleError::Other("incorrect current passphrase".into()));
+        }
+        // 2. Derive a new salt + master key + persist subkey.
+        let new_salt = storage::keychain::generate_new_salt()?;
+        let new_master = storage::keychain::derive_master_key(new, &new_salt)?;
+        let new_persist = storage::keychain::derive_subkey(&new_master, b"megolm-persist");
+        // 3. Re-encrypt all Megolm session pickles old → new persist key, so they
+        //    survive the master-key rekey AND decrypt under the new persist key.
+        self.reencrypt_megolm_sessions(&old_persist, &new_persist)?;
+        // 4. PRAGMA rekey the SQLCipher DB (atomic, sentinel-verified).
+        {
+            let conn = self.db.lock().unwrap();
+            storage::rekey_db(&conn, &new_master)?;
+        }
+        // 5. Commit the new salt — only now that everything is under the new keys.
+        storage::keychain::rotate_salt(&new_salt)?;
+        // 6. Swap the in-memory persist key and reload active rooms under it.
+        *self.session_persist_key.lock().unwrap() = new_persist;
+        self.reload_active_room_cryptos(&new_persist);
+        let _ = self.app_event_tx.send(AppEvent::PassphraseChanged);
+        info!("master passphrase changed and database re-keyed");
+        Ok(())
+    }
+
+    /// F5 helper: re-encrypt every stored Megolm session pickle from `old_key`
+    /// to `new_key` at the blob level (independent of SQLCipher). A row that
+    /// can't be decoded under the old key is left untouched — `RoomCrypto::load`
+    /// already tolerates and skips a single unreadable session.
+    fn reencrypt_megolm_sessions(&self, old_key: &[u8; 32], new_key: &[u8; 32]) -> Result<()> {
+        use vodozemac::megolm::{
+            GroupSession, GroupSessionPickle, InboundGroupSession, InboundGroupSessionPickle,
+        };
+        for room in repo::list_rooms(&self.db)? {
+            for s in repo::load_megolm_sessions_for_room(&self.db, &room.id)? {
+                let data_str = match String::from_utf8(s.session_data.clone()) {
+                    Ok(d) => d,
+                    Err(_) => continue,
+                };
+                let new_blob: Vec<u8> = if s.is_outbound {
+                    let p = GroupSessionPickle::from_encrypted(&data_str, old_key).map_err(|e| {
+                        HuddleError::Other(format!("rekey: outbound pickle decrypt: {e}"))
+                    })?;
+                    GroupSession::from_pickle(p)
+                        .pickle()
+                        .encrypt(new_key)
+                        .into_bytes()
+                } else {
+                    let p =
+                        InboundGroupSessionPickle::from_encrypted(&data_str, old_key).map_err(|e| {
+                            HuddleError::Other(format!("rekey: inbound pickle decrypt: {e}"))
+                        })?;
+                    InboundGroupSession::from_pickle(p)
+                        .pickle()
+                        .encrypt(new_key)
+                        .into_bytes()
+                };
+                repo::save_megolm_session(
+                    &self.db,
+                    &repo::StoredMegolmSession {
+                        room_id: s.room_id,
+                        sender_fingerprint: s.sender_fingerprint,
+                        session_id: s.session_id,
+                        session_data: new_blob,
+                        is_outbound: s.is_outbound,
+                        created_at: s.created_at,
+                    },
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// F5 helper: after a re-key, rebuild every active encrypted room's
+    /// `RoomCrypto` from the (now new-key-encrypted) pickles so in-memory
+    /// sessions keep persisting under the new key. Lossless — every session is
+    /// already on disk.
+    fn reload_active_room_cryptos(&self, new_key: &[u8; 32]) {
+        let our_fp = self.identity.fingerprint().to_string();
+        let mut rooms = self.active_rooms.lock().unwrap();
+        for room in rooms.values_mut() {
+            if !room.info.encrypted {
+                continue;
+            }
+            match RoomCrypto::load(self.db.clone(), room.info.id.clone(), our_fp.clone(), *new_key) {
+                Ok(Some(c)) => room.crypto = Some(c),
+                Ok(None) => {}
+                Err(e) => warn!(%e, room_id = %room.info.id, "F5: RoomCrypto reload after rekey failed"),
+            }
+        }
     }
 
     pub async fn shutdown(&self) {
@@ -2961,7 +3465,12 @@ impl AppHandle {
                     }
                     while let Some(ev) = rx.recv().await {
                         match ev {
-                            ServerEvent::Message { room, payload, .. } => {
+                            ServerEvent::Message {
+                                room,
+                                payload,
+                                mailbox_id,
+                                ..
+                            } => {
                                 handle
                                     .process_network_event(NetworkEvent::RoomMessageReceived {
                                         room_id: room,
@@ -2969,6 +3478,19 @@ impl AppHandle {
                                         from_peer: PeerId::random(),
                                     })
                                     .await;
+                                // huddle 2.0.0 (F7): at-least-once relay delivery.
+                                // `process_network_event` persists the message
+                                // synchronously (room_messages INSERT) before it
+                                // returns, so by here the message is durably
+                                // handled — ACK the mailbox row so the relay may
+                                // delete its copy. `mailbox_id` is `Some` only for
+                                // an offline-mailbox delivery from a 2.0+ relay;
+                                // live fan-out and pre-2.0 relays leave it `None`
+                                // and we skip the ACK (safe — acts as best-effort
+                                // delivery, the relay's 24h sweep is the backstop).
+                                if let Some(id) = mailbox_id {
+                                    let _ = handle.network.send_mailbox_ack(id);
+                                }
                             }
                             ServerEvent::Ready | ServerEvent::Sent { .. } => {}
                             ServerEvent::ConnectToken { token, ttl_secs } => {
@@ -3017,14 +3539,40 @@ impl AppHandle {
                 // handshake (e.g. the initiator's single ciphertext-bearing
                 // announce was lost) without a periodic full MemberAnnounce; the
                 // hard cap keeps an unreachable partner's mailbox from filling.
-                let (snapshot, dm_nudges): (Vec<(StoredRoom, u32)>, Vec<String>) = {
+                // huddle 2.0.0 (F4): read the scheduled-rotation policy once per
+                // tick (outside the active_rooms lock — it touches the DB). The
+                // heartbeat is what fires the *time*-based trigger for rooms that
+                // aren't actively sending; the send path covers the count trigger.
+                let rotation_policy = handle.megolm_rotation_policy();
+                let (snapshot, dm_nudges, rotated): (Vec<(StoredRoom, u32)>, Vec<String>, Vec<String>) = {
                     let mut active = handle.active_rooms.lock().unwrap();
                     let snap: Vec<(StoredRoom, u32)> = active
                         .values()
                         .map(|r| (r.info.clone(), r.members.len() as u32))
                         .collect();
                     let mut nudges = Vec::new();
+                    let mut rotated = Vec::new();
                     for room in active.values_mut() {
+                        // F4: scheduled forward-only Megolm rotation for any keyed
+                        // encrypted room (groups + DMs). Rotate in-place (sync)
+                        // and re-announce the fresh key after the lock. Only keyed
+                        // rooms rotate — an unkeyed DM has nothing to share yet.
+                        if room.info.encrypted
+                            && room.passphrase_key.is_some()
+                            && rotation_policy.is_enabled()
+                        {
+                            if let Some(c) = room.crypto.as_mut() {
+                                if c.should_rotate(&rotation_policy) {
+                                    match c.rotate_outbound() {
+                                        Ok(()) => rotated.push(room.info.id.clone()),
+                                        Err(e) => warn!(
+                                            %e, room_id = %room.info.id,
+                                            "F4: scheduled Megolm rotation failed in heartbeat"
+                                        ),
+                                    }
+                                }
+                            }
+                        }
                         if room.info.kind != RoomKind::Direct || !room.info.encrypted {
                             continue;
                         }
@@ -3049,10 +3597,18 @@ impl AppHandle {
                             room.dm_key_retry = 0;
                         }
                     }
-                    (snap, nudges)
+                    (snap, nudges, rotated)
                 };
                 for (info, member_count) in snapshot {
                     handle.announce_room_now(&info, member_count).await;
+                }
+                // F4: re-share each rotated room's fresh session key.
+                for rid in rotated {
+                    if let Err(e) = handle.broadcast_member_announce(&rid).await {
+                        warn!(%e, room_id = %rid, "F4: post-rotation MemberAnnounce failed");
+                    } else {
+                        info!(room_id = %rid, "F4: rotated outbound Megolm epoch (heartbeat) and re-announced");
+                    }
                 }
                 for rid in dm_nudges {
                     let req = RoomMessage::SessionKeyRequest {
@@ -3094,6 +3650,23 @@ impl AppHandle {
                 {
                     let mut flows = handle.sas_flows.lock().unwrap();
                     flows.retain(|_, f| now - f.created_at <= SAS_FLOW_TTL_SECS);
+                }
+                // huddle 2.0.0 (F9): disappearing-messages sweep. Physically
+                // delete every message past its room's TTL, against our own
+                // clock (best-effort + local). F2 interaction: a deleted
+                // message's `content_replay_seen` row survives, so a replayed
+                // copy of an expired message is still dropped as a replay and can
+                // never be resurrected into the chat. Emit a coarse refresh nudge
+                // when anything was removed so the open room re-fetches history.
+                match repo::delete_expired_messages(&handle.db, now) {
+                    Ok(removed) if removed > 0 => {
+                        debug!(removed, "F9: pruned expired messages");
+                        let _ = handle
+                            .app_event_tx
+                            .send(AppEvent::MessagesExpired { count: removed });
+                    }
+                    Ok(_) => {}
+                    Err(e) => warn!(%e, "F9: expired-message sweep failed"),
                 }
                 for id in to_drop {
                     let _ = handle.app_event_tx.send(AppEvent::RoomLost { room_id: id });
@@ -3321,9 +3894,28 @@ impl AppHandle {
                                     &self.db, &room_id, &fp,
                                 ) {
                                     Ok(Some(known)) if known != claimed_pubkey => {
+                                        // huddle 2.0.0 (F3): surface the drift
+                                        // instead of silently dropping. The
+                                        // offending message is STILL dropped (we
+                                        // never trust the new key implicitly); the
+                                        // UI prompts the user to re-verify (SAS),
+                                        // accept the new key, or block the peer.
                                         warn!(
                                             %fp, %room_id,
-                                            "pubkey mismatch vs stored; dropping signed message"
+                                            "pubkey mismatch vs stored; emitting SafetyNumberChanged and dropping signed message"
+                                        );
+                                        let display_name =
+                                            repo::lookup_display_name(&self.db, &fp)
+                                                .ok()
+                                                .flatten();
+                                        let _ = self.app_event_tx.send(
+                                            AppEvent::SafetyNumberChanged {
+                                                room_id: room_id.clone(),
+                                                fingerprint: fp.clone(),
+                                                old_pubkey_b64: known,
+                                                new_pubkey_b64: claimed_pubkey.clone(),
+                                                display_name,
+                                            },
                                         );
                                         return;
                                     }
@@ -3995,6 +4587,8 @@ impl AppHandle {
                 sender_fingerprint,
                 session_id,
                 ciphertext_b64,
+                client_msg_id,
+                reply_to,
             } => {
                 if sender_fingerprint == our_fp {
                     return;
@@ -4034,6 +4628,15 @@ impl AppHandle {
                     };
                     crypto.decrypt(&sender_fingerprint, &session_id, &ct_bytes)
                 };
+                // huddle 2.0.0 (F10): remember the session we just decoded this
+                // sender under, so a later `Edit` (which carries a fresh
+                // ciphertext but no session id) can be decrypted against it.
+                if plaintext.is_ok() {
+                    self.last_inbound_session.lock().unwrap().insert(
+                        (room_id.to_string(), sender_fingerprint.clone()),
+                        session_id.clone(),
+                    );
+                }
                 match plaintext {
                     Ok((pt, message_index)) => {
                         // huddle 2.0.0 (F2): content-layer replay protection.
@@ -4086,6 +4689,8 @@ impl AppHandle {
                             "in",
                             &body,
                             sent_at,
+                            client_msg_id.as_deref(),
+                            reply_to.as_deref(),
                         );
                         let _ = repo::update_room_last_active(&self.db, room_id, sent_at);
                         self.maybe_emit_mention(room_id, &body);
@@ -4147,6 +4752,8 @@ impl AppHandle {
             RoomMessage::Plain {
                 sender_fingerprint,
                 body,
+                client_msg_id,
+                reply_to,
             } => {
                 if sender_fingerprint == our_fp {
                     return;
@@ -4165,6 +4772,8 @@ impl AppHandle {
                     "in",
                     &body,
                     sent_at,
+                    client_msg_id.as_deref(),
+                    reply_to.as_deref(),
                 );
                 let _ = repo::update_room_last_active(&self.db, room_id, sent_at);
                 self.maybe_emit_mention(room_id, &body);
@@ -4465,10 +5074,18 @@ impl AppHandle {
                     }
                 }
                 let (_, our_secret, our_pub) = crate::crypto::sas::new_session();
+                // huddle 2.0.0 (F1): bind the initiator's ML-KEM ek (if we hold
+                // their pin) into the transcript so their PQ capability is part of
+                // the OOB-compared code. A relay that strips it from one side
+                // drives that side to `None`, diverging the codes — the downgrade
+                // is then caught by the human comparison.
+                let partner_ek = self.partner_mlkem_ek_bytes(&signer);
+                let partner_pq_capable = partner_ek.is_some();
                 let sas_code = match crate::crypto::sas::derive_sas_code(
                     &our_secret,
                     &their_pub,
                     &tx_id_bytes,
+                    partner_ek.as_deref(),
                 ) {
                     Ok(c) => c,
                     Err(e) => {
@@ -4487,6 +5104,7 @@ impl AppHandle {
                         their_confirmed: false,
                         finalized: false,
                         created_at: now_unix(),
+                        partner_pq_capable,
                     },
                 );
                 // Respond with our pubkey so the initiator can compute
@@ -4537,6 +5155,13 @@ impl AppHandle {
                     }
                     _ => return,
                 };
+                // huddle 2.0.0 (F1): bind the responder's ML-KEM ek (if pinned)
+                // into the transcript, symmetric with the responder's SasInit
+                // binding — both sides must hold each other's ek for the codes to
+                // agree. Looked up outside the `sas_flows` lock (no DB access
+                // while the flows mutex is held).
+                let partner_ek = self.partner_mlkem_ek_bytes(&signer);
+                let partner_pq_capable = partner_ek.is_some();
                 let emit = {
                     let mut flows = self.sas_flows.lock().unwrap();
                     let flow = match flows.get_mut(&tx_id) {
@@ -4557,6 +5182,7 @@ impl AppHandle {
                         &flow.our_secret,
                         &their_pub,
                         &tx_id_bytes,
+                        partner_ek.as_deref(),
                     ) {
                         Ok(c) => c,
                         Err(e) => {
@@ -4565,6 +5191,10 @@ impl AppHandle {
                         }
                     };
                     flow.sas_code = Some(code.clone());
+                    // huddle 2.0.0 (F1): record whether this code bound the
+                    // partner's ML-KEM ek, so `finish_sas` persists the durable
+                    // `verified_peers.pq_capable` anchor.
+                    flow.partner_pq_capable = partner_pq_capable;
                     // huddle 1.3.3: refresh the TTL clock on real progress so the
                     // reaper measures idle-since-last-activity, not age-since-start
                     // — a live handshake mid out-of-band comparison won't be reaped.
@@ -4912,6 +5542,256 @@ impl AppHandle {
                     note,
                 });
             }
+            // huddle 2.0.0 (F10): add/remove an emoji reaction on another peer's
+            // message. Must be signed by the reactor; the target must exist in
+            // THIS room (so a stray UUID from another room can't seed a phantom
+            // reaction). Idempotent at the repo layer.
+            RoomMessage::Reaction {
+                sender_fingerprint,
+                target_msg_id,
+                emoji,
+                removed,
+            } => {
+                if sender_fingerprint == our_fp {
+                    return;
+                }
+                let signer = match verified_signer {
+                    Some(fp) => fp,
+                    None => {
+                        warn!("dropping unsigned Reaction");
+                        return;
+                    }
+                };
+                if signer != sender_fingerprint {
+                    warn!(%signer, %sender_fingerprint, "Reaction signer mismatch; dropping");
+                    return;
+                }
+                if repo::is_member_banned(&self.db, room_id, &sender_fingerprint).unwrap_or(false) {
+                    return;
+                }
+                match repo::find_message_by_client_id(&self.db, room_id, &target_msg_id) {
+                    Ok(Some(_)) => {}
+                    _ => {
+                        debug!(%target_msg_id, %room_id, "Reaction target unknown in room; dropping");
+                        return;
+                    }
+                }
+                let res = if removed {
+                    repo::remove_reaction(&self.db, room_id, &target_msg_id, &sender_fingerprint, &emoji)
+                } else {
+                    repo::add_reaction(
+                        &self.db,
+                        room_id,
+                        &target_msg_id,
+                        &sender_fingerprint,
+                        &emoji,
+                        now_unix(),
+                    )
+                };
+                if let Err(e) = res {
+                    warn!(%e, "applying inbound reaction failed");
+                    return;
+                }
+                let _ = self.app_event_tx.send(AppEvent::ReactionAdded {
+                    room_id: room_id.to_string(),
+                    message_id: target_msg_id,
+                    sender_fingerprint,
+                    emoji,
+                    removed,
+                });
+            }
+            // huddle 2.0.0 (F10): edit a message body, last-write-wins. Applied
+            // only when the signer is the original sender OR a current room owner
+            // (moderation). For encrypted rooms the new body rides as a fresh
+            // Megolm ciphertext decrypted against the sender's most-recent session
+            // (the wire `Edit` has no session id); for plaintext rooms it rides as
+            // `new_body`.
+            RoomMessage::Edit {
+                sender_fingerprint,
+                target_msg_id,
+                new_ciphertext_b64,
+                new_body,
+            } => {
+                if sender_fingerprint == our_fp {
+                    return;
+                }
+                let signer = match verified_signer {
+                    Some(fp) => fp,
+                    None => {
+                        warn!("dropping unsigned Edit");
+                        return;
+                    }
+                };
+                if signer != sender_fingerprint {
+                    return;
+                }
+                if repo::is_member_banned(&self.db, room_id, &sender_fingerprint).unwrap_or(false) {
+                    return;
+                }
+                let target = match repo::find_message_by_client_id(&self.db, room_id, &target_msg_id) {
+                    Ok(Some(m)) => m,
+                    _ => {
+                        debug!(%target_msg_id, %room_id, "Edit target unknown; dropping");
+                        return;
+                    }
+                };
+                if target.sender_fingerprint != signer && !self.is_owner(room_id, &signer) {
+                    warn!(%signer, %target_msg_id, "Edit not authorized (not sender or owner); dropping");
+                    return;
+                }
+                // Resolve the replacement plaintext.
+                let new_plaintext = match new_body {
+                    Some(b) => b,
+                    None => {
+                        // Encrypted room: decrypt the fresh ciphertext against the
+                        // sender's last-seen session.
+                        let ct = match B64.decode(&new_ciphertext_b64) {
+                            Ok(c) => c,
+                            Err(e) => {
+                                warn!(%e, "Edit: bad ciphertext base64; dropping");
+                                return;
+                            }
+                        };
+                        let session_id = match self
+                            .last_inbound_session
+                            .lock()
+                            .unwrap()
+                            .get(&(room_id.to_string(), sender_fingerprint.clone()))
+                            .cloned()
+                        {
+                            Some(s) => s,
+                            None => {
+                                debug!(%room_id, %sender_fingerprint, "Edit: no known session for sender; dropping");
+                                return;
+                            }
+                        };
+                        let dec = {
+                            let mut rooms = self.active_rooms.lock().unwrap();
+                            let room = match rooms.get_mut(room_id) {
+                                Some(r) => r,
+                                None => return,
+                            };
+                            let crypto = match room.crypto.as_mut() {
+                                Some(c) => c,
+                                None => return,
+                            };
+                            crypto.decrypt(&sender_fingerprint, &session_id, &ct)
+                        };
+                        match dec {
+                            Ok((pt, _)) => String::from_utf8_lossy(&pt).to_string(),
+                            Err(e) => {
+                                debug!(%e, "Edit: decrypt of new body failed; dropping");
+                                return;
+                            }
+                        }
+                    }
+                };
+                match repo::apply_message_edit(
+                    &self.db,
+                    room_id,
+                    &target_msg_id,
+                    &new_plaintext,
+                    now_unix_ms(),
+                ) {
+                    Ok(true) => {
+                        let _ = self.app_event_tx.send(AppEvent::MessageEdited {
+                            room_id: room_id.to_string(),
+                            message_id: target_msg_id,
+                            editor_fingerprint: signer,
+                            new_body: new_plaintext,
+                        });
+                    }
+                    Ok(false) => {
+                        debug!(%target_msg_id, "Edit ignored (stale timestamp or deleted)");
+                    }
+                    Err(e) => warn!(%e, "apply_message_edit failed"),
+                }
+            }
+            // huddle 2.0.0 (F10): tombstone a message. Applied only when the
+            // signer is the original sender OR a current room owner. Idempotent.
+            RoomMessage::Delete {
+                sender_fingerprint,
+                target_msg_id,
+            } => {
+                if sender_fingerprint == our_fp {
+                    return;
+                }
+                let signer = match verified_signer {
+                    Some(fp) => fp,
+                    None => {
+                        warn!("dropping unsigned Delete");
+                        return;
+                    }
+                };
+                if signer != sender_fingerprint {
+                    return;
+                }
+                let target = match repo::find_message_by_client_id(&self.db, room_id, &target_msg_id) {
+                    Ok(Some(m)) => m,
+                    _ => {
+                        debug!(%target_msg_id, %room_id, "Delete target unknown; dropping");
+                        return;
+                    }
+                };
+                if target.sender_fingerprint != signer && !self.is_owner(room_id, &signer) {
+                    warn!(%signer, %target_msg_id, "Delete not authorized (not sender or owner); dropping");
+                    return;
+                }
+                match repo::mark_message_deleted(&self.db, room_id, &target_msg_id, now_unix_ms()) {
+                    Ok(true) => {
+                        let _ = self.app_event_tx.send(AppEvent::MessageDeleted {
+                            room_id: room_id.to_string(),
+                            message_id: target_msg_id,
+                            deleter_fingerprint: signer,
+                        });
+                    }
+                    Ok(false) => {}
+                    Err(e) => warn!(%e, "mark_message_deleted failed"),
+                }
+            }
+            // huddle 2.0.0 (F9): a signed disappearing-messages TTL update.
+            // Applied only when the signer is the room creator or a current owner.
+            RoomMessage::RoomSetting {
+                sender_fingerprint,
+                disappearing_ttl_secs,
+            } => {
+                if sender_fingerprint == our_fp {
+                    return;
+                }
+                let signer = match verified_signer {
+                    Some(fp) => fp,
+                    None => {
+                        warn!("dropping unsigned RoomSetting");
+                        return;
+                    }
+                };
+                if signer != sender_fingerprint {
+                    return;
+                }
+                let is_creator = repo::get_room(&self.db, room_id)
+                    .ok()
+                    .flatten()
+                    .map(|r| r.creator_fingerprint == signer)
+                    .unwrap_or(false);
+                if !is_creator && !self.is_owner(room_id, &signer) {
+                    warn!(%signer, %room_id, "RoomSetting from non-owner; dropping");
+                    return;
+                }
+                let ttl = if disappearing_ttl_secs == 0 {
+                    None
+                } else {
+                    Some(disappearing_ttl_secs.min(u32::MAX as u64) as u32)
+                };
+                if let Err(e) = repo::set_room_disappearing_ttl(&self.db, room_id, ttl) {
+                    warn!(%e, %room_id, "set_room_disappearing_ttl failed");
+                    return;
+                }
+                info!(%room_id, ?ttl, "F9: applied inbound disappearing-messages TTL");
+                let _ = self.app_event_tx.send(AppEvent::RoomTtlChanged {
+                    room_id: room_id.to_string(),
+                    ttl_secs: ttl,
+                });
+            }
         }
     }
 
@@ -5215,7 +6095,15 @@ impl AppHandle {
     /// else the typed `DELETE EVERYTHING` phrase since no-master-passphrase
     /// sessions have nothing else to compare against.
     pub fn has_master_passphrase(&self) -> bool {
-        self.session_persist_key != [0u8; 32]
+        self.persist_key() != [0u8; 32]
+    }
+
+    /// huddle 2.0.0 (F5): snapshot the at-rest Megolm persist key. Behind a
+    /// `Mutex` since `change_master_passphrase` swaps it after a re-key; every
+    /// read (RoomCrypto construction, passphrase verification) goes through here
+    /// so a swap is observed atomically by all clones of the handle.
+    fn persist_key(&self) -> [u8; 32] {
+        *self.session_persist_key.lock().unwrap()
     }
 
     /// Phase E: global toggle — when true, inbound dials from
@@ -5648,7 +6536,7 @@ impl AppHandle {
                     self.db.clone(),
                     room_id.to_string(),
                     our_fp.clone(),
-                    self.session_persist_key,
+                    self.persist_key(),
                 )?),
                 passphrase_key: None,
                 members: {
@@ -5710,6 +6598,9 @@ impl AppHandle {
                 their_confirmed: false,
                 finalized: false,
                 created_at: now_unix(),
+                // huddle 2.0.0 (F1): set true once the SasResponse arrives and we
+                // bind the responder's ML-KEM ek into the derived code.
+                partner_pq_capable: false,
             },
         );
         self.network
@@ -5786,7 +6677,19 @@ impl AppHandle {
         partner_fingerprint: &str,
     ) -> Result<()> {
         repo::set_member_verified(&self.db, room_id, partner_fingerprint, true)?;
-        repo::add_verified_peer(&self.db, partner_fingerprint, now_unix())?;
+        // huddle 2.0.0 (F1): read whether this SAS bound the partner's ML-KEM ek
+        // BEFORE removing the flow, then persist it as the durable
+        // `verified_peers.pq_capable` anchor. The flag is sticky-once-true in
+        // `add_verified_peer`, so a later classical (group) re-verification of an
+        // already-PQ-verified peer can never clear it.
+        let partner_pq_capable = self
+            .sas_flows
+            .lock()
+            .unwrap()
+            .get(tx_id)
+            .map(|f| f.partner_pq_capable)
+            .unwrap_or(false);
+        repo::add_verified_peer(&self.db, partner_fingerprint, now_unix(), partner_pq_capable)?;
         self.sas_flows.lock().unwrap().remove(tx_id);
         let _ = self.app_event_tx.send(AppEvent::SasVerified {
             room_id: room_id.to_string(),
@@ -5985,7 +6888,7 @@ impl AppHandle {
                 self.db.clone(),
                 room_id.to_string(),
                 self.identity.fingerprint().to_string(),
-                self.session_persist_key,
+                self.persist_key(),
             )?;
             room.crypto = Some(new_crypto);
             room.passphrase_key = Some(new_key);
@@ -6271,14 +7174,14 @@ impl AppHandle {
     /// is all-zero), the passphrase check is skipped — the typed
     /// `DELETE EVERYTHING` confirmation in the TUI is the only gate.
     pub async fn go_dark(&self, master_passphrase: &str) -> Result<()> {
-        let no_master = self.session_persist_key == [0u8; 32];
+        let no_master = self.persist_key() == [0u8; 32];
         if !no_master {
             let salt = storage::keychain::load_or_create_salt()?;
             let candidate_master =
                 storage::keychain::derive_master_key(master_passphrase, &salt)?;
             let candidate_subkey =
                 storage::keychain::derive_subkey(&candidate_master, b"megolm-persist");
-            if !ct_eq_32(&candidate_subkey, &self.session_persist_key) {
+            if !ct_eq_32(&candidate_subkey, &self.persist_key()) {
                 return Err(HuddleError::Other(
                     "incorrect master passphrase".into(),
                 ));
@@ -6355,6 +7258,44 @@ impl AppHandle {
         let _ = self.app_event_tx.send(AppEvent::WentDark);
         Ok(())
     }
+}
+
+/// huddle 2.0.0 (F10): mint a stable, cross-peer message id — a random
+/// UUID-v4-shaped string (`8-4-4-4-12` lowercase hex). huddle-core has no
+/// `uuid` dependency, so we format 16 OS-random bytes with the v4 version +
+/// RFC-4122 variant bits set; the collision probability is ~2^-122, matching
+/// `uuid::Uuid::new_v4`. Minted by the sender when composing content so every
+/// peer names the same logical message for reactions / edits / replies /
+/// deletes.
+fn new_client_msg_id() -> String {
+    use rand::RngCore;
+    let mut b = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut b);
+    b[6] = (b[6] & 0x0f) | 0x40; // version 4
+    b[8] = (b[8] & 0x3f) | 0x80; // RFC 4122 variant
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]
+    )
+}
+
+/// huddle 2.0.0 (F6): the fingerprint a 24-word BIP39 phrase decodes to,
+/// without opening a session. Used to preview/verify an identity import (and by
+/// [`AppHandle::verify_seed_reentry`]). Errors on an off-wordlist word, a bad
+/// checksum, or the wrong word count.
+pub fn fingerprint_from_phrase(phrase: &str) -> Result<String> {
+    let seed = crate::crypto::mnemonic::phrase_to_seed(phrase)?;
+    let id = Identity::from_seed(zeroize::Zeroizing::new(seed))?;
+    Ok(id.fingerprint().to_string())
+}
+
+/// huddle 2.0.0 (F6): rebuild an [`Identity`] from a 24-word BIP39 phrase — the
+/// fresh-install recovery path the TUI/GUI call before a session opens. The
+/// restored identity is byte-for-byte the original (same fingerprint, PeerId,
+/// and ML-KEM keypair).
+pub fn import_identity_from_phrase(phrase: &str) -> Result<Identity> {
+    let seed = crate::crypto::mnemonic::phrase_to_seed(phrase)?;
+    Identity::from_seed(zeroize::Zeroizing::new(seed))
 }
 
 /// huddle 0.5.1: parse `input` as a huddle ID — either `HD-`-prefixed
@@ -6450,6 +7391,51 @@ mod attach_path_tests {
         assert_eq!(expand_tilde_with("~bob/f", home), PathBuf::from("~bob/f"));
         // No $HOME → no expansion.
         assert_eq!(expand_tilde_with("~/f", None), PathBuf::from("~/f"));
+    }
+}
+
+#[cfg(test)]
+mod content_id_tests {
+    //! huddle 2.0.0 (F10/F6): pure-helper invariants for the cross-peer message
+    //! id and the BIP39 identity import — exercised without an `AppHandle`.
+    use super::{fingerprint_from_phrase, import_identity_from_phrase, new_client_msg_id};
+    use crate::crypto::mnemonic::seed_to_phrase;
+    use crate::identity::Identity;
+
+    #[test]
+    fn client_msg_id_is_uuid_v4_shaped_and_unique() {
+        let a = new_client_msg_id();
+        let b = new_client_msg_id();
+        assert_ne!(a, b, "two minted ids must differ");
+        // 8-4-4-4-12 lowercase-hex layout.
+        let parts: Vec<&str> = a.split('-').collect();
+        assert_eq!(parts.len(), 5);
+        assert_eq!(
+            parts.iter().map(|p| p.len()).collect::<Vec<_>>(),
+            vec![8, 4, 4, 4, 12]
+        );
+        assert!(a.chars().all(|c| c == '-' || c.is_ascii_hexdigit()));
+        // Version nibble (first char of group 3) is '4'; variant nibble (first
+        // char of group 4) is one of 8/9/a/b.
+        assert_eq!(&parts[2][..1], "4");
+        assert!(matches!(&parts[3][..1], "8" | "9" | "a" | "b"));
+    }
+
+    #[test]
+    fn fingerprint_from_phrase_matches_identity_and_import_round_trips() {
+        // F6: a phrase decodes to the same fingerprint the identity reports, and
+        // a full re-import reproduces the identity byte-for-byte.
+        let id = Identity::generate().unwrap();
+        let phrase = seed_to_phrase(&id.seed());
+        assert_eq!(fingerprint_from_phrase(&phrase).unwrap(), id.fingerprint());
+        let restored = import_identity_from_phrase(&phrase).unwrap();
+        assert_eq!(restored.fingerprint(), id.fingerprint());
+        assert_eq!(restored.mlkem_public_bytes(), id.mlkem_public_bytes());
+    }
+
+    #[test]
+    fn fingerprint_from_phrase_rejects_garbage() {
+        assert!(fingerprint_from_phrase("not a valid bip39 phrase at all").is_err());
     }
 }
 

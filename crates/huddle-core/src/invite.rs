@@ -27,6 +27,12 @@
 //!   replays of stale invites loosely bounded (24h window by default).
 //! - `signature_b64` (v2+): Ed25519 signature over a deterministic
 //!   serialization of the other fields.
+//! - `mlkem_ek_b64` (v4+): optional base64 of the inviter's ML-KEM-768
+//!   encapsulation (public) key. When present it's folded into the
+//!   signed transcript (the header bumps to `huddle-invite-v4|`),
+//!   binding the inviter's post-quantum capability so a relay can't
+//!   silently strip it without breaking the signature. Absent on
+//!   classical invites, which stay byte-compatible with v2/v3.
 //!
 //! Important: the passphrase is NEVER in the link. Encrypted rooms
 //! still require the joiner to type the passphrase separately;
@@ -54,7 +60,8 @@ pub const INVITE_MAX_AGE_MS: i64 = 24 * 60 * 60 * 1000;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InviteLink {
     /// 1 = legacy unsigned (huddle 0.7.10 and earlier).
-    /// 2 = signed (huddle 0.7.11+).
+    /// 2 = signed (huddle 0.7.11+). 3 = signed + `relay_url` (huddle 1.0+).
+    /// 4 = signed + ML-KEM encapsulation-key commitment (huddle 2.0+).
     pub v: u32,
     pub host_multiaddr: String,
     pub fingerprint: String,
@@ -81,6 +88,16 @@ pub struct InviteLink {
     /// clients).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_url: Option<String>,
+    /// huddle 2.0: optional base64 of the inviter's ML-KEM-768
+    /// encapsulation (public) key. When present, the invite commits to
+    /// the inviter's post-quantum identity in the signed transcript, so a
+    /// relay can't strip the inviter's PQ capability without breaking the
+    /// signature. Bumps the invite to `v=4` and is folded into
+    /// `signable_bytes` only when present, so classical (ML-KEM-less)
+    /// invites stay byte-identical to v2/v3 and readable by older clients.
+    /// `None` for classical invites.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mlkem_ek_b64: Option<String>,
 }
 
 fn is_zero(n: &i64) -> bool {
@@ -108,7 +125,17 @@ impl InviteLink {
     /// newer version still need to verify v2 invites.
     fn signable_bytes(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(256);
-        out.extend_from_slice(b"huddle-invite-v2|");
+        // huddle 2.0: the transcript header bumps to v4 only when the
+        // invite commits to the inviter's ML-KEM encapsulation key, so the
+        // signed bytes differ from a classical invite. ML-KEM-less invites
+        // keep the exact `huddle-invite-v2|` header (and tail) so their
+        // signed input stays byte-identical to pre-2.0 v2/v3 signers and
+        // still verifies across versions.
+        if self.mlkem_ek_b64.is_some() {
+            out.extend_from_slice(b"huddle-invite-v4|");
+        } else {
+            out.extend_from_slice(b"huddle-invite-v2|");
+        }
         out.extend_from_slice(self.host_multiaddr.as_bytes());
         out.push(b'|');
         out.extend_from_slice(self.fingerprint.as_bytes());
@@ -146,6 +173,15 @@ impl InviteLink {
             out.extend_from_slice(b"|relay|");
             out.extend_from_slice(relay.as_bytes());
         }
+        // huddle 2.0: append the ML-KEM encapsulation key only when present,
+        // mirroring the relay tail above. Classical invites omit it entirely
+        // (byte-compatible with v2/v3); when present, signer and verifier
+        // append it identically so it's covered by the signature — a relay
+        // can't strip or swap the inviter's PQ key without breaking the sig.
+        if let Some(ek) = &self.mlkem_ek_b64 {
+            out.extend_from_slice(b"|mlkem-ek|");
+            out.extend_from_slice(ek.as_bytes());
+        }
         out
     }
 }
@@ -154,9 +190,18 @@ impl InviteLink {
 /// `signed_at_ms`, and `signature_b64`. The input invite's `v` and
 /// signature fields are overwritten.
 pub fn sign_invite(identity: &Identity, mut invite: InviteLink) -> Result<InviteLink> {
-    // huddle 1.0: v=3 when the invite carries a relay URL, else v=2 so
-    // relay-less invites stay readable by pre-1.0 clients.
-    invite.v = if invite.relay_url.is_some() { 3 } else { 2 };
+    // huddle 2.0: v=4 when the invite commits to the inviter's ML-KEM
+    // encapsulation key. Otherwise huddle 1.0's rule applies: v=3 when the
+    // invite carries a relay URL, else v=2 so the plainest invites stay
+    // readable by pre-1.0 clients. (An ML-KEM invite may also carry a relay;
+    // the v4 header already supersedes v3 in that case.)
+    invite.v = if invite.mlkem_ek_b64.is_some() {
+        4
+    } else if invite.relay_url.is_some() {
+        3
+    } else {
+        2
+    };
     invite.creator_pubkey_b64 = Some(B64.encode(identity.public_bytes()));
     invite.signed_at_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -219,7 +264,12 @@ pub fn decode(url: &str) -> Result<InviteLink> {
         }
         // huddle 1.0: v3 adds the signed `relay_url`; it verifies identically
         // to v2 because `signable_bytes` already folds the relay in when present.
-        2 | 3 => {
+        // huddle 2.0: v4 adds the signed `mlkem_ek_b64`; it likewise verifies
+        // identically because `signable_bytes` swaps to the `huddle-invite-v4|`
+        // header and folds the ML-KEM key in whenever it's present. Stripping
+        // the key (a PQ-downgrade) changes the reconstructed bytes and fails
+        // the signature — exactly the defense we want.
+        2 | 3 | 4 => {
             verify_invite_signature(&invite)?;
             verify_invite_freshness(&invite)?;
             Ok(invite)
@@ -331,6 +381,7 @@ mod tests {
             signed_at_ms: 0,
             signature_b64: None,
             relay_url: None,
+            mlkem_ek_b64: None,
         }
     }
 
@@ -493,5 +544,97 @@ mod tests {
         signed.v = 1;
         let url = encode(&signed).unwrap();
         assert!(decode(&url).is_err());
+    }
+
+    // huddle 2.0: a v4 invite commits to the inviter's ML-KEM encapsulation
+    // key in the signed transcript and round-trips through encode/decode.
+    #[test]
+    fn signed_v4_with_mlkem_round_trips() {
+        let id = Identity::generate().unwrap();
+        let mut inv = fixture();
+        inv.fingerprint = id.fingerprint().to_string();
+        inv.mlkem_ek_b64 = Some(B64.encode([7u8; 1184])); // ML-KEM-768 ek size
+        let signed = sign_invite(&id, inv).unwrap();
+        assert_eq!(signed.v, 4, "an invite committing to an ML-KEM key must be v4");
+        let url = encode(&signed).unwrap();
+        let back = decode(&url).unwrap();
+        assert_eq!(back, signed);
+        assert_eq!(back.mlkem_ek_b64, Some(B64.encode([7u8; 1184])));
+        assert!(!is_legacy_unsigned(&back));
+    }
+
+    // An invite carrying both a relay and an ML-KEM key is v4 (the PQ header
+    // supersedes v3) and still round-trips with the relay intact.
+    #[test]
+    fn v4_with_relay_and_mlkem_round_trips() {
+        let id = Identity::generate().unwrap();
+        let mut inv = fixture();
+        inv.fingerprint = id.fingerprint().to_string();
+        inv.relay_url = Some("wss://abc.trycloudflare.com/ws".into());
+        inv.mlkem_ek_b64 = Some(B64.encode([3u8; 1184]));
+        let signed = sign_invite(&id, inv).unwrap();
+        assert_eq!(signed.v, 4);
+        let url = encode(&signed).unwrap();
+        let back = decode(&url).unwrap();
+        assert_eq!(back, signed);
+        assert_eq!(back.relay_url.as_deref(), Some("wss://abc.trycloudflare.com/ws"));
+        assert!(back.mlkem_ek_b64.is_some());
+    }
+
+    // Tampering with the committed ML-KEM key breaks the signature — this is
+    // the PQ-downgrade defense: a relay can't swap the inviter's PQ key.
+    #[test]
+    fn tampered_mlkem_fails() {
+        let id = Identity::generate().unwrap();
+        let mut inv = fixture();
+        inv.fingerprint = id.fingerprint().to_string();
+        inv.mlkem_ek_b64 = Some(B64.encode([1u8; 1184]));
+        let mut signed = sign_invite(&id, inv).unwrap();
+        // Swap in an attacker's ML-KEM key; the signature must no longer verify.
+        signed.mlkem_ek_b64 = Some(B64.encode([2u8; 1184]));
+        let url = encode(&signed).unwrap();
+        let err = decode(&url).unwrap_err();
+        assert!(format!("{err}").contains("invite signature verify failed"));
+    }
+
+    // Stripping the ML-KEM key from a v4 invite (the actual PQ-downgrade) is
+    // caught: the verifier reconstructs the classical `huddle-invite-v2|`
+    // bytes without the key tail, which no longer matches the v4 signature.
+    // Flipping the (unsigned) version field too doesn't help the attacker.
+    #[test]
+    fn stripped_mlkem_downgrade_is_rejected() {
+        let id = Identity::generate().unwrap();
+        let mut inv = fixture();
+        inv.fingerprint = id.fingerprint().to_string();
+        inv.mlkem_ek_b64 = Some(B64.encode([9u8; 1184]));
+        let mut signed = sign_invite(&id, inv).unwrap();
+        assert_eq!(signed.v, 4);
+        // Attacker strips the PQ commitment and flips the version to v2.
+        signed.mlkem_ek_b64 = None;
+        signed.v = 2;
+        let url = encode(&signed).unwrap();
+        let err = decode(&url).unwrap_err();
+        assert!(format!("{err}").contains("invite signature verify failed"));
+    }
+
+    // A classical invite (no ML-KEM key) keeps the exact pre-2.0 v2 signed
+    // bytes, so its signature is byte-compatible across versions: signing the
+    // same invite without and with an unrelated relay must still produce v2/v3,
+    // never v4.
+    #[test]
+    fn classical_invite_stays_v2_or_v3() {
+        let id = Identity::generate().unwrap();
+        let mut inv = fixture();
+        inv.fingerprint = id.fingerprint().to_string();
+        let signed = sign_invite(&id, inv).unwrap();
+        assert_eq!(signed.v, 2);
+        assert!(signed.mlkem_ek_b64.is_none());
+
+        let mut inv = fixture();
+        inv.fingerprint = id.fingerprint().to_string();
+        inv.relay_url = Some("wss://mine.example/ws".into());
+        let signed = sign_invite(&id, inv).unwrap();
+        assert_eq!(signed.v, 3);
+        assert!(signed.mlkem_ek_b64.is_none());
     }
 }

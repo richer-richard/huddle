@@ -92,6 +92,19 @@ fn render_account<'a>(app: &TuiApp, theme: &Theme) -> Vec<Line<'a>> {
         row(theme, "E", "edit username", "open editor".into()),
         row(theme, "Q", "show QR / HD-ID", "open viewer".into()),
         row(theme, "W", "replay onboarding", "press W".into()),
+        // huddle 2.0.0 (F5 / F6): identity security.
+        row(
+            theme,
+            "P",
+            "change master passphrase",
+            "requires current passphrase".into(),
+        ),
+        row(
+            theme,
+            "Shift+S",
+            "export seed phrase",
+            "24-word BIP39 backup".into(),
+        ),
         Line::raw(""),
         Line::from(vec![Span::styled(
             "  (visit Profile pane to copy fields with `y`)",

@@ -760,8 +760,49 @@ pub struct StoredRoomMessage {
     pub direction: String,
     pub body: String,
     pub sent_at: i64,
+    /// huddle 2.0.0 (F10): the sender-minted stable id (UUID v4) for this
+    /// message, echoed on the wire so every peer names the same logical
+    /// message. `None` for pre-2.0 messages — they carry no target handle, so
+    /// reactions / replies / edits / deletes can't address them.
+    pub client_msg_id: Option<String>,
+    /// huddle 2.0.0 (F10): the `client_msg_id` this message replies to, or
+    /// `None`. The reply target may itself be a pre-2.0 message (no id) or a
+    /// since-deleted one; the UI degrades to a plain message in that case.
+    pub reply_to: Option<String>,
+    /// huddle 2.0.0 (F10): wall-clock ms of the most recent applied edit, or
+    /// `None` if never edited. Last-write-wins is gated on this in
+    /// `apply_message_edit`. A non-`None` value drives the `[edited]` marker.
+    pub edited_at: Option<i64>,
+    /// huddle 2.0.0 (F10): tombstone timestamp. When `Some`, the message was
+    /// deleted: its `body` has been blanked and the UI renders `[deleted]`.
+    pub deleted_at: Option<i64>,
 }
 
+/// Shared row→`StoredRoomMessage` mapper. Every `room_messages` read path
+/// (history, LIKE search, FTS search, by-client-id lookup) selects the same
+/// column list in this exact order, so they stay in lock-step as the table
+/// gains columns. Column order:
+/// `id, room_id, sender_fingerprint, direction, body, sent_at,
+///  client_msg_id, reply_to, edited_at, deleted_at`.
+fn row_to_room_message(row: &rusqlite::Row) -> rusqlite::Result<StoredRoomMessage> {
+    Ok(StoredRoomMessage {
+        id: row.get(0)?,
+        room_id: row.get(1)?,
+        sender_fingerprint: row.get(2)?,
+        direction: row.get(3)?,
+        body: row.get(4)?,
+        sent_at: row.get(5)?,
+        client_msg_id: row.get(6)?,
+        reply_to: row.get(7)?,
+        edited_at: row.get(8)?,
+        deleted_at: row.get(9)?,
+    })
+}
+
+/// Insert a room message. huddle 2.0.0 (F10): `client_msg_id` (the sender's
+/// stable UUID v4) and `reply_to` (the id of the message being replied to) are
+/// both set at insert time; pass `None`/`None` for plain non-reply messages and
+/// for inbound pre-2.0 messages that carry no id.
 pub fn insert_room_message(
     db: &Db,
     room_id: &str,
@@ -769,19 +810,33 @@ pub fn insert_room_message(
     direction: &str,
     body: &str,
     sent_at: i64,
+    client_msg_id: Option<&str>,
+    reply_to: Option<&str>,
 ) -> Result<i64> {
     let conn = db.lock().unwrap();
     conn.execute(
-        "INSERT INTO room_messages (room_id, sender_fingerprint, direction, body, sent_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![room_id, sender_fingerprint, direction, body, sent_at],
+        "INSERT INTO room_messages
+            (room_id, sender_fingerprint, direction, body, sent_at, client_msg_id, reply_to)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            room_id,
+            sender_fingerprint,
+            direction,
+            body,
+            sent_at,
+            client_msg_id,
+            reply_to
+        ],
     )?;
     Ok(conn.last_insert_rowid())
 }
 
 /// LIKE-based message search within a room. Case-insensitive. The query
 /// is treated as a literal substring — `%`, `_`, and `\` are escaped so
-/// they cannot act as LIKE wildcards.
+/// they cannot act as LIKE wildcards. huddle 2.0.0: this is also the graceful
+/// fallback for [`search_room_messages_fts`] when FTS5 is unavailable or the
+/// query isn't valid FTS5 syntax. Tombstoned messages (F10 deletes) are
+/// excluded so a `[deleted]` row never surfaces in search results.
 pub fn search_room_messages(
     db: &Db,
     room_id: &str,
@@ -796,43 +851,289 @@ pub fn search_room_messages(
     let pattern = format!("%{}%", escaped);
     let conn = db.lock().unwrap();
     let mut stmt = conn.prepare(
-        "SELECT id, room_id, sender_fingerprint, direction, body, sent_at
+        "SELECT id, room_id, sender_fingerprint, direction, body, sent_at,
+                client_msg_id, reply_to, edited_at, deleted_at
          FROM room_messages
-         WHERE room_id = ?1 AND body LIKE ?2 ESCAPE '\\' COLLATE NOCASE
+         WHERE room_id = ?1 AND deleted_at IS NULL
+           AND body LIKE ?2 ESCAPE '\\' COLLATE NOCASE
          ORDER BY sent_at DESC LIMIT ?3",
     )?;
-    let rows = stmt.query_map(params![room_id, pattern, limit], |row| {
-        Ok(StoredRoomMessage {
-            id: row.get(0)?,
-            room_id: row.get(1)?,
-            sender_fingerprint: row.get(2)?,
-            direction: row.get(3)?,
-            body: row.get(4)?,
-            sent_at: row.get(5)?,
-        })
-    })?;
+    let rows = stmt.query_map(params![room_id, pattern, limit], row_to_room_message)?;
     Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+/// huddle 2.0.0 (F8): ranked full-text search over a room's message bodies via
+/// the `room_messages_fts` FTS5 index, ordered newest-first to match the LIKE
+/// path it supersedes. The `query` is passed through as a raw FTS5 MATCH
+/// expression, so the usual operators work: bare tokens AND together
+/// (`hello world`), `*` does prefix matching (`hel*`), and `-` excludes
+/// (`hello -world`). Tombstoned messages (F10 deletes) are filtered out.
+///
+/// Robustness: an empty/whitespace query — which is not a valid MATCH
+/// expression — returns no results. Any FTS failure (an unavailable virtual
+/// table on a SQLCipher build without FTS5, or an invalid FTS5 query
+/// expression such as a stray quote) is caught and transparently retried via
+/// the [`search_room_messages`] LIKE path, so search never hard-fails on user
+/// input.
+pub fn search_room_messages_fts(
+    db: &Db,
+    room_id: &str,
+    query: &str,
+    limit: i64,
+) -> Result<Vec<StoredRoomMessage>> {
+    if query.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let fts_result: rusqlite::Result<Vec<StoredRoomMessage>> = (|| {
+        let conn = db.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT m.id, m.room_id, m.sender_fingerprint, m.direction, m.body, m.sent_at,
+                    m.client_msg_id, m.reply_to, m.edited_at, m.deleted_at
+             FROM room_messages_fts f
+             JOIN room_messages m ON m.id = f.rowid
+             WHERE m.room_id = ?1 AND m.deleted_at IS NULL AND f.body MATCH ?2
+             ORDER BY m.sent_at DESC LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![room_id, query, limit], row_to_room_message)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+    })();
+
+    match fts_result {
+        Ok(msgs) => Ok(msgs),
+        Err(e) => {
+            warn!(error = %e, "FTS5 search failed; falling back to LIKE substring search");
+            search_room_messages(db, room_id, query, limit)
+        }
+    }
 }
 
 pub fn get_room_messages(db: &Db, room_id: &str, limit: i64) -> Result<Vec<StoredRoomMessage>> {
     let conn = db.lock().unwrap();
     let mut stmt = conn.prepare(
-        "SELECT id, room_id, sender_fingerprint, direction, body, sent_at
+        "SELECT id, room_id, sender_fingerprint, direction, body, sent_at,
+                client_msg_id, reply_to, edited_at, deleted_at
          FROM room_messages WHERE room_id = ?1 ORDER BY sent_at DESC LIMIT ?2",
     )?;
-    let rows = stmt.query_map(params![room_id, limit], |row| {
-        Ok(StoredRoomMessage {
-            id: row.get(0)?,
-            room_id: row.get(1)?,
-            sender_fingerprint: row.get(2)?,
-            direction: row.get(3)?,
-            body: row.get(4)?,
-            sent_at: row.get(5)?,
-        })
-    })?;
+    let rows = stmt.query_map(params![room_id, limit], row_to_room_message)?;
     let mut msgs: Vec<StoredRoomMessage> = rows.collect::<std::result::Result<Vec<_>, _>>()?;
     msgs.reverse();
     Ok(msgs)
+}
+
+// =========================================================================
+// huddle 2.0.0 (F9): disappearing messages — per-room TTL auto-deletion
+// =========================================================================
+
+/// The per-room disappearing-messages TTL in seconds, or `None` when the
+/// feature is OFF for the room (stored as 0). When `Some(secs)`, a message
+/// becomes eligible for [`delete_expired_messages`] once `sent_at + secs` has
+/// passed. Defaults to `None` for unknown rooms and for any room that predates
+/// the F9 migration (`disappearing_ttl_secs DEFAULT 0`).
+pub fn get_room_disappearing_ttl(db: &Db, room_id: &str) -> Result<Option<u32>> {
+    let conn = db.lock().unwrap();
+    let secs: i64 = conn
+        .query_row(
+            "SELECT disappearing_ttl_secs FROM rooms WHERE id = ?1",
+            params![room_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    Ok(if secs > 0 { Some(secs as u32) } else { None })
+}
+
+/// Set (or clear, with `None`) a room's disappearing-messages TTL. `None` maps
+/// to 0 (OFF). Callers that learn the setting from a signed
+/// `DisappearingMessagesUpdate` must verify the signer is a room owner first —
+/// this repo function trusts its inputs.
+pub fn set_room_disappearing_ttl(db: &Db, room_id: &str, ttl_secs: Option<u32>) -> Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "UPDATE rooms SET disappearing_ttl_secs = ?1 WHERE id = ?2",
+        params![ttl_secs.unwrap_or(0) as i64, room_id],
+    )?;
+    Ok(())
+}
+
+/// Physically delete every message that has outlived its room's
+/// disappearing-messages TTL — i.e. `sent_at + rooms.disappearing_ttl_secs
+/// <= now_ts` for rooms with the feature ON (`disappearing_ttl_secs > 0`).
+/// Returns the number of rows removed (logged by the pruner). The FTS delete
+/// trigger keeps the search index in lock-step. Reactions on a now-expired
+/// message are harmlessly orphaned (their `target_client_msg_id` no longer
+/// resolves) and age out with the room's FK cascade. Best-effort + local: each
+/// peer prunes against its own clock.
+pub fn delete_expired_messages(db: &Db, now_ts: i64) -> Result<usize> {
+    let conn = db.lock().unwrap();
+    let removed = conn.execute(
+        "DELETE FROM room_messages
+         WHERE id IN (
+            SELECT m.id FROM room_messages m
+            JOIN rooms r ON r.id = m.room_id
+            WHERE r.disappearing_ttl_secs > 0
+              AND m.sent_at + r.disappearing_ttl_secs <= ?1
+         )",
+        params![now_ts],
+    )?;
+    Ok(removed)
+}
+
+// =========================================================================
+// huddle 2.0.0 (F10): reactions, replies, edits, deletes
+// =========================================================================
+
+/// A single reaction (one reactor, one emoji) on one message. Reactions are
+/// stored one row per `(room, target message, reactor, emoji)`; the UI groups
+/// them client-side by `target_client_msg_id` into per-emoji counts.
+#[derive(Debug, Clone)]
+pub struct StoredReaction {
+    pub id: i64,
+    pub room_id: String,
+    /// The `client_msg_id` of the message being reacted to.
+    pub target_client_msg_id: String,
+    pub sender_fingerprint: String,
+    pub emoji: String,
+    pub reacted_at: i64,
+}
+
+/// Record a reaction. Idempotent on `(room, target message, reactor, emoji)`
+/// via the UNIQUE constraint — a re-sent reaction (or a UI double-click) is a
+/// no-op rather than an error or a duplicate badge. `reacted_at` is refreshed
+/// on conflict so the freshest timestamp wins for any UI that sorts by it.
+/// Callers verify the reaction's signed envelope (signer == sender) first.
+pub fn add_reaction(
+    db: &Db,
+    room_id: &str,
+    target_client_msg_id: &str,
+    sender_fingerprint: &str,
+    emoji: &str,
+    reacted_at: i64,
+) -> Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "INSERT INTO room_reactions
+            (room_id, target_client_msg_id, sender_fingerprint, emoji, reacted_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(room_id, target_client_msg_id, sender_fingerprint, emoji)
+            DO UPDATE SET reacted_at = excluded.reacted_at",
+        params![room_id, target_client_msg_id, sender_fingerprint, emoji, reacted_at],
+    )?;
+    Ok(())
+}
+
+/// Remove a single reaction (the toggle-off / change-emoji path). Exact match
+/// on all four identity columns, so removing 👍 leaves a ❤️ from the same
+/// reactor untouched. Idempotent: removing a reaction that isn't there affects
+/// 0 rows and is not an error.
+pub fn remove_reaction(
+    db: &Db,
+    room_id: &str,
+    target_client_msg_id: &str,
+    sender_fingerprint: &str,
+    emoji: &str,
+) -> Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "DELETE FROM room_reactions
+         WHERE room_id = ?1 AND target_client_msg_id = ?2
+           AND sender_fingerprint = ?3 AND emoji = ?4",
+        params![room_id, target_client_msg_id, sender_fingerprint, emoji],
+    )?;
+    Ok(())
+}
+
+/// Every reaction in a room, oldest first. Cheap enough to load once when a
+/// room opens and group client-side by `target_client_msg_id` (the
+/// `idx_room_reactions_target` index keeps the per-message slice contiguous).
+/// Returns an empty `Vec` for a room with no reactions.
+pub fn list_room_reactions(db: &Db, room_id: &str) -> Result<Vec<StoredReaction>> {
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare(
+        "SELECT id, room_id, target_client_msg_id, sender_fingerprint, emoji, reacted_at
+         FROM room_reactions WHERE room_id = ?1 ORDER BY reacted_at ASC, id ASC",
+    )?;
+    let rows = stmt.query_map(params![room_id], |row| {
+        Ok(StoredReaction {
+            id: row.get(0)?,
+            room_id: row.get(1)?,
+            target_client_msg_id: row.get(2)?,
+            sender_fingerprint: row.get(3)?,
+            emoji: row.get(4)?,
+            reacted_at: row.get(5)?,
+        })
+    })?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+/// Apply an edit to the message with this `client_msg_id`, last-write-wins on
+/// `edited_at`: a stale edit (older-or-equal timestamp than one already applied)
+/// is ignored. A delete is final — a tombstoned message (`deleted_at IS NOT
+/// NULL`) can't be resurrected by a late edit. Returns `true` iff a row was
+/// actually updated. The FTS index is kept current by the UPDATE trigger.
+/// Callers enforce the edit policy (signer == original sender OR room owner)
+/// before invoking.
+pub fn apply_message_edit(
+    db: &Db,
+    room_id: &str,
+    client_msg_id: &str,
+    new_body: &str,
+    edited_at: i64,
+) -> Result<bool> {
+    let conn = db.lock().unwrap();
+    let changed = conn.execute(
+        "UPDATE room_messages
+         SET body = ?3, edited_at = ?4
+         WHERE room_id = ?1 AND client_msg_id = ?2
+           AND deleted_at IS NULL
+           AND (edited_at IS NULL OR edited_at < ?4)",
+        params![room_id, client_msg_id, new_body, edited_at],
+    )?;
+    Ok(changed > 0)
+}
+
+/// Tombstone the message with this `client_msg_id`: blank the body (so the
+/// deleted plaintext doesn't linger at rest, and the FTS index stops matching
+/// it via the UPDATE trigger) and stamp `deleted_at`. Idempotent — a message
+/// that's already deleted is left untouched. Returns `true` iff this call
+/// tombstoned a row. Callers enforce the delete policy (signer == original
+/// sender OR room owner) before invoking.
+pub fn mark_message_deleted(
+    db: &Db,
+    room_id: &str,
+    client_msg_id: &str,
+    deleted_at: i64,
+) -> Result<bool> {
+    let conn = db.lock().unwrap();
+    let changed = conn.execute(
+        "UPDATE room_messages
+         SET body = '', deleted_at = ?3
+         WHERE room_id = ?1 AND client_msg_id = ?2 AND deleted_at IS NULL",
+        params![room_id, client_msg_id, deleted_at],
+    )?;
+    Ok(changed > 0)
+}
+
+/// Look up a stored message by its sender-minted `client_msg_id` within a room.
+/// Used to resolve a reaction / edit / delete / reply target — e.g. to read the
+/// original sender's fingerprint for the edit/delete authorization check, or to
+/// confirm a reply target still exists. Returns `None` when no message in the
+/// room carries that id (a pre-2.0 message has a NULL id and never matches).
+pub fn find_message_by_client_id(
+    db: &Db,
+    room_id: &str,
+    client_msg_id: &str,
+) -> Result<Option<StoredRoomMessage>> {
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare(
+        "SELECT id, room_id, sender_fingerprint, direction, body, sent_at,
+                client_msg_id, reply_to, edited_at, deleted_at
+         FROM room_messages WHERE room_id = ?1 AND client_msg_id = ?2 LIMIT 1",
+    )?;
+    let mut rows = stmt.query_map(params![room_id, client_msg_id], row_to_room_message)?;
+    match rows.next() {
+        Some(r) => Ok(Some(r?)),
+        None => Ok(None),
+    }
 }
 
 // =========================================================================
@@ -1249,14 +1550,66 @@ pub fn set_room_verified_only(db: &Db, room_id: &str, on: bool) -> Result<()> {
 /// Phase G: mark a fingerprint as globally SAS-verified. Idempotent;
 /// re-verifying just refreshes `verified_at`. Used by both sides of
 /// an SAS exchange on receiving the partner's matching `SasConfirm`.
-pub fn add_verified_peer(db: &Db, fingerprint: &str, verified_at: i64) -> Result<()> {
+///
+/// huddle 2.0.0 (F1): `pq_capable` records whether this SAS exchange bound the
+/// partner's ML-KEM encapsulation key into the transcript (i.e. the peer
+/// demonstrated post-quantum capability). It is **sticky-once-true**: a later
+/// classical SAS verification (`pq_capable = false`) must NOT clear a
+/// previously-observed PQ capability, exactly like the `known_peers.trusted`
+/// sticky flag and the `room_members.mlkem_pubkey` COALESCE-preserve pin. This
+/// is the durable anchor that lets `ensure_dm_key` refuse a classical-only DM
+/// fallback for a peer who was verified PQ-capable, defeating a
+/// post-verification relay downgrade.
+pub fn add_verified_peer(
+    db: &Db,
+    fingerprint: &str,
+    verified_at: i64,
+    pq_capable: bool,
+) -> Result<()> {
     let conn = db.lock().unwrap();
     conn.execute(
-        "INSERT INTO verified_peers (fingerprint, verified_at) VALUES (?1, ?2)
-         ON CONFLICT(fingerprint) DO UPDATE SET verified_at = excluded.verified_at",
-        params![fingerprint, verified_at],
+        "INSERT INTO verified_peers (fingerprint, verified_at, pq_capable) VALUES (?1, ?2, ?3)
+         ON CONFLICT(fingerprint) DO UPDATE SET
+            verified_at = excluded.verified_at,
+            pq_capable = CASE
+                WHEN excluded.pq_capable = 1 THEN 1
+                ELSE verified_peers.pq_capable
+            END",
+        params![fingerprint, verified_at, pq_capable as i64],
     )?;
     Ok(())
+}
+
+/// huddle 2.0.0 (F1): did this fingerprint demonstrate post-quantum (ML-KEM)
+/// capability during SAS verification? Returns `false` for unknown peers and
+/// for peers verified before this column existed (`DEFAULT 0`). A `true` result
+/// is a durable trust anchor: `ensure_dm_key` then refuses a classical-only DM
+/// fallback for this peer, so a relay can't strip their ML-KEM pubkey from a
+/// later `MemberAnnounce` to force a quantum-unsafe downgrade after they were
+/// verified.
+///
+/// Fail-secure on a genuine DB error: "no row" is the legitimate
+/// not-PQ-verified case and reads as `false`, but any *other* error refuses the
+/// downgrade by reporting `true` — a loud, safe failed-DM beats a silent
+/// downgrade, mirroring `security_count`'s deny-check default.
+pub fn get_verified_peer_pq_capable(db: &Db, fingerprint: &str) -> Result<bool> {
+    let conn = db.lock().unwrap();
+    match conn.query_row(
+        "SELECT pq_capable FROM verified_peers WHERE fingerprint = ?1",
+        params![fingerprint],
+        |r| r.get::<_, i64>(0),
+    ) {
+        Ok(v) => Ok(v != 0),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+        Err(e) => {
+            warn!(
+                error = %e,
+                "get_verified_peer_pq_capable query failed; fail-secure: \
+                 assuming PQ-capable to refuse a classical downgrade"
+            );
+            Ok(true)
+        }
+    }
 }
 
 /// Phase G + E: is this fingerprint globally SAS-verified? Used by
@@ -2002,9 +2355,9 @@ mod tests {
         let room = make_room("r");
         insert_room(&db, &room).unwrap();
 
-        insert_room_message(&db, &room.id, "alice-fp", "in", "hi", 100).unwrap();
-        insert_room_message(&db, &room.id, "me-fp", "out", "hello", 101).unwrap();
-        insert_room_message(&db, &room.id, "alice-fp", "in", "bye", 102).unwrap();
+        insert_room_message(&db, &room.id, "alice-fp", "in", "hi", 100, None, None).unwrap();
+        insert_room_message(&db, &room.id, "me-fp", "out", "hello", 101, None, None).unwrap();
+        insert_room_message(&db, &room.id, "alice-fp", "in", "bye", 102, None, None).unwrap();
 
         let msgs = get_room_messages(&db, &room.id, 10).unwrap();
         assert_eq!(msgs.len(), 3);
@@ -2018,8 +2371,10 @@ mod tests {
         let db = open_db_in_memory().unwrap();
         let room = make_room("r");
         insert_room(&db, &room).unwrap();
-        insert_room_message(&db, &room.id, "fp", "in", "literal percent: 50%", 100).unwrap();
-        insert_room_message(&db, &room.id, "fp", "in", "no special chars here", 101).unwrap();
+        insert_room_message(&db, &room.id, "fp", "in", "literal percent: 50%", 100, None, None)
+            .unwrap();
+        insert_room_message(&db, &room.id, "fp", "in", "no special chars here", 101, None, None)
+            .unwrap();
 
         // "%" must match a literal "%", not act as a wildcard-matches-all.
         let pct = search_room_messages(&db, &room.id, "%", 10).unwrap();
@@ -2160,5 +2515,297 @@ mod tests {
             content_seen_index_bounds(&db, &room.id, "alice", "s").unwrap(),
             Some((3, 9))
         );
+    }
+
+    // ---- F1: PQ capability binding to the verified-peers trust anchor -------
+
+    #[test]
+    fn verified_peer_pq_capable_persists_and_is_sticky() {
+        let db = open_db_in_memory().unwrap();
+        // Unknown fingerprint: not PQ-capable.
+        assert!(!get_verified_peer_pq_capable(&db, "fp").unwrap());
+
+        // First verification without PQ binding: recorded, not PQ-capable.
+        add_verified_peer(&db, "fp", 100, false).unwrap();
+        assert!(is_globally_verified(&db, "fp").unwrap());
+        assert!(!get_verified_peer_pq_capable(&db, "fp").unwrap());
+
+        // A later verification WITH ML-KEM binding promotes the flag.
+        add_verified_peer(&db, "fp", 200, true).unwrap();
+        assert!(get_verified_peer_pq_capable(&db, "fp").unwrap());
+
+        // Sticky-once-true: a subsequent classical (pq=false) verification must
+        // NOT clear the pin (post-verification downgrade defense), though
+        // verified_at still refreshes.
+        add_verified_peer(&db, "fp", 300, false).unwrap();
+        assert!(
+            get_verified_peer_pq_capable(&db, "fp").unwrap(),
+            "pq_capable must be sticky-once-true to defeat a forced downgrade"
+        );
+    }
+
+    // ---- F8: FTS5 full-text search ----------------------------------------
+
+    #[test]
+    fn fts_search_basic_prefix_and_case() {
+        let db = open_db_in_memory().unwrap();
+        let room = make_room("r");
+        insert_room(&db, &room).unwrap();
+        insert_room_message(&db, &room.id, "fp", "in", "hello world", 100, None, None).unwrap();
+        insert_room_message(&db, &room.id, "fp", "in", "a helicopter flew", 101, None, None)
+            .unwrap();
+        insert_room_message(&db, &room.id, "fp", "in", "totally unrelated", 102, None, None)
+            .unwrap();
+
+        // Single token.
+        let hits = search_room_messages_fts(&db, &room.id, "hello", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].body, "hello world");
+
+        // Case-insensitive (unicode61 tokenizer).
+        assert_eq!(
+            search_room_messages_fts(&db, &room.id, "HELLO", 10)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // Prefix query matches "hello" and "helicopter".
+        assert_eq!(
+            search_room_messages_fts(&db, &room.id, "hel*", 10)
+                .unwrap()
+                .len(),
+            2
+        );
+
+        // Empty / whitespace query returns nothing.
+        assert!(search_room_messages_fts(&db, &room.id, "   ", 10)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn fts_index_tracks_inserts_edits_and_deletes() {
+        let db = open_db_in_memory().unwrap();
+        let room = make_room("r");
+        insert_room(&db, &room).unwrap();
+        insert_room_message(&db, &room.id, "fp", "in", "original text", 100, Some("m1"), None)
+            .unwrap();
+        assert_eq!(
+            search_room_messages_fts(&db, &room.id, "original", 10)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // Edit re-indexes via the UPDATE trigger: old term gone, new searchable.
+        apply_message_edit(&db, &room.id, "m1", "rewritten body", 200).unwrap();
+        assert!(search_room_messages_fts(&db, &room.id, "original", 10)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            search_room_messages_fts(&db, &room.id, "rewritten", 10)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // Delete tombstones and drops the message from search.
+        mark_message_deleted(&db, &room.id, "m1", 300).unwrap();
+        assert!(search_room_messages_fts(&db, &room.id, "rewritten", 10)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn fts_falls_back_to_like_when_table_missing() {
+        let db = open_db_in_memory().unwrap();
+        let room = make_room("r");
+        insert_room(&db, &room).unwrap();
+        insert_room_message(&db, &room.id, "fp", "in", "needle in haystack", 100, None, None)
+            .unwrap();
+
+        // Drop the FTS table + triggers to simulate a SQLCipher build without
+        // FTS5; the function must transparently fall back to the LIKE path.
+        {
+            let conn = db.lock().unwrap();
+            conn.execute_batch(
+                "DROP TRIGGER IF EXISTS room_messages_ai;
+                 DROP TRIGGER IF EXISTS room_messages_ad;
+                 DROP TRIGGER IF EXISTS room_messages_au;
+                 DROP TABLE IF EXISTS room_messages_fts;",
+            )
+            .unwrap();
+        }
+        let hits = search_room_messages_fts(&db, &room.id, "needle", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].body, "needle in haystack");
+    }
+
+    // ---- F9: disappearing messages ----------------------------------------
+
+    #[test]
+    fn disappearing_ttl_get_set_roundtrip() {
+        let db = open_db_in_memory().unwrap();
+        let room = make_room("r");
+        insert_room(&db, &room).unwrap();
+        // Off by default.
+        assert_eq!(get_room_disappearing_ttl(&db, &room.id).unwrap(), None);
+        set_room_disappearing_ttl(&db, &room.id, Some(3600)).unwrap();
+        assert_eq!(get_room_disappearing_ttl(&db, &room.id).unwrap(), Some(3600));
+        // None clears back to off.
+        set_room_disappearing_ttl(&db, &room.id, None).unwrap();
+        assert_eq!(get_room_disappearing_ttl(&db, &room.id).unwrap(), None);
+    }
+
+    #[test]
+    fn delete_expired_messages_respects_per_room_ttl() {
+        let db = open_db_in_memory().unwrap();
+        let room = make_room("r");
+        insert_room(&db, &room).unwrap();
+        insert_room_message(&db, &room.id, "fp", "in", "old", 100, None, None).unwrap();
+        insert_room_message(&db, &room.id, "fp", "in", "new", 950, None, None).unwrap();
+
+        // Feature OFF: nothing expires regardless of age.
+        assert_eq!(delete_expired_messages(&db, 10_000).unwrap(), 0);
+
+        // Turn on a 100s TTL. At now=1000, "old" (100+100=200 <= 1000) expires
+        // but "new" (950+100=1050 > 1000) survives.
+        set_room_disappearing_ttl(&db, &room.id, Some(100)).unwrap();
+        assert_eq!(delete_expired_messages(&db, 1000).unwrap(), 1);
+        let remaining = get_room_messages(&db, &room.id, 10).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].body, "new");
+    }
+
+    // ---- F10: reactions, replies, edits, deletes --------------------------
+
+    #[test]
+    fn insert_message_persists_client_id_and_reply() {
+        let db = open_db_in_memory().unwrap();
+        let room = make_room("r");
+        insert_room(&db, &room).unwrap();
+        insert_room_message(&db, &room.id, "fp", "out", "hi", 100, Some("uuid-1"), None).unwrap();
+        insert_room_message(
+            &db,
+            &room.id,
+            "fp2",
+            "in",
+            "re: hi",
+            101,
+            Some("uuid-2"),
+            Some("uuid-1"),
+        )
+        .unwrap();
+
+        let found = find_message_by_client_id(&db, &room.id, "uuid-2")
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.body, "re: hi");
+        assert_eq!(found.client_msg_id.as_deref(), Some("uuid-2"));
+        assert_eq!(found.reply_to.as_deref(), Some("uuid-1"));
+
+        // A pre-2.0 message (NULL client_msg_id) is never found by id.
+        insert_room_message(&db, &room.id, "fp", "in", "legacy", 102, None, None).unwrap();
+        assert!(find_message_by_client_id(&db, &room.id, "uuid-missing")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn reactions_add_remove_list() {
+        let db = open_db_in_memory().unwrap();
+        let room = make_room("r");
+        insert_room(&db, &room).unwrap();
+
+        add_reaction(&db, &room.id, "m1", "alice", "👍", 10).unwrap();
+        add_reaction(&db, &room.id, "m1", "bob", "👍", 11).unwrap();
+        add_reaction(&db, &room.id, "m1", "alice", "❤️", 12).unwrap();
+        // Idempotent: re-adding the same (msg, reactor, emoji) doesn't duplicate.
+        add_reaction(&db, &room.id, "m1", "alice", "👍", 13).unwrap();
+        assert_eq!(list_room_reactions(&db, &room.id).unwrap().len(), 3);
+
+        // Remove alice's 👍 only; her ❤️ and bob's 👍 survive.
+        remove_reaction(&db, &room.id, "m1", "alice", "👍").unwrap();
+        let all = list_room_reactions(&db, &room.id).unwrap();
+        assert_eq!(all.len(), 2);
+        assert!(all
+            .iter()
+            .any(|r| r.sender_fingerprint == "bob" && r.emoji == "👍"));
+        assert!(all
+            .iter()
+            .any(|r| r.sender_fingerprint == "alice" && r.emoji == "❤️"));
+
+        // Removing a reaction that isn't there is a no-op.
+        remove_reaction(&db, &room.id, "m1", "carol", "🔥").unwrap();
+        assert_eq!(list_room_reactions(&db, &room.id).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn message_edit_is_last_write_wins() {
+        let db = open_db_in_memory().unwrap();
+        let room = make_room("r");
+        insert_room(&db, &room).unwrap();
+        insert_room_message(&db, &room.id, "fp", "out", "v0", 100, Some("m1"), None).unwrap();
+
+        assert!(apply_message_edit(&db, &room.id, "m1", "v2", 200).unwrap());
+        let m = find_message_by_client_id(&db, &room.id, "m1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(m.body, "v2");
+        assert_eq!(m.edited_at, Some(200));
+
+        // A stale edit (older timestamp) is ignored.
+        assert!(!apply_message_edit(&db, &room.id, "m1", "v1-late", 150).unwrap());
+        assert_eq!(
+            find_message_by_client_id(&db, &room.id, "m1")
+                .unwrap()
+                .unwrap()
+                .body,
+            "v2"
+        );
+
+        // A newer edit wins.
+        assert!(apply_message_edit(&db, &room.id, "m1", "v3", 300).unwrap());
+        assert_eq!(
+            find_message_by_client_id(&db, &room.id, "m1")
+                .unwrap()
+                .unwrap()
+                .body,
+            "v3"
+        );
+    }
+
+    #[test]
+    fn message_delete_tombstones_and_blocks_edit() {
+        let db = open_db_in_memory().unwrap();
+        let room = make_room("r");
+        insert_room(&db, &room).unwrap();
+        insert_room_message(&db, &room.id, "fp", "out", "secret", 100, Some("m1"), None).unwrap();
+
+        assert!(mark_message_deleted(&db, &room.id, "m1", 200).unwrap());
+        let m = find_message_by_client_id(&db, &room.id, "m1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(m.body, "", "delete must blank the body so plaintext is gone");
+        assert_eq!(m.deleted_at, Some(200));
+
+        // Idempotent: re-deleting is a no-op.
+        assert!(!mark_message_deleted(&db, &room.id, "m1", 300).unwrap());
+
+        // A late edit can't resurrect a tombstoned message.
+        assert!(!apply_message_edit(&db, &room.id, "m1", "back", 400).unwrap());
+        assert_eq!(
+            find_message_by_client_id(&db, &room.id, "m1")
+                .unwrap()
+                .unwrap()
+                .body,
+            ""
+        );
+
+        // Deleted messages don't surface in search.
+        assert!(search_room_messages(&db, &room.id, "secret", 10)
+            .unwrap()
+            .is_empty());
     }
 }

@@ -1,0 +1,50 @@
+[package]
+name = "huddle-core-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+# huddle 2.0.0 (F12): cargo-fuzz harness for huddle-core's untrusted-input
+# decoders. An EMPTY [workspace] table makes this crate its own workspace root
+# so it is NOT a member of the parent huddle workspace — `cargo fuzz` builds it
+# standalone with its own sanitizer/codegen flags (ASan, coverage), which the
+# main workspace must never inherit. The path dependency on `..` still resolves
+# huddle-core against the parent workspace, so its `version.workspace` metadata
+# is found normally.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+
+[dependencies.huddle-core]
+path = ".."
+
+# cargo-fuzz convention: keep some debug info in the release (fuzz) profile so
+# crash backtraces are useful, without disabling optimizations.
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "invite_decode"
+path = "fuzz_targets/invite_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "roommessage_decode"
+path = "fuzz_targets/roommessage_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "file_id_validation"
+path = "fuzz_targets/file_id_validation.rs"
+test = false
+doc = false
+bench = false

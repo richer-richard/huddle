@@ -74,6 +74,12 @@ enum ClientMsg {
         pubkey_b64: String,
         signature_b64: String,
         rooms: Vec<String>,
+        /// huddle 2.0: capability bit announcing that we implement at-least-once
+        /// mailbox ACKs — we always set this `true`. A 2.0 relay then tags each
+        /// mailbox delivery with its row id and keeps the row until we `Ack` it;
+        /// a pre-2.0 relay simply ignores the unknown field and keeps its
+        /// classical delete-on-deliver behavior. Either way we stay correct.
+        acks: bool,
     },
     Subscribe { room: String },
     Unsubscribe { room: String },
@@ -89,6 +95,11 @@ enum ClientMsg {
     /// huddle 1.2.1: resolve a connect code → owner fingerprint + pubkey.
     RedeemConnectToken { token: String },
     Fetch,
+    /// huddle 2.0: acknowledge durable receipt of a mailbox-delivered message so
+    /// the relay can delete that row (at-least-once delivery). `mailbox_id` is
+    /// the row id the relay attached to the `ServerMsg::Message` we persisted.
+    /// Mirrors `huddle-server`'s `ClientMsg::Ack`.
+    Ack { mailbox_id: i64 },
     Ping,
 }
 
@@ -103,7 +114,17 @@ enum ServerMsg {
     // our own identity, so we keep only the tag and let serde ignore the
     // extra field.
     Ready,
-    Message { room: String, id: String, payload_b64: String },
+    /// A room message delivered live or from the offline mailbox. huddle 2.0:
+    /// `mailbox_id` is `Some(row_id)` when a 2.0 relay used at-least-once
+    /// delivery (we must `Ack` it after durably handling the message); `None`
+    /// for live fan-out or a pre-2.0 relay (serde default — old relays omit it).
+    Message {
+        room: String,
+        id: String,
+        payload_b64: String,
+        #[serde(default)]
+        mailbox_id: Option<i64>,
+    },
     Sent { id: String, delivered: usize, queued: usize },
     /// huddle 1.2.1: a freshly minted connect code + its lifetime in seconds.
     ConnectToken { token: String, ttl_secs: u64 },
@@ -131,8 +152,17 @@ pub enum ServerEvent {
     /// room's other members received it live vs. were queued because they
     /// were offline. Lets the UI mark a message delivered/pending.
     Sent { id: String, delivered: usize, queued: usize },
-    /// A room message delivered (live or from the offline mailbox).
-    Message { room: String, id: String, payload: Vec<u8> },
+    /// A room message delivered (live or from the offline mailbox). huddle 2.0:
+    /// `mailbox_id` is `Some(row_id)` when a 2.0 relay used at-least-once
+    /// delivery and the consumer should `ack_mailbox(row_id)` after durably
+    /// handling the message; `None` when delivered live or by a pre-2.0 relay
+    /// (classical delete-on-deliver — no ACK needed).
+    Message {
+        room: String,
+        id: String,
+        payload: Vec<u8>,
+        mailbox_id: Option<i64>,
+    },
     /// huddle 1.2.1: the relay minted a connect code for us (with its TTL).
     ConnectToken { token: String, ttl_secs: u64 },
     /// huddle 1.2.1: the relay resolved a connect code we redeemed.
@@ -342,6 +372,11 @@ impl ServerClient {
                                         pubkey_b64: B64.encode(identity.public_bytes()),
                                         signature_b64: B64.encode(sig),
                                         rooms: rooms.clone(),
+                                        // huddle 2.0: announce at-least-once ACK
+                                        // support so a 2.0 relay holds each mailbox
+                                        // row until we ACK it. Ignored by pre-2.0
+                                        // relays (unknown field).
+                                        acks: true,
                                     };
                                     // If the writer is gone the connection is dead anyway.
                                     let _ = tx.send(hello);
@@ -370,7 +405,7 @@ impl ServerClient {
                             pubkey_b64,
                         });
                     }
-                    Ok(ServerMsg::Message { room, id, payload_b64 }) => {
+                    Ok(ServerMsg::Message { room, id, payload_b64, mailbox_id }) => {
                         if payload_b64.len() > MAX_PAYLOAD_B64 {
                             warn!(
                                 len = payload_b64.len(),
@@ -380,7 +415,15 @@ impl ServerClient {
                         }
                         match B64.decode(payload_b64.as_bytes()) {
                             Ok(payload) => {
-                                let _ = ev_tx.send(ServerEvent::Message { room, id, payload });
+                                // huddle 2.0: pass the relay's mailbox row id (if
+                                // any) through so the consumer can ACK durable
+                                // receipt and let the relay delete the row.
+                                let _ = ev_tx.send(ServerEvent::Message {
+                                    room,
+                                    id,
+                                    payload,
+                                    mailbox_id,
+                                });
                             }
                             Err(e) => warn!(error = %e, "server sent undecodable payload"),
                         }
@@ -443,6 +486,15 @@ impl ServerClient {
     /// Ask the server to re-drain our mailbox.
     pub fn fetch(&self) -> Result<()> {
         self.send(ClientMsg::Fetch)
+    }
+
+    /// huddle 2.0 (F7): acknowledge durable receipt of a mailbox-delivered
+    /// message so the relay deletes that row (at-least-once delivery). Call this
+    /// only after the message has been persisted, using the `mailbox_id` carried
+    /// on the corresponding [`ServerEvent::Message`] (skip it when that id is
+    /// `None` — a live or pre-2.0 delivery the relay already dropped on deliver).
+    pub fn ack_mailbox(&self, mailbox_id: i64) -> Result<()> {
+        self.send(ClientMsg::Ack { mailbox_id })
     }
 
     pub fn ping(&self) -> Result<()> {

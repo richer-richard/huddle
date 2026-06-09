@@ -1,5 +1,6 @@
 pub mod dm;
 pub mod megolm;
+pub mod mnemonic;
 pub mod passphrase;
 pub mod pqc;
 pub mod sas;

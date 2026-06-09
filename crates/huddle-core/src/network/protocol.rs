@@ -59,6 +59,12 @@ pub fn inbox_room_id(fingerprint: &str) -> String {
 ///     prevents anyone from spoofing another peer's username)
 ///   - `ContactRequest` (signer must equal the claimed `requester_fingerprint`;
 ///     huddle 1.0 — the signature proves who's asking to connect)
+///   - `Reaction`, `Edit`, `Delete` (huddle 2.0 / F10 — signer must equal
+///     the claimed `sender_fingerprint`; edits & deletes are additionally
+///     applied only when the signer is the original sender OR a current
+///     room owner)
+///   - `RoomSetting` (huddle 2.0 / F9 — disappearing-messages TTL; the
+///     signer must be the room creator or a current owner)
 ///
 /// Verification happens via `crate::crypto::verify_signed`: it re-derives
 /// the fingerprint from `ed25519_pubkey_b64`, asserts equality with
@@ -220,11 +226,34 @@ pub enum RoomMessage {
         session_id: String,
         /// base64-encoded MegolmMessage bytes
         ciphertext_b64: String,
+        /// huddle 2.0 (F10): sender-minted stable id for this message, used
+        /// as the cross-peer targeting key for reactions, edits, replies and
+        /// deletes. `#[serde(default, skip_serializing_if = "Option::is_none")]`
+        /// keeps pre-2.0 peers byte-compatible: when `None` the field is
+        /// omitted on the wire, and a missing field decodes back to `None`
+        /// (so messages from older peers simply can't be a content-affordance
+        /// target — content still flows).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_msg_id: Option<String>,
+        /// huddle 2.0 (F10): `client_msg_id` of the message this one replies
+        /// to, if any. `None` (and omitted on the wire) for top-level messages
+        /// and pre-2.0 senders.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reply_to: Option<String>,
     },
     /// A plaintext message in an unencrypted room.
     Plain {
         sender_fingerprint: String,
         body: String,
+        /// huddle 2.0 (F10): see `Encrypted::client_msg_id`. Sender-minted
+        /// stable id; `#[serde(default, skip_serializing_if = "Option::is_none")]`
+        /// for byte-compat with pre-2.0 peers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_msg_id: Option<String>,
+        /// huddle 2.0 (F10): `client_msg_id` of the message this one replies
+        /// to, if any. `None` for top-level messages and pre-2.0 senders.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reply_to: Option<String>,
     },
     /// Explicit leave notification.
     MemberLeave {
@@ -365,6 +394,66 @@ pub enum RoomMessage {
         #[serde(default)]
         sender_ed25519_pubkey: Option<String>,
     },
+    /// huddle 2.0 (F10): add or remove an emoji reaction on another message
+    /// in this room. MUST be sent inside `WireMessage::Signed` — the signer
+    /// must equal `sender_fingerprint`; honest receivers drop unsigned
+    /// reactions (like `FileOffer` / `MemberAnnounce`). The toggle unit is
+    /// one emoji per (sender, target message): `removed = false` adds the
+    /// reaction, `removed = true` clears it. A brand-new variant, so pre-2.0
+    /// peers never produce it and ignore it on receipt.
+    Reaction {
+        sender_fingerprint: String,
+        /// `client_msg_id` of the message being reacted to (must exist in
+        /// this room for honest receivers to apply the reaction).
+        target_msg_id: String,
+        /// A single emoji or short custom code (e.g. "+1", "laugh").
+        emoji: String,
+        /// `false` = add the reaction, `true` = remove it (toggle off).
+        /// `#[serde(default)]` so a missing field decodes to `false` (add).
+        #[serde(default)]
+        removed: bool,
+    },
+    /// huddle 2.0 (F10): edit the body of an existing message. MUST be sent
+    /// inside `WireMessage::Signed`; honest receivers apply it only when the
+    /// signer is the original sender OR a current room owner (moderation).
+    /// Last-write-wins. For encrypted rooms the replacement body rides as a
+    /// fresh Megolm ciphertext in `new_ciphertext_b64` (decrypted exactly
+    /// like an `Encrypted` body); for plaintext rooms it rides as `new_body`.
+    Edit {
+        sender_fingerprint: String,
+        /// `client_msg_id` of the message being edited.
+        target_msg_id: String,
+        /// base64 MegolmMessage bytes of the replacement body, for encrypted
+        /// rooms. Empty for plaintext rooms (which carry the new body in
+        /// `new_body` instead).
+        new_ciphertext_b64: String,
+        /// Replacement plaintext body, for unencrypted rooms. `None` (and
+        /// omitted on the wire) for encrypted rooms, whose new body lives in
+        /// `new_ciphertext_b64`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        new_body: Option<String>,
+    },
+    /// huddle 2.0 (F10): delete (tombstone) an existing message. MUST be
+    /// sent inside `WireMessage::Signed`; honest receivers apply it only when
+    /// the signer is the original sender OR a current room owner. Idempotent —
+    /// the original message row is kept and a tombstone is recorded, so the
+    /// body renders as "[deleted]" everywhere.
+    Delete {
+        sender_fingerprint: String,
+        /// `client_msg_id` of the message being deleted.
+        target_msg_id: String,
+    },
+    /// huddle 2.0 (F9): a signed control message that sets this room's
+    /// disappearing-messages TTL. MUST be sent inside `WireMessage::Signed` —
+    /// honest receivers apply it only when the signer is the room creator or a
+    /// current owner. `disappearing_ttl_secs = 0` turns expiry off; any value
+    /// > 0 makes each peer locally auto-delete messages that many seconds
+    /// after they were stored. Pre-2.0 peers ignore the unknown variant and
+    /// never expire their local copies (graceful downgrade).
+    RoomSetting {
+        sender_fingerprint: String,
+        disappearing_ttl_secs: u64,
+    },
 }
 
 #[cfg(test)]
@@ -446,11 +535,15 @@ mod tests {
             RoomMessage::Plain {
                 sender_fingerprint: "fp".into(),
                 body: "hi".into(),
+                client_msg_id: Some("cmid-1".into()),
+                reply_to: None,
             },
             RoomMessage::Encrypted {
                 sender_fingerprint: "fp".into(),
                 session_id: "sid".into(),
                 ciphertext_b64: "ct".into(),
+                client_msg_id: Some("cmid-2".into()),
+                reply_to: Some("cmid-1".into()),
             },
             RoomMessage::SessionKeyRequest {
                 requester_fingerprint: "fp".into(),
@@ -481,11 +574,100 @@ mod tests {
             RoomMessage::Typing {
                 sender_fingerprint: "fp".into(),
             },
+            // huddle 2.0 (F10/F9): new content + control variants.
+            RoomMessage::Reaction {
+                sender_fingerprint: "fp".into(),
+                target_msg_id: "cmid-1".into(),
+                emoji: "👍".into(),
+                removed: false,
+            },
+            RoomMessage::Edit {
+                sender_fingerprint: "fp".into(),
+                target_msg_id: "cmid-1".into(),
+                new_ciphertext_b64: "ct2".into(),
+                new_body: None,
+            },
+            RoomMessage::Edit {
+                sender_fingerprint: "fp".into(),
+                target_msg_id: "cmid-1".into(),
+                new_ciphertext_b64: String::new(),
+                new_body: Some("edited body".into()),
+            },
+            RoomMessage::Delete {
+                sender_fingerprint: "fp".into(),
+                target_msg_id: "cmid-1".into(),
+            },
+            RoomMessage::RoomSetting {
+                sender_fingerprint: "fp".into(),
+                disappearing_ttl_secs: 3600,
+            },
         ];
         for m in msgs {
             let json = serde_json::to_vec(&m).unwrap();
             let back: RoomMessage = serde_json::from_slice(&json).unwrap();
             assert_eq!(format!("{m:?}"), format!("{back:?}"));
+        }
+    }
+
+    #[test]
+    fn plain_without_new_fields_defaults_to_none() {
+        // Simulates a pre-2.0 peer's Plain message: externally-tagged JSON
+        // with no `client_msg_id` / `reply_to`. The serde(default) attrs must
+        // resolve both to `None` so old senders keep working unchanged.
+        let pre_2_0_json = serde_json::json!({
+            "Plain": {
+                "sender_fingerprint": "fp",
+                "body": "hi",
+            }
+        });
+        let back: RoomMessage = serde_json::from_value(pre_2_0_json).unwrap();
+        match back {
+            RoomMessage::Plain {
+                client_msg_id,
+                reply_to,
+                ..
+            } => {
+                assert_eq!(client_msg_id, None);
+                assert_eq!(reply_to, None);
+            }
+            other => panic!("expected Plain, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plain_with_none_ids_omits_fields_on_wire() {
+        // skip_serializing_if must keep the wire bytes byte-compatible with
+        // pre-2.0 peers when the new fields are absent.
+        let m = RoomMessage::Plain {
+            sender_fingerprint: "fp".into(),
+            body: "hi".into(),
+            client_msg_id: None,
+            reply_to: None,
+        };
+        let v = serde_json::to_value(&m).unwrap();
+        let inner = &v["Plain"];
+        assert!(inner.get("client_msg_id").is_none());
+        assert!(inner.get("reply_to").is_none());
+    }
+
+    #[test]
+    fn reaction_missing_removed_defaults_to_false() {
+        // `removed` carries serde(default) so a peer that omits it (an "add"
+        // reaction) decodes to `false`.
+        let json = serde_json::json!({
+            "Reaction": {
+                "sender_fingerprint": "fp",
+                "target_msg_id": "cmid-1",
+                "emoji": "❤️",
+            }
+        });
+        let back: RoomMessage = serde_json::from_value(json).unwrap();
+        match back {
+            RoomMessage::Reaction { removed, emoji, .. } => {
+                assert!(!removed);
+                assert_eq!(emoji, "❤️");
+            }
+            other => panic!("expected Reaction, got {other:?}"),
         }
     }
 

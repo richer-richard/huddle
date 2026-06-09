@@ -36,6 +36,10 @@ pub const STATUS_HISTORY_CAP: usize = 100;
 /// the oldest — see `enqueue_modal`.
 pub const PENDING_MODAL_CAP: usize = 16;
 
+/// huddle 2.0.0 (F9): the TTL the disappearing-messages toggle arms when a
+/// room currently has expiry OFF — one hour. Toggling again turns it back off.
+pub const DEFAULT_DISAPPEARING_TTL_SECS: u32 = 3600;
+
 /// huddle 0.6: an onboarding page tagged with the version it was
 /// introduced in. Users only see pages whose `min_version` is newer
 /// than their last_seen_onboarding_version, so a version bump
@@ -477,9 +481,118 @@ pub enum Modal {
     /// memory was destructive. Now `c` opens this modal and the user
     /// must press Enter or `y` to actually clear.
     ConfirmClearBlocked,
+    /// huddle 2.0.0 (F3): a pinned peer's Ed25519 key changed mid-session
+    /// (TOFU drift). The offending message was already dropped; this modal
+    /// surfaces the alarm and lets the user re-verify out-of-band (SAS) or
+    /// block the peer.
+    SafetyNumberChanged(SafetyNumberChangedState),
+    /// huddle 2.0.0 (F5): change the master passphrase, re-keying the DB +
+    /// Megolm session pickles. Three masked fields (current / new / confirm).
+    ChangePassphrase(ChangePassphraseState),
+    /// huddle 2.0.0 (F6): export this identity's seed as a 24-word BIP39
+    /// phrase. Show-once, then re-entry-verified so the user proves they
+    /// transcribed it before relying on it for recovery.
+    ExportSeed(ExportSeedState),
+    /// huddle 2.0.0 (F10): pick an emoji to react to the selected message.
+    EmojiPicker(EmojiPickerState),
+    /// huddle 2.0.0 (F10): confirm before deleting (tombstoning) a message.
+    ConfirmDelete(ConfirmDeleteState),
     Help,
     Error(String),
     Info(String),
+}
+
+/// huddle 2.0.0 (F3): state for the safety-number-change alarm modal. The
+/// `focus` walks the two backed responses (0 = Verify via SAS, 1 = Block);
+/// Esc dismisses (the pinned key is left unchanged, so the user stays
+/// protected — the drift message was already dropped before this fired).
+#[derive(Debug, Clone)]
+pub struct SafetyNumberChangedState {
+    pub room_id: String,
+    pub fingerprint: String,
+    pub old_pubkey_b64: String,
+    pub new_pubkey_b64: String,
+    pub display_name: Option<String>,
+    /// 0 = Verify (SAS), 1 = Block.
+    pub focus: u8,
+}
+
+/// huddle 2.0.0 (F5): which field of the change-passphrase modal has focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PassField {
+    Current,
+    New,
+    Confirm,
+}
+
+/// huddle 2.0.0 (F5): change-master-passphrase modal state. All three fields
+/// are masked; `Tab` cycles them and `Enter` confirms once all are filled.
+#[derive(Debug, Clone)]
+pub struct ChangePassphraseState {
+    pub current: String,
+    pub new_pass: String,
+    pub confirm: String,
+    pub focus: PassField,
+    pub error: Option<String>,
+}
+
+impl Default for ChangePassphraseState {
+    fn default() -> Self {
+        Self {
+            current: String::new(),
+            new_pass: String::new(),
+            confirm: String::new(),
+            focus: PassField::Current,
+            error: None,
+        }
+    }
+}
+
+/// huddle 2.0.0 (F6): the export-seed modal walks two steps: first it shows
+/// the phrase (reveal/hide toggle), then it asks the user to type it back to
+/// prove they saved it correctly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportStep {
+    /// Showing the phrase; Space toggles reveal, Enter advances to re-entry.
+    Reveal,
+    /// Re-entry verification; the user re-types the full phrase.
+    Reentry,
+    /// Verified — a brief confirmation before the modal closes.
+    Done,
+}
+
+/// huddle 2.0.0 (F6): export-seed modal state.
+#[derive(Debug, Clone)]
+pub struct ExportSeedState {
+    /// The 24-word phrase, fetched once from `AppHandle::export_seed_phrase`.
+    pub phrase: String,
+    /// When false the phrase is rendered as dots — it starts hidden so a
+    /// shoulder-surfer doesn't catch it the instant the modal opens.
+    pub revealed: bool,
+    /// What the user types back during the re-entry step.
+    pub reentry: String,
+    pub error: Option<String>,
+    pub step: ExportStep,
+}
+
+/// huddle 2.0.0 (F10): emoji-picker modal for reacting to a message.
+#[derive(Debug, Clone)]
+pub struct EmojiPickerState {
+    pub room_id: String,
+    /// `client_msg_id` of the message being reacted to.
+    pub target_msg_id: String,
+    pub selected: usize,
+}
+
+/// huddle 2.0.0 (F10): the common emoji palette offered by the picker.
+pub const REACTION_EMOJIS: &[&str] = &["👍", "❤️", "😂", "🎉", "😮", "😢", "🙏", "🔥", "👀", "✅"];
+
+/// huddle 2.0.0 (F10): confirm-delete modal state.
+#[derive(Debug, Clone)]
+pub struct ConfirmDeleteState {
+    pub room_id: String,
+    /// `client_msg_id` of the message to tombstone.
+    pub target_msg_id: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1191,6 +1304,19 @@ pub struct OpenRoom {
     /// focused. Reset to 0 on tab activation. Replaces the old bool
     /// flag — gives users an "exact count" instead of a vague star.
     pub unread: u32,
+    /// huddle 2.0.0 (F10): index into `messages` of the message the
+    /// react/reply/edit/delete keybindings target. `None` means "the newest
+    /// message that carries a `client_msg_id`" (resolved lazily by
+    /// `target_message`). `[` / `]` move it; it's only meaningful in nav mode.
+    pub selected_msg: Option<usize>,
+    /// huddle 2.0.0 (F10): when `Some(client_msg_id)` the composer is editing
+    /// that existing message instead of sending a new one — `ChatSend` routes
+    /// to `edit_message` and the input is pre-filled with the old body.
+    pub editing_msg: Option<String>,
+    /// huddle 2.0.0 (F10): when `Some(client_msg_id)` the next message sent is
+    /// a reply to it — `ChatSend` routes to `send_reply` and the composer
+    /// shows a reply-context line.
+    pub reply_to: Option<String>,
 }
 
 // LobbyFocus removed in huddle 0.7: sidebar focus model replaces it.
@@ -1579,6 +1705,96 @@ impl TuiApp {
         self.discovered_rooms = self.handle.discovered_rooms();
     }
 
+    /// huddle 2.0.0 (F10/F9): re-read `room_id`'s message history from the
+    /// (authoritative) DB into its open-room cache, picking up sender-minted
+    /// `client_msg_id`s, edit / delete markers, and reply links. Only overwrites
+    /// on a successful, non-empty read so a transient DB error can't blank a
+    /// chat the user is looking at.
+    pub fn refresh_room_messages(&mut self, room_id: &str) {
+        if self.open_room(room_id).is_none() {
+            return;
+        }
+        match self.handle.room_messages(room_id, 200) {
+            Ok(msgs) if !msgs.is_empty() => {
+                if let Some(r) = self.open_room_mut(room_id) {
+                    r.messages = msgs;
+                    // Keep the F10 selection cursor in range after the swap.
+                    if let Some(idx) = r.selected_msg {
+                        if idx >= r.messages.len() {
+                            r.selected_msg = None;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// huddle 2.0.0 (F10): resolve the message the react/reply/edit/delete
+    /// keybindings act on for the active room. Honours an explicit
+    /// `selected_msg` cursor when it points at a still-targetable (has a
+    /// `client_msg_id`, not deleted) message, otherwise falls back to the most
+    /// recent targetable message. Returns its `client_msg_id`.
+    pub fn active_target_msg_id(&self) -> Option<String> {
+        self.active_target_message()
+            .and_then(|m| m.client_msg_id.clone())
+    }
+
+    /// huddle 2.0.0 (F10): the active room's currently-targeted message, if any
+    /// — used by the edit flow (it needs the body + ownership) and the renderer
+    /// (to draw the selection marker).
+    pub fn active_target_message(&self) -> Option<&StoredRoomMessage> {
+        let r = self.active_room()?;
+        if let Some(idx) = r.selected_msg {
+            if let Some(m) = r.messages.get(idx) {
+                if m.client_msg_id.is_some() && m.deleted_at.is_none() {
+                    return Some(m);
+                }
+            }
+        }
+        r.messages
+            .iter()
+            .rev()
+            .find(|m| m.client_msg_id.is_some() && m.deleted_at.is_none())
+    }
+
+    /// huddle 2.0.0 (F10): move the message-selection cursor to the previous
+    /// (`delta < 0`, older) or next (`delta > 0`, newer) targetable message in
+    /// the active room. Seeds from the resolved default the first time.
+    pub fn move_selected_msg(&mut self, delta: i32) {
+        let r = match self.active_room_mut() {
+            Some(r) => r,
+            None => return,
+        };
+        if r.messages.is_empty() {
+            return;
+        }
+        // Resolve the current anchor index (explicit cursor, else newest
+        // targetable, else last).
+        let anchor = match r.selected_msg {
+            Some(idx) => idx,
+            None => r
+                .messages
+                .iter()
+                .rposition(|m| m.client_msg_id.is_some() && m.deleted_at.is_none())
+                .unwrap_or(r.messages.len().saturating_sub(1)),
+        };
+        let len = r.messages.len();
+        let mut idx = anchor as i64;
+        loop {
+            idx += delta as i64;
+            if idx < 0 || idx >= len as i64 {
+                // No further targetable message in this direction — keep anchor.
+                return;
+            }
+            let m = &r.messages[idx as usize];
+            if m.client_msg_id.is_some() && m.deleted_at.is_none() {
+                r.selected_msg = Some(idx as usize);
+                return;
+            }
+        }
+    }
+
     /// Refresh attachments for every open room from the AppHandle. Called
     /// on tick so card state stays in sync with chunks arriving.
     pub fn refresh_attachments(&mut self) {
@@ -1656,6 +1872,9 @@ impl TuiApp {
                             card_focus: false,
                             focused_card_idx: 0,
                             unread: 0,
+                            selected_msg: None,
+                            editing_msg: None,
+                            reply_to: None,
                         });
                     }
                 }
@@ -1713,9 +1932,22 @@ impl TuiApp {
                             direction: "in".into(),
                             body,
                             sent_at,
+                            // huddle 2.0.0 (F10): the event doesn't carry the
+                            // sender-minted id; the refresh below pulls the
+                            // authoritative row (with `client_msg_id` etc.) from
+                            // the DB so reactions / replies can target it.
+                            client_msg_id: None,
+                            reply_to: None,
+                            edited_at: None,
+                            deleted_at: None,
                         },
                     );
                 }
+                // huddle 2.0.0 (F10): the core inserts the row before emitting
+                // this event, so re-reading history gives us the persisted
+                // `client_msg_id` / `reply_to` / edit + delete markers for the
+                // message we just optimistically rendered.
+                self.refresh_room_messages(&room_id);
                 if !is_active {
                     let count = self.unread.entry(room_id.clone()).or_insert(0);
                     *count = count.saturating_add(1);
@@ -1782,9 +2014,18 @@ impl TuiApp {
                             direction: "out".into(),
                             body,
                             sent_at: now,
+                            // huddle 2.0.0 (F10): pulled in by the refresh below.
+                            client_msg_id: None,
+                            reply_to: None,
+                            edited_at: None,
+                            deleted_at: None,
                         },
                     );
                 }
+                // huddle 2.0.0 (F10): re-read so our own just-sent message
+                // carries its `client_msg_id` (the core persists it before
+                // emitting), making it immediately reactable / editable.
+                self.refresh_room_messages(&room_id);
             }
             AppEvent::ListeningOn { address } => {
                 if !self.listen_addresses.contains(&address) {
@@ -2040,6 +2281,78 @@ impl TuiApp {
             }
             AppEvent::ConnectCodeFailed { reason } => {
                 self.set_status(format!("connect code: {reason}"));
+            }
+            // huddle 2.0.0 (F3): a pinned peer's identity key changed mid
+            // session. The drift message was already dropped by the core; we
+            // raise a prominent alarm (routed through the modal queue so it
+            // never clobbers what the user is typing).
+            AppEvent::SafetyNumberChanged {
+                room_id,
+                fingerprint,
+                old_pubkey_b64,
+                new_pubkey_b64,
+                display_name,
+            } => {
+                let who = display_name
+                    .clone()
+                    .unwrap_or_else(|| format!("HD-{}", short_fp(&fingerprint).to_uppercase()));
+                self.set_status(format!("⚠ safety number changed for {who} — see the alert"));
+                self.replace_modal_if_idle(Modal::SafetyNumberChanged(SafetyNumberChangedState {
+                    room_id,
+                    fingerprint,
+                    old_pubkey_b64,
+                    new_pubkey_b64,
+                    display_name,
+                    focus: 0,
+                }));
+            }
+            // huddle 2.0.0 (F5): the master passphrase change + DB re-key
+            // committed. Close the modal if it's still up and confirm.
+            AppEvent::PassphraseChanged => {
+                if matches!(self.modal, Modal::ChangePassphrase(_)) {
+                    self.modal = Modal::None;
+                }
+                self.set_status("master passphrase updated — database re-keyed");
+            }
+            // huddle 2.0.0 (F10): a reaction landed (ours or a peer's). Re-read
+            // the room so the badges under the message refresh.
+            AppEvent::ReactionAdded { room_id, .. } => {
+                self.refresh_room_messages(&room_id);
+            }
+            // huddle 2.0.0 (F10): a message body was edited. Re-read so the
+            // new body + `[edited]` marker render.
+            AppEvent::MessageEdited { room_id, .. } => {
+                self.refresh_room_messages(&room_id);
+            }
+            // huddle 2.0.0 (F10): a message was tombstoned. Re-read so it
+            // renders as `[deleted]`.
+            AppEvent::MessageDeleted { room_id, .. } => {
+                self.refresh_room_messages(&room_id);
+            }
+            // huddle 2.0.0 (F9): the per-room disappearing-messages TTL changed
+            // (locally or via a signed owner broadcast). The header indicator
+            // reads the live value each render; surface a transient hint.
+            AppEvent::RoomTtlChanged { room_id, ttl_secs } => {
+                let label = match ttl_secs {
+                    Some(secs) => format!(
+                        "messages in #{} now disappear after {}",
+                        short_room(&room_id),
+                        crate::ui::pane::chat_common::format_ttl(secs)
+                    ),
+                    None => format!("disappearing messages off in #{}", short_room(&room_id)),
+                };
+                self.set_status(label);
+            }
+            // huddle 2.0.0 (F9): the pruner physically deleted expired rows.
+            // Re-read every open room so vanished messages leave the view.
+            AppEvent::MessagesExpired { count } => {
+                if count > 0 {
+                    let ids: Vec<String> =
+                        self.open_rooms.iter().map(|r| r.room_id.clone()).collect();
+                    for rid in ids {
+                        self.refresh_room_messages(&rid);
+                    }
+                }
             }
         }
     }
@@ -2308,6 +2621,9 @@ fn open_existing_room_tab_quiet(app: &mut TuiApp, room_id: &str) {
         card_focus: false,
         focused_card_idx: 0,
         unread: 0,
+        selected_msg: None,
+        editing_msg: None,
+        reply_to: None,
     });
 }
 
@@ -2359,6 +2675,10 @@ fn open_existing_room_tab(app: &mut TuiApp, room_id: &str) {
             card_focus: false,
             focused_card_idx: 0,
             unread: 0,
+            // huddle 2.0 (F10): message-selection + reply/edit composer state.
+            selected_msg: None,
+            editing_msg: None,
+            reply_to: None,
         });
     }
     app.switch_to_room(room_id);
@@ -2684,6 +3004,151 @@ pub fn prompt_master_passphrase(is_new: bool) -> Result<AuthPrompt> {
         passphrase: String::new(),
         username: None,
     }))
+}
+
+/// huddle 2.0.0 (F6): on a fresh launch, offer to recover an existing identity
+/// from a 24-word BIP39 seed phrase before a random one is generated. Returns
+/// `Ok(Some(phrase))` with a checksum-valid phrase to import, or `Ok(None)`
+/// when the user skips (generate fresh). Esc / Ctrl-C also skip.
+///
+/// Validation is local: the phrase is decoded + checksum-checked via
+/// [`huddle_core::app::fingerprint_from_phrase`]; the derived HD-ID is previewed
+/// live so the user can confirm they pasted the right backup before committing.
+pub fn prompt_import_seed() -> Result<Option<String>> {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
+
+    enable_raw_mode()?;
+    let _guard = TerminalGuard;
+    let mut stdout = io::stdout();
+    // Bracketed paste so a copied 24-word phrase lands as one Paste event.
+    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    let mut input = String::new();
+    let mut error: Option<String> = None;
+    // Outer Option: None = still prompting. Inner Option: the resolved choice
+    // (Some(phrase) = import, None = skip).
+    let mut outcome: Option<Option<String>> = None;
+
+    while outcome.is_none() {
+        // Live preview: does the current input decode to a valid identity?
+        let preview = if input.trim().is_empty() {
+            None
+        } else {
+            huddle_core::app::fingerprint_from_phrase(input.trim()).ok()
+        };
+        terminal.draw(|f| {
+            let area = crate::ui::centered_rect(72, 18, f.area());
+            f.render_widget(Clear, area);
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan))
+                .padding(Padding::uniform(1))
+                .title(Span::styled(
+                    " recover identity from seed phrase ",
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                ));
+            let mut lines: Vec<Line> = vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    "  fresh install — recover an existing huddle identity?",
+                    Style::default().fg(Color::White),
+                )),
+                Line::from(Span::styled(
+                    "  paste your 24-word BIP39 seed phrase, or press Esc to",
+                    Style::default().fg(Color::DarkGray),
+                )),
+                Line::from(Span::styled(
+                    "  start fresh with a brand-new identity.",
+                    Style::default().fg(Color::DarkGray),
+                )),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("  > ", Style::default().fg(Color::Cyan).bold()),
+                    Span::styled(
+                        if input.is_empty() {
+                            "word1 word2 … word24".to_string()
+                        } else {
+                            input.clone()
+                        },
+                        if input.is_empty() {
+                            Style::default().fg(Color::DarkGray)
+                        } else {
+                            Style::default().fg(Color::White)
+                        },
+                    ),
+                ]),
+            ];
+            if let Some(fp) = &preview {
+                lines.push(Line::from(""));
+                lines.push(Line::from(vec![
+                    Span::styled("  ✓ valid → ", Style::default().fg(Color::Green)),
+                    Span::styled(
+                        crate::ui::display_id(fp),
+                        Style::default().fg(Color::Yellow).bold(),
+                    ),
+                ]));
+            }
+            if let Some(err) = &error {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    format!("  ✗ {}", err),
+                    Style::default().fg(Color::Red).bold(),
+                )));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled(" Enter", Style::default().fg(Color::Yellow)),
+                Span::styled(" import   ", Style::default().fg(Color::DarkGray)),
+                Span::styled("Esc", Style::default().fg(Color::Yellow)),
+                Span::styled(" skip (new identity)", Style::default().fg(Color::DarkGray)),
+            ]));
+            let para = Paragraph::new(lines).wrap(Wrap { trim: false }).block(block);
+            f.render_widget(para, area);
+        })?;
+
+        if event::poll(Duration::from_millis(200))? {
+            // Bracketed paste lets a multi-word phrase arrive in one event.
+            match event::read()? {
+                Event::Paste(text) => {
+                    input.push_str(text.trim());
+                }
+                Event::Key(key) => {
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && matches!(key.code, KeyCode::Char('c'))
+                    {
+                        outcome = Some(None);
+                        break;
+                    }
+                    match key.code {
+                        KeyCode::Esc => outcome = Some(None),
+                        KeyCode::Backspace => {
+                            input.pop();
+                        }
+                        KeyCode::Enter => {
+                            if input.trim().is_empty() {
+                                outcome = Some(None);
+                            } else if huddle_core::app::fingerprint_from_phrase(input.trim()).is_ok()
+                            {
+                                outcome = Some(Some(input.trim().to_string()));
+                            } else {
+                                error = Some(
+                                    "that's not a valid 24-word phrase (checksum failed)".into(),
+                                );
+                            }
+                        }
+                        KeyCode::Char(c) => input.push(c),
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Ok(outcome.flatten())
 }
 
 /// Show the welcome card before bringing up `AppHandle`. Returns `Ok(true)`
@@ -3366,6 +3831,13 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
         Action::BlurInput => {
             if let Some(r) = app.active_room_mut() {
                 r.input_active = false;
+                // huddle 2.0.0 (F10): blurring cancels an in-progress edit
+                // (discard the draft body) or reply. Predictable: the
+                // compose-mode banners only show while the input is focused.
+                if r.editing_msg.take().is_some() {
+                    r.input.clear();
+                }
+                r.reply_to = None;
             }
             Ok(false)
         }
@@ -3428,12 +3900,17 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             Ok(false)
         }
         Action::ChatSend => {
-            let (room_id, body) = {
+            // huddle 2.0.0 (F10): capture the compose mode (new / edit / reply)
+            // along with the body. `editing_msg` / `reply_to` are cleared
+            // optimistically; restored below if the send fails.
+            let (room_id, body, editing, reply_to) = {
                 match app.active_room_mut() {
                     Some(r) if r.input_active && !r.input.trim().is_empty() => {
                         let body = r.input.clone();
                         r.input.clear();
-                        (r.room_id.clone(), body)
+                        let editing = r.editing_msg.take();
+                        let reply_to = r.reply_to.take();
+                        (r.room_id.clone(), body, editing, reply_to)
                     }
                     _ => return Ok(false),
                 }
@@ -3446,21 +3923,38 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
                 if let Some(r) = app.active_room_mut() {
                     if r.input.is_empty() {
                         r.input = body; // give the text back, unsent
+                        r.editing_msg = editing;
+                        r.reply_to = reply_to;
                     }
                 }
                 app.set_status(format!("not sent — {}", readiness.reason()));
                 return Ok(false);
             }
-            if let Err(e) = app.handle.send_room_message(&room_id, &body).await {
+            // huddle 2.0.0 (F10): an active edit re-sends the targeted message's
+            // body; an active reply threads under the target; otherwise a plain
+            // send. Last-write-wins on edits, so a failed edit just restores the
+            // draft and the previous body stands.
+            let result = if let Some(ref target) = editing {
+                app.handle.edit_message(&room_id, target, &body).await
+            } else if let Some(ref target) = reply_to {
+                app.handle.send_reply(&room_id, &body, target).await
+            } else {
+                app.handle.send_room_message(&room_id, &body).await
+            };
+            if let Err(e) = result {
+                // Read the verb before the restore below can move `editing`.
+                let verb = if editing.is_some() { "edit" } else { "send" };
                 // huddle 1.3.1: a send failure after readiness passed (read-only
                 // room, crypto/DB error, …) must not silently eat the composed
                 // text — restore it, mirroring the readiness branch above.
                 if let Some(r) = app.active_room_mut() {
                     if r.input.is_empty() {
                         r.input = body; // give the text back, unsent
+                        r.editing_msg = editing;
+                        r.reply_to = reply_to;
                     }
                 }
-                app.modal = Modal::Error(format!("send failed: {e}"));
+                app.modal = Modal::Error(format!("{verb} failed: {e}"));
             }
             Ok(false)
         }
@@ -4056,6 +4550,10 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
                 // huddle 1.0: carry our configured clearnet relay so the
                 // joiner connects to it with zero config (v3 invite).
                 relay_url: app.handle.clearnet_relay(),
+                // huddle 2.0 (F1): classical invite by default (stays v2/v3,
+                // readable by older clients). sign_invite promotes to a
+                // PQ-bound v4 only when this is Some.
+                mlkem_ek_b64: None,
             };
             // huddle 0.7.11: sign via AppHandle so the invite is bound
             // to the local Ed25519 identity. Falls back to v=1 only if
@@ -5329,6 +5827,421 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             }
             Ok(false)
         }
+
+        // ============================================================
+        // huddle 2.0.0 (F3): safety-number-change alarm modal
+        // ============================================================
+        Action::SafetyChangeNext => {
+            if let Modal::SafetyNumberChanged(s) = &mut app.modal {
+                s.focus = (s.focus + 1) % 2;
+            }
+            Ok(false)
+        }
+        Action::SafetyChangePrev => {
+            if let Modal::SafetyNumberChanged(s) = &mut app.modal {
+                s.focus = (s.focus + 1) % 2; // two options — prev == next
+            }
+            Ok(false)
+        }
+        Action::SafetyChangeConfirm => {
+            // Activate whichever option is focused.
+            let focus = match &app.modal {
+                Modal::SafetyNumberChanged(s) => s.focus,
+                _ => return Ok(false),
+            };
+            if focus == 0 {
+                return Box::pin(handle_action(Action::SafetyChangeVerify, app)).await;
+            }
+            Box::pin(handle_action(Action::SafetyChangeBlock, app)).await
+        }
+        Action::SafetyChangeVerify => {
+            // Re-verify the (possibly new) key out-of-band via SAS. The drift
+            // message stays dropped; SAS is the safe way to re-establish trust.
+            let (room_id, fp) = match &app.modal {
+                Modal::SafetyNumberChanged(s) => (s.room_id.clone(), s.fingerprint.clone()),
+                _ => return Ok(false),
+            };
+            match app.handle.sas_start(&room_id, &fp).await {
+                Ok(tx_id) => {
+                    app.modal = Modal::Sas(SasState {
+                        room_id,
+                        partner_fingerprint: fp,
+                        tx_id,
+                        stage: SasStage::Waiting,
+                    });
+                }
+                Err(e) => app.modal = Modal::Error(format!("SAS start failed: {e}")),
+            }
+            Ok(false)
+        }
+        Action::SafetyChangeBlock => {
+            let fp = match &app.modal {
+                Modal::SafetyNumberChanged(s) => s.fingerprint.clone(),
+                _ => return Ok(false),
+            };
+            match app.handle.block_peer(&fp) {
+                Ok(()) => app.set_status(format!("blocked {}", short_fp(&fp))),
+                Err(e) => {
+                    app.modal = Modal::Error(format!("block failed: {e}"));
+                    return Ok(false);
+                }
+            }
+            app.modal = Modal::None;
+            Ok(false)
+        }
+
+        // ============================================================
+        // huddle 2.0.0 (F5): change master passphrase
+        // ============================================================
+        Action::OpenChangePassphrase => {
+            if !app.handle.has_master_passphrase() {
+                app.set_status(
+                    "no master passphrase to change (started with --no-master-passphrase)",
+                );
+                return Ok(false);
+            }
+            app.modal = Modal::ChangePassphrase(ChangePassphraseState::default());
+            Ok(false)
+        }
+        Action::ChangePassTypeChar(c) => {
+            if let Modal::ChangePassphrase(s) = &mut app.modal {
+                let field = match s.focus {
+                    PassField::Current => &mut s.current,
+                    PassField::New => &mut s.new_pass,
+                    PassField::Confirm => &mut s.confirm,
+                };
+                if field.chars().count() < 128 {
+                    field.push(c);
+                }
+            }
+            Ok(false)
+        }
+        Action::ChangePassBackspace => {
+            if let Modal::ChangePassphrase(s) = &mut app.modal {
+                match s.focus {
+                    PassField::Current => s.current.pop(),
+                    PassField::New => s.new_pass.pop(),
+                    PassField::Confirm => s.confirm.pop(),
+                };
+            }
+            Ok(false)
+        }
+        Action::ChangePassNextField => {
+            if let Modal::ChangePassphrase(s) = &mut app.modal {
+                s.focus = match s.focus {
+                    PassField::Current => PassField::New,
+                    PassField::New => PassField::Confirm,
+                    PassField::Confirm => PassField::Current,
+                };
+            }
+            Ok(false)
+        }
+        Action::ChangePassConfirm => {
+            let (current, new_pass, confirm) = match &app.modal {
+                Modal::ChangePassphrase(s) => {
+                    (s.current.clone(), s.new_pass.clone(), s.confirm.clone())
+                }
+                _ => return Ok(false),
+            };
+            // Local validation before touching the keychain.
+            let local_err = if current.is_empty() {
+                Some("enter your current passphrase")
+            } else if new_pass.is_empty() {
+                Some("new passphrase must not be empty")
+            } else if new_pass != confirm {
+                Some("new passphrase and confirmation don't match")
+            } else {
+                None
+            };
+            if let Some(msg) = local_err {
+                if let Modal::ChangePassphrase(s) = &mut app.modal {
+                    s.error = Some(msg.to_string());
+                    s.focus = PassField::Current;
+                }
+                return Ok(false);
+            }
+            match app.handle.change_master_passphrase(&current, &new_pass).await {
+                Ok(()) => {
+                    // PassphraseChanged event closes the modal + sets status.
+                    app.modal = Modal::None;
+                    app.set_status("master passphrase updated — database re-keyed");
+                }
+                Err(e) => {
+                    if let Modal::ChangePassphrase(s) = &mut app.modal {
+                        s.error = Some(format!("{e}"));
+                        s.current.clear();
+                        s.focus = PassField::Current;
+                    }
+                }
+            }
+            Ok(false)
+        }
+
+        // ============================================================
+        // huddle 2.0.0 (F6): export identity seed phrase
+        // ============================================================
+        Action::OpenExportSeed => {
+            match app.handle.export_seed_phrase() {
+                Ok(phrase) => {
+                    app.modal = Modal::ExportSeed(ExportSeedState {
+                        phrase,
+                        revealed: false,
+                        reentry: String::new(),
+                        error: None,
+                        step: ExportStep::Reveal,
+                    });
+                }
+                Err(e) => app.set_status(format!("seed export unavailable: {e}")),
+            }
+            Ok(false)
+        }
+        Action::ExportSeedToggleReveal => {
+            if let Modal::ExportSeed(s) = &mut app.modal {
+                if s.step == ExportStep::Reveal {
+                    s.revealed = !s.revealed;
+                }
+            }
+            Ok(false)
+        }
+        Action::ExportSeedTypeChar(c) => {
+            if let Modal::ExportSeed(s) = &mut app.modal {
+                if s.step == ExportStep::Reentry && s.reentry.chars().count() < 320 {
+                    s.reentry.push(c);
+                }
+            }
+            Ok(false)
+        }
+        Action::ExportSeedBackspace => {
+            if let Modal::ExportSeed(s) = &mut app.modal {
+                if s.step == ExportStep::Reentry {
+                    s.reentry.pop();
+                }
+            }
+            Ok(false)
+        }
+        Action::ExportSeedConfirm => {
+            // Step machine: Reveal → Reentry → (verify) → Done → close.
+            let step = match &app.modal {
+                Modal::ExportSeed(s) => s.step,
+                _ => return Ok(false),
+            };
+            match step {
+                ExportStep::Reveal => {
+                    if let Modal::ExportSeed(s) = &mut app.modal {
+                        s.step = ExportStep::Reentry;
+                        s.error = None;
+                    }
+                }
+                ExportStep::Reentry => {
+                    let entered = match &app.modal {
+                        Modal::ExportSeed(s) => s.reentry.clone(),
+                        _ => return Ok(false),
+                    };
+                    match app.handle.verify_seed_reentry(&entered) {
+                        Ok(true) => {
+                            if let Modal::ExportSeed(s) = &mut app.modal {
+                                s.step = ExportStep::Done;
+                                s.error = None;
+                            }
+                        }
+                        Ok(false) => {
+                            if let Modal::ExportSeed(s) = &mut app.modal {
+                                s.error =
+                                    Some("that doesn't match — re-type the 24 words exactly".into());
+                                s.reentry.clear();
+                            }
+                        }
+                        Err(e) => {
+                            if let Modal::ExportSeed(s) = &mut app.modal {
+                                s.error = Some(format!("{e}"));
+                                s.reentry.clear();
+                            }
+                        }
+                    }
+                }
+                ExportStep::Done => {
+                    app.modal = Modal::None;
+                    app.set_status("seed phrase verified — store it somewhere safe & offline");
+                }
+            }
+            Ok(false)
+        }
+
+        // ============================================================
+        // huddle 2.0.0 (F9): toggle disappearing messages for this room
+        // ============================================================
+        Action::ToggleDisappearingMessages => {
+            let room_id = match app.active_room() {
+                Some(r) => r.room_id.clone(),
+                None => return Ok(false),
+            };
+            // None → arm with the 1-hour default; Some → turn it off.
+            let next = match app.handle.room_disappearing_ttl(&room_id) {
+                Some(_) => None,
+                None => Some(DEFAULT_DISAPPEARING_TTL_SECS),
+            };
+            match app.handle.set_room_disappearing_ttl(&room_id, next).await {
+                Ok(()) => {
+                    let msg = match next {
+                        Some(secs) => format!(
+                            "disappearing messages on — expire after {}",
+                            crate::ui::pane::chat_common::format_ttl(secs)
+                        ),
+                        None => "disappearing messages off".to_string(),
+                    };
+                    app.set_status(msg);
+                }
+                Err(e) => app.modal = Modal::Error(format!("couldn't change expiry: {e}")),
+            }
+            Ok(false)
+        }
+
+        // ============================================================
+        // huddle 2.0.0 (F10): reactions / replies / edits / deletes
+        // ============================================================
+        Action::MsgSelectPrev => {
+            app.move_selected_msg(-1);
+            Ok(false)
+        }
+        Action::MsgSelectNext => {
+            app.move_selected_msg(1);
+            Ok(false)
+        }
+        Action::ReactSelected => {
+            let room_id = match app.active_room() {
+                Some(r) => r.room_id.clone(),
+                None => return Ok(false),
+            };
+            match app.active_target_msg_id() {
+                Some(target) => {
+                    app.modal = Modal::EmojiPicker(EmojiPickerState {
+                        room_id,
+                        target_msg_id: target,
+                        selected: 0,
+                    });
+                }
+                None => app.set_status("no reactable message here (pre-2.0 messages have no id)"),
+            }
+            Ok(false)
+        }
+        Action::ReplySelected => {
+            let target = match app.active_target_msg_id() {
+                Some(t) => t,
+                None => {
+                    app.set_status("nothing to reply to here (pre-2.0 messages have no id)");
+                    return Ok(false);
+                }
+            };
+            if let Some(r) = app.active_room_mut() {
+                r.reply_to = Some(target);
+                r.editing_msg = None;
+                r.input_active = true;
+            }
+            app.set_status("replying — type your message, Esc to cancel");
+            Ok(false)
+        }
+        Action::EditSelected => {
+            // Only the original sender (our outbound messages) or a room owner
+            // may edit; mirror the core's authorization so we don't offer an
+            // affordance that will just bounce.
+            let room_id = match app.active_room() {
+                Some(r) => r.room_id.clone(),
+                None => return Ok(false),
+            };
+            let we_own = app.handle.we_are_owner(&room_id);
+            let target = app.active_target_message().and_then(|m| {
+                let mine = m.direction == "out";
+                if (mine || we_own) && m.client_msg_id.is_some() {
+                    m.client_msg_id.clone().map(|id| (id, m.body.clone()))
+                } else {
+                    None
+                }
+            });
+            match target {
+                Some((id, body)) => {
+                    if let Some(r) = app.active_room_mut() {
+                        r.editing_msg = Some(id);
+                        r.reply_to = None;
+                        r.input = body;
+                        r.input_active = true;
+                    }
+                    app.set_status("editing — Enter to save, Esc to cancel");
+                }
+                None => app.set_status("can't edit that message (not yours / pre-2.0)"),
+            }
+            Ok(false)
+        }
+        Action::DeleteSelected => {
+            let room_id = match app.active_room() {
+                Some(r) => r.room_id.clone(),
+                None => return Ok(false),
+            };
+            let we_own = app.handle.we_are_owner(&room_id);
+            let target = app.active_target_message().and_then(|m| {
+                let mine = m.direction == "out";
+                if (mine || we_own) && m.client_msg_id.is_some() {
+                    m.client_msg_id.clone()
+                } else {
+                    None
+                }
+            });
+            match target {
+                Some(id) => {
+                    app.modal = Modal::ConfirmDelete(ConfirmDeleteState {
+                        room_id,
+                        target_msg_id: id,
+                    });
+                }
+                None => app.set_status("can't delete that message (not yours / pre-2.0)"),
+            }
+            Ok(false)
+        }
+        Action::EmojiPickerNext => {
+            if let Modal::EmojiPicker(s) = &mut app.modal {
+                if s.selected + 1 < REACTION_EMOJIS.len() {
+                    s.selected += 1;
+                }
+            }
+            Ok(false)
+        }
+        Action::EmojiPickerPrev => {
+            if let Modal::EmojiPicker(s) = &mut app.modal {
+                s.selected = s.selected.saturating_sub(1);
+            }
+            Ok(false)
+        }
+        Action::EmojiPickerConfirm => {
+            let (room_id, target, emoji) = match &app.modal {
+                Modal::EmojiPicker(s) => (
+                    s.room_id.clone(),
+                    s.target_msg_id.clone(),
+                    REACTION_EMOJIS
+                        .get(s.selected)
+                        .copied()
+                        .unwrap_or("👍")
+                        .to_string(),
+                ),
+                _ => return Ok(false),
+            };
+            app.modal = Modal::None;
+            if let Err(e) = app.handle.send_reaction(&room_id, &target, &emoji, false).await {
+                app.modal = Modal::Error(format!("reaction failed: {e}"));
+            }
+            Ok(false)
+        }
+        Action::ConfirmDeleteYes => {
+            let (room_id, target) = match &app.modal {
+                Modal::ConfirmDelete(s) => (s.room_id.clone(), s.target_msg_id.clone()),
+                _ => return Ok(false),
+            };
+            app.modal = Modal::None;
+            if let Err(e) = app.handle.delete_message(&room_id, &target).await {
+                app.modal = Modal::Error(format!("delete failed: {e}"));
+            } else {
+                app.set_status("message deleted (best effort across peers)");
+            }
+            Ok(false)
+        }
     }
 }
 
@@ -5576,6 +6489,8 @@ pub fn build_room_invite_link(app: &TuiApp, room_id: &str) -> anyhow::Result<Str
         signature_b64: None,
         // huddle 1.0: carry our configured clearnet relay (v3 invite).
         relay_url: app.handle.clearnet_relay(),
+        // huddle 2.0 (F1): None keeps this a v2/v3 invite (back-compatible).
+        mlkem_ek_b64: None,
     };
     let invite = app
         .handle
@@ -5752,6 +6667,16 @@ pub async fn run_palette_action(label: &str, app: &mut TuiApp) -> Result<bool> {
         }
         "show room bans" => {
             return Box::pin(handle_action(Action::ShowRoomBans, app)).await;
+        }
+        "toggle room message expiry" => {
+            return Box::pin(handle_action(Action::ToggleDisappearingMessages, app)).await;
+        }
+        // === Identity / security (huddle 2.0.0) ===
+        "change master passphrase" => {
+            return Box::pin(handle_action(Action::OpenChangePassphrase, app)).await;
+        }
+        "export seed phrase" => {
+            return Box::pin(handle_action(Action::OpenExportSeed, app)).await;
         }
         // === Extras ===
         "toggle update check (crates.io)" => {

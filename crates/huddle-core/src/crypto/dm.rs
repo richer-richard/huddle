@@ -150,6 +150,35 @@ pub fn derive_dm_key_hybrid_responder(
     Ok(*key)
 }
 
+/// huddle 2.0: downgrade guard for the DM **classical** (X25519-only) fallback.
+///
+/// Returns `true` when a classical DM key MUST be refused because the peer is
+/// known to be post-quantum capable yet no ML-KEM encapsulation key is
+/// available to build the hybrid key from — the fingerprint of a relay that
+/// stripped the partner's ML-KEM pubkey to force a quantum-unsafe downgrade.
+///
+/// `peer_known_pq_capable` is the OR of every capability anchor the app holds:
+/// an ML-KEM key on the current signed `MemberAnnounce`, the durable
+/// `room_members.mlkem_pubkey` pin, **or** the out-of-band
+/// `verified_peers.pq_capable` flag set when the peer SAS-verified with the F1
+/// capability binding (`crypto::sas::derive_sas_code(.., Some(ek))`). The
+/// verified-peer anchor is the strongest of the three: it survives a relay
+/// dropping both the live announce key and the pin, so a peer we once confirmed
+/// PQ-capable can never be silently re-keyed classical.
+///
+/// `have_mlkem_ek` is whether we currently hold a usable ek (announce or pin) to
+/// derive the hybrid key. When the peer is known capable but `have_mlkem_ek` is
+/// `false`, the caller should derive **no** key and instead wait for / request a
+/// genuine hybrid announce rather than locking in a classical key.
+///
+/// This is a pure predicate so the security-critical downgrade policy is unit
+/// testable without an `AppHandle`; the full key-derivation decision (initiator
+/// vs responder, one-way classical→hybrid upgrade) lives in `app::plan_dm_key`,
+/// which folds this guard in via its `partner_pq_capable` input.
+pub fn must_refuse_classical_fallback(peer_known_pq_capable: bool, have_mlkem_ek: bool) -> bool {
+    peer_known_pq_capable && !have_mlkem_ek
+}
+
 fn ed25519_seed_to_x25519_secret(seed: &[u8; 32]) -> StaticSecret {
     // SHA-512(seed)[..32] is the canonical conversion. X25519's
     // `StaticSecret::from` applies the required RFC 7748 clamping
@@ -381,5 +410,28 @@ mod tests {
             "room",
         );
         assert!(r.is_err());
+    }
+
+    // ---- huddle 2.0: classical-fallback downgrade guard ----
+
+    #[test]
+    fn refuses_classical_only_for_known_capable_peer_without_ek() {
+        // The single dangerous combination: peer is known PQ-capable but no
+        // ML-KEM key is currently available to build the hybrid key from.
+        assert!(must_refuse_classical_fallback(true, false));
+    }
+
+    #[test]
+    fn allows_classical_when_peer_not_known_capable() {
+        // A genuine pre-1.3 / classical-only peer: classical is the correct key.
+        assert!(!must_refuse_classical_fallback(false, false));
+        assert!(!must_refuse_classical_fallback(false, true));
+    }
+
+    #[test]
+    fn does_not_refuse_when_ek_is_available() {
+        // Capable peer *with* an ek isn't refused here — the caller will derive
+        // the hybrid key instead; this guard only blocks the classical fallback.
+        assert!(!must_refuse_classical_fallback(true, true));
     }
 }

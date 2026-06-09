@@ -101,6 +101,14 @@ pub const BINDINGS: &[Binding] = &[
         description: "go dark — delete account, wipe data, exit",
         palette_label: Some("go dark (delete account)"),
     },
+    // huddle 2.0.0 (F5): change the master passphrase (re-keys the DB +
+    // Megolm pickles). Also bound to `P` from any Settings tab.
+    Binding {
+        keys: "P",
+        context: Context::Global,
+        description: "change master passphrase (Settings)",
+        palette_label: Some("change master passphrase"),
+    },
     // Lobby
     Binding {
         keys: "s",
@@ -149,6 +157,15 @@ pub const BINDINGS: &[Binding] = &[
         context: Context::Lobby,
         description: "paste an invite link",
         palette_label: Some("paste invite link"),
+    },
+    // huddle 2.0.0 (F6): export the identity's 24-word BIP39 seed phrase
+    // (show-once, re-entry-verified). The phrase IS the identity — back it
+    // up offline; importing it on a fresh launch recovers the account.
+    Binding {
+        keys: "Shift+S",
+        context: Context::Lobby,
+        description: "export identity as BIP39 seed phrase",
+        palette_label: Some("export seed phrase"),
     },
     Binding {
         keys: "Tab",
@@ -339,6 +356,45 @@ pub const BINDINGS: &[Binding] = &[
         description: "show room bans (owner)",
         palette_label: Some("show room bans"),
     },
+    // huddle 2.0.0 (F9): per-room disappearing messages (off by default;
+    // best-effort local auto-deletion after the TTL).
+    Binding {
+        keys: "F9",
+        context: Context::RoomChat,
+        description: "toggle disappearing messages",
+        palette_label: Some("toggle room message expiry"),
+    },
+    // huddle 2.0.0 (F10): conversation affordances on the selected message.
+    Binding {
+        keys: "[ / ]",
+        context: Context::RoomChat,
+        description: "select previous / next message",
+        palette_label: None,
+    },
+    Binding {
+        keys: "r",
+        context: Context::RoomChat,
+        description: "react to the selected message",
+        palette_label: None,
+    },
+    Binding {
+        keys: "e",
+        context: Context::RoomChat,
+        description: "edit the selected message (yours / owner)",
+        palette_label: None,
+    },
+    Binding {
+        keys: "Shift+R",
+        context: Context::RoomChat,
+        description: "reply to the selected message",
+        palette_label: None,
+    },
+    Binding {
+        keys: "Del",
+        context: Context::RoomChat,
+        description: "delete the selected message (yours / owner)",
+        palette_label: None,
+    },
     Binding {
         keys: "f",
         context: Context::RoomChat,
@@ -515,7 +571,9 @@ pub fn adaptive_hints(app: &TuiApp) -> Vec<(&'static str, &'static str)> {
             out.push(("Ctrl+P", "palette"));
         } else {
             out.push(("/", "type"));
-            out.push(("Ctrl+V", "verify"));
+            // huddle 2.0.0 (F10): surface the message affordances. `[`/`]`
+            // move the selection; r/e/Shift+R/Del act on it.
+            out.push(("r", "react"));
             out.push(("Ctrl+F", "search"));
             out.push(("Ctrl+A", "attach"));
             if is_group {

@@ -58,6 +58,49 @@ fn account(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
         actions.push(UiAction::OpenQr);
     }
 
+    // huddle 2.0.0 (F5/F6): account security — change the master passphrase and
+    // back up the identity as a 24-word recovery seed phrase.
+    ui.add_space(14.0);
+    ui.separator();
+    ui.label(RichText::new("Security").strong());
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(
+                vm.has_master_passphrase,
+                egui::Button::new("Change master passphrase"),
+            )
+            .clicked()
+        {
+            actions.push(UiAction::OpenChangePassphrase);
+        }
+        if !vm.has_master_passphrase {
+            ui.label(
+                RichText::new("(started with --no-master-passphrase)")
+                    .small()
+                    .color(palette().text_dim),
+            );
+        }
+    });
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(
+                vm.has_master_passphrase,
+                egui::Button::new("Export recovery seed phrase"),
+            )
+            .clicked()
+        {
+            actions.push(UiAction::OpenExportSeed);
+        }
+    });
+    ui.label(
+        RichText::new(
+            "the 24-word seed phrase backs up your identity. Anyone who has it IS you — \
+             store it offline. Restore it on a fresh install via “Import existing identity”.",
+        )
+        .small()
+        .color(palette().text_dim),
+    );
+
     ui.add_space(14.0);
     ui.separator();
     ui.label(RichText::new("Appearance").strong());

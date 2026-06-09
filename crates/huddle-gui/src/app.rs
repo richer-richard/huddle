@@ -18,10 +18,11 @@ use huddle_core::storage::repo::RoomKind;
 use crate::bridge::{self, Cmd, Inbox, ReadyParts, ReqOk, ReqTag};
 use crate::cli::Cli;
 use crate::model::{
-    reduce, AddContactState, AttachPathState, ConfirmInviteState, EditAliasState, EditUsernameState,
-    GoDarkState, JoinState, JoinWithCodeState, Modal, NewDmState, NewGroupState, Pane,
-    PasteInviteState, RotateState, SasStage, SasState, SearchState, Section, SetRelayState,
-    UiAction, VerifyState, ViewModel,
+    reduce, AddContactState, AttachPathState, ChangePassphraseState, ConfirmDeleteState,
+    ConfirmInviteState, DisappearingState, EditAliasState, EditUsernameState, EmojiPickerState,
+    ExportSeedState, ExportSeedStep, GoDarkState, JoinState, JoinWithCodeState, Modal, NewDmState,
+    NewGroupState, Pane, PasteInviteState, RotateState, SasStage, SasState, SearchState, Section,
+    SetRelayState, UiAction, VerifyState, ViewModel,
 };
 use crate::panes;
 use crate::theme::palette;
@@ -49,10 +50,18 @@ pub struct LockedForm {
     pub passphrase: String,
     pub confirm: String,
     pub error: Option<String>,
+    /// huddle 2.0.0 (F6): on a fresh install, optionally restore an existing
+    /// identity from its 24-word BIP39 seed phrase instead of generating a new
+    /// one. Empty = generate a new random identity (the default).
+    pub import_phrase: String,
+    /// Whether the "Import existing identity" section is expanded.
+    pub show_import: bool,
 }
 
 enum Transition {
-    Build(bridge::AuthChoice, Option<String>),
+    /// `(auth, display_name, import_seed_phrase)` — the seed phrase is `Some`
+    /// only on a fresh-install restore (F6).
+    Build(bridge::AuthChoice, Option<String>, Option<String>),
     Ready(ReadyParts),
     FailedAuth(String),
 }
@@ -79,7 +88,7 @@ impl HuddleApp {
 
     fn init_state(&mut self) {
         if self.cli.no_master_passphrase {
-            self.begin_build(bridge::AuthChoice::NoPassphrase, self.cli.name.clone());
+            self.begin_build(bridge::AuthChoice::NoPassphrase, self.cli.name.clone(), None);
             return;
         }
         let salt_exists = huddle_core::storage::keychain::keychain_salt_path().exists();
@@ -99,7 +108,12 @@ impl HuddleApp {
         });
     }
 
-    fn begin_build(&mut self, auth: bridge::AuthChoice, name: Option<String>) {
+    fn begin_build(
+        &mut self,
+        auth: bridge::AuthChoice,
+        name: Option<String>,
+        import_phrase: Option<String>,
+    ) {
         let params = bridge::BuildParams {
             explicit_mode: self.cli.mode,
             port: self.cli.port,
@@ -112,6 +126,7 @@ impl HuddleApp {
             transport_order: self.cli.transport_order_vec(),
             auth,
             name,
+            import_phrase,
         };
         let rx = bridge::spawn_build(&self.rt_handle, self.ctx.clone(), params);
         self.state = AppState::Connecting(rx);
@@ -119,7 +134,7 @@ impl HuddleApp {
 
     fn apply_transition(&mut self, t: Transition) {
         match t {
-            Transition::Build(auth, name) => self.begin_build(auth, name),
+            Transition::Build(auth, name, import) => self.begin_build(auth, name, import),
             Transition::Ready(parts) => {
                 let cmd = Cmd::new(
                     self.rt_handle.clone(),
@@ -176,8 +191,12 @@ impl eframe::App for HuddleApp {
         match &mut self.state {
             AppState::Fatal(msg) => render_fatal(ui, msg),
             AppState::Locked(form) => {
-                if let Some((pass, name)) = render_locked(ui, form) {
-                    transition = Some(Transition::Build(bridge::AuthChoice::Passphrase(pass), name));
+                if let Some((pass, name, import)) = render_locked(ui, form) {
+                    transition = Some(Transition::Build(
+                        bridge::AuthChoice::Passphrase(pass),
+                        name,
+                        import,
+                    ));
                 }
             }
             AppState::Connecting(rx) => {
@@ -231,6 +250,10 @@ impl Ready {
         if self.last_refresh.elapsed() > Duration::from_secs(1) {
             self.vm.refresh(&self.handle);
             self.vm.refresh_attachments(&self.handle);
+            // huddle 2.0.0 (F10/F9): pull full message rows so freshly-arrived
+            // messages gain their `client_msg_id` (the live event omits it),
+            // reactions/edits/deletes settle, and expired rows drop from view.
+            self.vm.reload_open_rooms_history(&self.handle);
             self.last_refresh = Instant::now();
         }
 
@@ -915,6 +938,136 @@ impl Ready {
                 self.request_close = true;
                 self.vm.modal = Modal::None;
             }
+
+            // ---- huddle 2.0.0 (F5): master passphrase change ----
+            UiAction::OpenChangePassphrase => {
+                if self.vm.has_master_passphrase {
+                    self.vm.modal = Modal::ChangePassphrase(ChangePassphraseState::default());
+                } else {
+                    self.vm.set_status(
+                        "no master passphrase to change (started with --no-master-passphrase)",
+                    );
+                }
+            }
+            UiAction::SubmitChangePassphrase { current, new } => {
+                // Verification of `current` + the at-rest re-key happen in the
+                // core. Success arrives as AppEvent::PassphraseChanged (closes the
+                // modal); a failure comes back tagged so we can show it inline.
+                self.cmd.request(ReqTag::ChangePassphrase, move |h| async move {
+                    h.change_master_passphrase(&current, &new)
+                        .await
+                        .map(|_| ReqOk::Unit)
+                        .map_err(|e| e.to_string())
+                });
+            }
+
+            // ---- huddle 2.0.0 (F6): BIP39 seed-phrase export ----
+            UiAction::OpenExportSeed => match self.handle.export_seed_phrase() {
+                Ok(phrase) => {
+                    self.vm.modal = Modal::ExportSeed(ExportSeedState {
+                        phrase,
+                        revealed: false,
+                        step: ExportSeedStep::Reveal,
+                        reentry: String::new(),
+                        error: None,
+                    });
+                }
+                Err(e) => self.vm.set_status(format!("seed export: {e}")),
+            },
+            UiAction::ExportSeedVerify { reentry } => {
+                // verify_seed_reentry is a cheap local decode+compare — no async.
+                let ok = self.handle.verify_seed_reentry(&reentry).unwrap_or(false);
+                if let Modal::ExportSeed(s) = &mut self.vm.modal {
+                    if ok {
+                        s.step = ExportSeedStep::Done;
+                        s.error = None;
+                    } else {
+                        s.error =
+                            Some("that doesn't match — check your transcription word by word".into());
+                    }
+                }
+            }
+
+            // ---- huddle 2.0.0 (F9): per-room disappearing-messages TTL ----
+            UiAction::OpenDisappearing(room_id) => {
+                let current = self.handle.room_disappearing_ttl(&room_id);
+                self.vm.modal = Modal::Disappearing(DisappearingState { room_id, current });
+            }
+            UiAction::SetDisappearing { room_id, ttl_secs } => {
+                self.cmd.fire(move |h| async move {
+                    h.set_room_disappearing_ttl(&room_id, ttl_secs).await
+                });
+                self.vm.modal = Modal::None;
+            }
+
+            // ---- huddle 2.0.0 (F10): reactions / replies / edits / deletes ----
+            UiAction::OpenEmojiPicker { room_id, target_msg_id } => {
+                self.vm.modal = Modal::EmojiPicker(EmojiPickerState { room_id, target_msg_id });
+            }
+            UiAction::SendReaction { room_id, target_msg_id, emoji, removed } => {
+                self.cmd.fire(move |h| async move {
+                    h.send_reaction(&room_id, &target_msg_id, &emoji, removed).await
+                });
+                if matches!(self.vm.modal, Modal::EmojiPicker(_)) {
+                    self.vm.modal = Modal::None;
+                }
+            }
+            UiAction::StartReply { room_id, target_msg_id, preview } => {
+                if let Some(r) = self.vm.open_room_mut(&room_id) {
+                    r.reply_to = Some((target_msg_id, preview));
+                    r.edit_target = None;
+                }
+            }
+            UiAction::CancelReply(room_id) => {
+                if let Some(r) = self.vm.open_room_mut(&room_id) {
+                    r.reply_to = None;
+                }
+            }
+            UiAction::SendReply { room_id, body, reply_to } => {
+                let rid = room_id.clone();
+                self.cmd.fire(move |h| async move {
+                    h.send_reply(&rid, &body, &reply_to).await
+                });
+                if let Some(r) = self.vm.open_room_mut(&room_id) {
+                    r.reply_to = None;
+                }
+            }
+            UiAction::StartEdit { room_id, target_msg_id, body } => {
+                if let Some(r) = self.vm.open_room_mut(&room_id) {
+                    r.edit_target = Some(target_msg_id);
+                    r.input = body;
+                    r.reply_to = None;
+                }
+            }
+            UiAction::CancelEdit(room_id) => {
+                if let Some(r) = self.vm.open_room_mut(&room_id) {
+                    r.edit_target = None;
+                    r.input.clear();
+                }
+            }
+            UiAction::SendEdit { room_id, target_msg_id, new_body } => {
+                let rid = room_id.clone();
+                self.cmd.fire(move |h| async move {
+                    h.edit_message(&rid, &target_msg_id, &new_body).await
+                });
+                if let Some(r) = self.vm.open_room_mut(&room_id) {
+                    r.edit_target = None;
+                    r.input.clear();
+                }
+            }
+            UiAction::OpenConfirmDelete { room_id, target_msg_id, preview } => {
+                self.vm.modal = Modal::ConfirmDelete(ConfirmDeleteState {
+                    room_id,
+                    target_msg_id,
+                    preview,
+                });
+            }
+            UiAction::SendDelete { room_id, target_msg_id } => {
+                self.cmd.fire(move |h| async move {
+                    h.delete_message(&room_id, &target_msg_id).await
+                });
+                self.vm.modal = Modal::None;
+            }
         }
     }
 
@@ -960,6 +1113,8 @@ impl Ready {
             // huddle 1.0: carry our configured clearnet relay so the joiner
             // connects to it with zero config (v3 invite).
             relay_url: self.handle.clearnet_relay(),
+            // huddle 2.0 (F1): None keeps this a v2/v3 invite (back-compatible).
+            mlkem_ek_b64: None,
         };
         let invite = self.handle.sign_invite(unsigned.clone()).unwrap_or(unsigned);
         match huddle_core::invite::encode(&invite) {
@@ -1119,8 +1274,12 @@ fn copy_row(ui: &mut egui::Ui, actions: &mut Vec<UiAction>, label: &str, value: 
     });
 }
 
-/// Render the unlock / sign-up screen. Returns `(passphrase, name)` on submit.
-fn render_locked(ui: &mut egui::Ui, form: &mut LockedForm) -> Option<(String, Option<String>)> {
+/// Render the unlock / sign-up screen. Returns `(passphrase, name, import_seed)`
+/// on submit; `import_seed` is `Some` only on a fresh-install identity restore.
+fn render_locked(
+    ui: &mut egui::Ui,
+    form: &mut LockedForm,
+) -> Option<(String, Option<String>, Option<String>)> {
     let mut submit = false;
     egui::CentralPanel::default().show_inside(ui, |ui| {
         ui.add_space(56.0);
@@ -1172,6 +1331,54 @@ fn render_locked(ui: &mut egui::Ui, form: &mut LockedForm) -> Option<(String, Op
                         .desired_width(w),
                 );
                 submit |= enter_pressed(ui, &r);
+
+                // huddle 2.0.0 (F6): optionally restore an existing identity from
+                // its 24-word BIP39 seed phrase instead of generating a new one.
+                ui.add_space(10.0);
+                if ui
+                    .selectable_label(form.show_import, "Import existing identity (optional)")
+                    .clicked()
+                {
+                    form.show_import = !form.show_import;
+                }
+                if form.show_import {
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(
+                            "paste the 24-word seed phrase you exported from another device. \
+                             leave blank to create a brand-new identity.",
+                        )
+                        .small()
+                        .color(palette().text_dim),
+                    );
+                    ui.add(
+                        egui::TextEdit::multiline(&mut form.import_phrase)
+                            .desired_width(w)
+                            .desired_rows(3)
+                            .hint_text("word1 word2 … word24"),
+                    );
+                    // Live fingerprint preview so the user can confirm the phrase
+                    // decodes to the identity they expect before committing.
+                    let trimmed = form.import_phrase.trim();
+                    if !trimmed.is_empty() {
+                        match huddle_core::app::fingerprint_from_phrase(trimmed) {
+                            Ok(fp) => {
+                                ui.label(
+                                    RichText::new(format!("restores {}", crate::fmt::display_id(&fp)))
+                                        .small()
+                                        .color(palette().success),
+                                );
+                            }
+                            Err(_) => {
+                                ui.label(
+                                    RichText::new("not a valid 24-word seed phrase yet")
+                                        .small()
+                                        .color(palette().warn),
+                                );
+                            }
+                        }
+                    }
+                }
             }
 
             ui.add_space(14.0);
@@ -1208,13 +1415,28 @@ fn render_locked(ui: &mut egui::Ui, form: &mut LockedForm) -> Option<(String, Op
         form.confirm.clear();
         return None;
     }
+    // huddle 2.0.0 (F6): validate the seed phrase up front so a typo is caught
+    // here, not after the (heavy) Argon2id key derivation. Only on fresh install.
+    let import = if form.first_launch {
+        let trimmed = form.import_phrase.trim();
+        if trimmed.is_empty() {
+            None
+        } else if huddle_core::app::fingerprint_from_phrase(trimmed).is_err() {
+            form.error = Some("the seed phrase is invalid — check the 24 words".into());
+            return None;
+        } else {
+            Some(trimmed.to_string())
+        }
+    } else {
+        None
+    };
     form.error = None;
     let name = if form.first_launch {
         Some(form.username.trim().to_string())
     } else {
         None
     };
-    Some((form.passphrase.clone(), name))
+    Some((form.passphrase.clone(), name, import))
 }
 
 fn render_connecting(ui: &mut egui::Ui) {

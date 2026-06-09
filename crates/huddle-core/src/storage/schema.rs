@@ -259,4 +259,91 @@ pub const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX IF NOT EXISTS idx_content_replay_by_time
         ON content_replay_seen(created_at);",
+    // huddle 2.0.0 (F1): persist whether a verified peer demonstrated
+    // post-quantum (ML-KEM) capability at SAS-verification time. Once set,
+    // `get_verified_peer_pq_capable` is a durable trust anchor that lets
+    // `ensure_dm_key` refuse a classical-only DM fallback for this peer — so a
+    // relay can't strip their ML-KEM pubkey from a later MemberAnnounce to force
+    // a quantum-unsafe downgrade *after* they were verified. Conservative
+    // back-fill: existing rows default to 0 (assume not PQ-capable until a fresh
+    // SAS verification with ML-KEM binding sets the flag). Sticky-once-true is
+    // enforced in `add_verified_peer`, not by the column.
+    "ALTER TABLE verified_peers ADD COLUMN pq_capable INTEGER NOT NULL DEFAULT 0;",
+    // huddle 2.0.0 (F8): a SQLite FTS5 full-text index over room_messages.body,
+    // kept in lock-step by triggers. An *external-content* table
+    // (content=room_messages, content_rowid=id) stores only the inverted index —
+    // the body text itself still lives once, in room_messages — so the index
+    // roughly doubles only the tokenized body size, not the full plaintext. The
+    // whole index lives inside the same SQLCipher file under `PRAGMA key`, so it
+    // adds no new at-rest exposure. The bundled SQLCipher is built with
+    // SQLITE_ENABLE_FTS5; `search_room_messages_fts` still falls back to the LIKE
+    // path (`search_room_messages`) if a query or the table is ever unavailable.
+    // The backfill seeds the index from existing history; the ai/ad/au triggers
+    // mirror INSERT/DELETE/UPDATE — the UPDATE trigger keeps the index correct
+    // when `apply_message_edit` / `mark_message_deleted` (F10) rewrite a body.
+    // Additive + local-only: pre-2.0 peers never run this and keep LIKE-searching,
+    // with zero wire-format impact.
+    "CREATE VIRTUAL TABLE room_messages_fts USING fts5(
+        body,
+        content='room_messages',
+        content_rowid='id'
+    );
+    INSERT INTO room_messages_fts(rowid, body) SELECT id, body FROM room_messages;
+    CREATE TRIGGER room_messages_ai AFTER INSERT ON room_messages BEGIN
+        INSERT INTO room_messages_fts(rowid, body) VALUES (new.id, new.body);
+    END;
+    CREATE TRIGGER room_messages_ad AFTER DELETE ON room_messages BEGIN
+        INSERT INTO room_messages_fts(room_messages_fts, rowid, body)
+            VALUES('delete', old.id, old.body);
+    END;
+    CREATE TRIGGER room_messages_au AFTER UPDATE ON room_messages BEGIN
+        INSERT INTO room_messages_fts(room_messages_fts, rowid, body)
+            VALUES('delete', old.id, old.body);
+        INSERT INTO room_messages_fts(rowid, body) VALUES (new.id, new.body);
+    END;",
+    // huddle 2.0.0 (F9): per-room disappearing-messages TTL, in seconds. 0 (the
+    // back-fill default) means OFF — no message ever expires, so every pre-2.0
+    // room keeps its current keep-forever behavior. When > 0,
+    // `delete_expired_messages` physically removes any message whose
+    // `sent_at + disappearing_ttl_secs <= now`, and the FTS delete trigger above
+    // drops it from the search index in the same step. Local-only and best-effort
+    // (each peer prunes against its own clock); the setting itself is propagated
+    // out-of-band via a signed control message at the app layer.
+    "ALTER TABLE rooms ADD COLUMN disappearing_ttl_secs INTEGER NOT NULL DEFAULT 0;",
+    // huddle 2.0.0 (F10): content-layer conversation affordances — a stable
+    // per-message client id (so reactions/replies/edits/deletes can target a
+    // message across peers), reply threading, and edit/delete tombstones.
+    //
+    //  * client_msg_id — a sender-minted stable id (UUID v4) echoed on the wire so
+    //    every peer names the same logical message. NULL for pre-2.0 messages,
+    //    which therefore can't be reacted-to / edited / replied-to (no target
+    //    handle) — their content still flows, only the affordances are unavailable.
+    //  * reply_to — the client_msg_id this message replies to, or NULL.
+    //  * edited_at / deleted_at — last-edit and tombstone timestamps.
+    //    `apply_message_edit` is last-write-wins on edited_at; `mark_message_deleted`
+    //    blanks the body and stamps deleted_at (a real delete, so the plaintext
+    //    doesn't linger at rest and FTS stops matching it via the UPDATE trigger).
+    //
+    // room_reactions is one row per (room, target message, reactor, emoji); the
+    // UNIQUE key makes a repeated reaction idempotent and `remove_reaction` an
+    // exact-match delete. FK cascade clears a room's reactions when the room is
+    // left/deleted. All additive: old peers ignore the new columns/variants and
+    // old DBs back-fill NULL.
+    "ALTER TABLE room_messages ADD COLUMN client_msg_id TEXT;
+    ALTER TABLE room_messages ADD COLUMN reply_to TEXT;
+    ALTER TABLE room_messages ADD COLUMN edited_at INTEGER;
+    ALTER TABLE room_messages ADD COLUMN deleted_at INTEGER;
+    CREATE INDEX IF NOT EXISTS idx_room_messages_client_msg_id
+        ON room_messages(room_id, client_msg_id);
+    CREATE TABLE IF NOT EXISTS room_reactions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+        target_client_msg_id TEXT NOT NULL,
+        sender_fingerprint TEXT NOT NULL,
+        emoji TEXT NOT NULL,
+        reacted_at INTEGER NOT NULL,
+        UNIQUE(room_id, target_client_msg_id, sender_fingerprint, emoji)
+    );
+    CREATE INDEX IF NOT EXISTS idx_room_reactions_target
+        ON room_reactions(room_id, target_client_msg_id);",
 ];

@@ -93,6 +93,29 @@ impl Identity {
     pub fn mlkem_public_bytes(&self) -> [u8; pqc::MLKEM_EK_LEN] {
         self.pq_keypair().encapsulation_key_bytes()
     }
+
+    /// huddle 2.0: export this identity's 32-byte Ed25519 seed — the **sole
+    /// root secret** from which the PeerId, the ML-KEM-768 keypair, and every
+    /// DM key deterministically derive. Returned in a `Zeroizing` wrapper so
+    /// the copy is scrubbed from memory when the caller drops it. Rendered as a
+    /// 24-word BIP39 phrase by `crate::crypto::mnemonic::seed_to_phrase` for
+    /// backup / recovery; treat it as the crown jewel (anyone holding it owns
+    /// this identity). Distinct from `secret_bytes`, which hands back the raw
+    /// (un-scrubbed) bytes the storage layer persists.
+    pub fn seed(&self) -> Zeroizing<[u8; 32]> {
+        Zeroizing::new(self.signing_key.to_bytes())
+    }
+
+    /// huddle 2.0: rebuild an identity from a 32-byte Ed25519 seed recovered
+    /// from a BIP39 phrase (`crate::crypto::mnemonic::phrase_to_seed`). The
+    /// seed is the only input, so the restored identity is byte-for-byte the
+    /// original — same fingerprint, PeerId, and ML-KEM keypair — letting a
+    /// fresh install fully recover from the written-down phrase with no DB
+    /// migration. Takes the seed by `Zeroizing` value so the caller's copy is
+    /// scrubbed on drop once we've turned it into key state.
+    pub fn from_seed(seed: Zeroizing<[u8; 32]>) -> Result<Self> {
+        Self::from_secret_bytes(*seed)
+    }
 }
 
 /// Derive the human-facing 24-char fingerprint from an Ed25519 public key.
@@ -238,5 +261,38 @@ mod tests {
             assert_eq!(g.len(), 4);
             assert!(g.chars().all(|c| c.is_ascii_hexdigit() && c.is_ascii_uppercase() || c.is_ascii_digit()));
         }
+    }
+
+    #[test]
+    fn seed_matches_secret_bytes() {
+        // huddle 2.0: `seed` is the same 32 bytes as `secret_bytes`, just
+        // wrapped in Zeroizing so the export copy is scrubbed on drop.
+        let id = Identity::generate().unwrap();
+        assert_eq!(*id.seed(), id.secret_bytes());
+    }
+
+    #[test]
+    fn from_seed_round_trips_identity() {
+        // huddle 2.0: export the seed and rebuild — the restored identity must
+        // be byte-for-byte identical (fingerprint, PeerId, ML-KEM pubkey).
+        let id = Identity::generate().unwrap();
+        let restored = Identity::from_seed(id.seed()).unwrap();
+        assert_eq!(id.fingerprint(), restored.fingerprint());
+        assert_eq!(id.peer_id(), restored.peer_id());
+        assert_eq!(id.mlkem_public_bytes(), restored.mlkem_public_bytes());
+    }
+
+    #[test]
+    fn bip39_phrase_fully_restores_identity() {
+        // huddle 2.0: the end-to-end recovery path — export the seed as a
+        // 24-word phrase, decode it back, and reconstruct the identity, exactly
+        // as the "write it down, import on a fresh install" flow does.
+        let id = Identity::generate().unwrap();
+        let phrase = crate::crypto::mnemonic::seed_to_phrase(&id.seed());
+        let seed = crate::crypto::mnemonic::phrase_to_seed(&phrase).unwrap();
+        let restored = Identity::from_seed(Zeroizing::new(seed)).unwrap();
+        assert_eq!(id.fingerprint(), restored.fingerprint());
+        assert_eq!(id.peer_id(), restored.peer_id());
+        assert_eq!(id.mlkem_public_bytes(), restored.mlkem_public_bytes());
     }
 }

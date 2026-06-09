@@ -262,6 +262,17 @@ impl NetworkHandle {
         self.server.lock().unwrap().is_some()
     }
 
+    /// huddle 2.0 (F7): acknowledge durable receipt of a mailbox-delivered
+    /// message so the relay may delete its queued copy (at-least-once
+    /// delivery). Forwards to the attached relay client; a no-op when no relay
+    /// is connected (the message arrived over libp2p, or the socket dropped) —
+    /// the relay's mailbox TTL is the backstop, so a missed ack is safe.
+    pub fn send_mailbox_ack(&self, mailbox_id: i64) {
+        if let Some(s) = self.server_client() {
+            let _ = s.ack_mailbox(mailbox_id);
+        }
+    }
+
     pub async fn dial(&self, address: Multiaddr) {
         let _ = self.cmd_tx.send(NetworkCommand::Dial { address }).await;
     }

@@ -17,7 +17,8 @@ use huddle_core::app::{AppHandle, ContactView, KnownPeerStatus};
 use huddle_core::network::transport::{TransportId, TransportProfile};
 use huddle_core::network::NetworkMode;
 use huddle_core::storage::repo::{
-    PendingContactRequest, PendingFriendRequest, RoomKind, StoredAttachment, StoredRoomMessage,
+    PendingContactRequest, PendingFriendRequest, RoomKind, StoredAttachment, StoredReaction,
+    StoredRoomMessage,
 };
 use libp2p::PeerId;
 
@@ -274,6 +275,67 @@ pub enum UiAction {
     RequestShutdown,
     CancelQuit,
     RestartApp,
+    // ---- huddle 2.0.0 (F5): master passphrase change ----
+    OpenChangePassphrase,
+    SubmitChangePassphrase {
+        current: String,
+        new: String,
+    },
+    // ---- huddle 2.0.0 (F6): BIP39 seed-phrase export (show-once + verify) ----
+    OpenExportSeed,
+    /// Verify the re-typed phrase against our identity before declaring the
+    /// backup good (drives the export modal's `Verify` → `Done` step).
+    ExportSeedVerify {
+        reentry: String,
+    },
+    // ---- huddle 2.0.0 (F9): per-room disappearing-messages TTL ----
+    OpenDisappearing(String),
+    SetDisappearing {
+        room_id: String,
+        ttl_secs: Option<u32>,
+    },
+    // ---- huddle 2.0.0 (F10): reactions / replies / edits / deletes ----
+    OpenEmojiPicker {
+        room_id: String,
+        target_msg_id: String,
+    },
+    SendReaction {
+        room_id: String,
+        target_msg_id: String,
+        emoji: String,
+        removed: bool,
+    },
+    StartReply {
+        room_id: String,
+        target_msg_id: String,
+        preview: String,
+    },
+    CancelReply(String),
+    SendReply {
+        room_id: String,
+        body: String,
+        reply_to: String,
+    },
+    StartEdit {
+        room_id: String,
+        target_msg_id: String,
+        body: String,
+    },
+    CancelEdit(String),
+    SendEdit {
+        room_id: String,
+        target_msg_id: String,
+        new_body: String,
+    },
+    OpenConfirmDelete {
+        room_id: String,
+        target_msg_id: String,
+        preview: String,
+    },
+    SendDelete {
+        room_id: String,
+        target_msg_id: String,
+    },
 }
 
 /// The single active modal overlay (a queue for async-raised modals lands in a
@@ -306,8 +368,110 @@ pub enum Modal {
     Onboarding { cursor: usize },
     UpdateOptIn,
     QuitConfirm,
+    /// huddle 2.0.0 (F5): change the master passphrase + re-key the DB at rest.
+    ChangePassphrase(ChangePassphraseState),
+    /// huddle 2.0.0 (F6): show the 24-word BIP39 identity seed once and verify
+    /// the user transcribed it before relying on it for recovery.
+    ExportSeed(ExportSeedState),
+    /// huddle 2.0.0 (F3): a pinned peer key changed mid-session (TOFU drift) —
+    /// prompt to re-verify (SAS), or block the peer.
+    SafetyNumberChanged(SafetyNumberChangedState),
+    /// huddle 2.0.0 (F9): pick a per-room disappearing-messages TTL.
+    Disappearing(DisappearingState),
+    /// huddle 2.0.0 (F10): pick an emoji to react to a message with.
+    EmojiPicker(EmojiPickerState),
+    /// huddle 2.0.0 (F10): confirm a permanent (for-everyone) message delete.
+    ConfirmDelete(ConfirmDeleteState),
     Error(String),
     Info(String),
+}
+
+/// huddle 2.0.0 (F5): the change-master-passphrase modal's fields. The actual
+/// re-key + verification of `current` happens in the core; this only collects
+/// input and surfaces the result.
+#[derive(Default)]
+pub struct ChangePassphraseState {
+    pub current: String,
+    pub new: String,
+    pub confirm: String,
+    pub error: Option<String>,
+}
+
+/// huddle 2.0.0 (F6): the show-once / re-entry-verified seed export flow.
+pub struct ExportSeedState {
+    /// The 24-word phrase (held only while the modal is open).
+    pub phrase: String,
+    /// Whether the phrase is currently revealed (hidden behind dots by default).
+    pub revealed: bool,
+    pub step: ExportSeedStep,
+    /// The user's re-typed phrase in the verify step.
+    pub reentry: String,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ExportSeedStep {
+    /// Bold warning + the (hidden-by-default) phrase.
+    Reveal,
+    /// Re-type the phrase to confirm it was written down correctly.
+    Verify,
+    /// Verified — the backup is good.
+    Done,
+}
+
+/// huddle 2.0.0 (F3): everything the safety-number-change alert needs.
+pub struct SafetyNumberChangedState {
+    pub room_id: String,
+    pub fingerprint: String,
+    pub old_pubkey_b64: String,
+    pub new_pubkey_b64: String,
+    pub display_name: Option<String>,
+}
+
+/// huddle 2.0.0 (F9): TTL picker state — `current` is the room's live setting so
+/// the selector opens on the active choice.
+pub struct DisappearingState {
+    pub room_id: String,
+    pub current: Option<u32>,
+}
+
+/// huddle 2.0.0 (F9): the TTL options the picker offers, as
+/// `(label, ttl_secs)`. `None` is "off".
+pub const DISAPPEARING_OPTIONS: &[(&str, Option<u32>)] = &[
+    ("Off", None),
+    ("5 minutes", Some(300)),
+    ("1 hour", Some(3600)),
+    ("1 day", Some(86_400)),
+    ("1 week", Some(604_800)),
+];
+
+/// huddle 2.0.0 (F9): render a TTL in seconds as a short human label for the
+/// room header indicator.
+pub fn ttl_label(secs: u32) -> String {
+    match secs {
+        300 => "5m".into(),
+        3600 => "1h".into(),
+        86_400 => "1d".into(),
+        604_800 => "1w".into(),
+        s if s % 86_400 == 0 => format!("{}d", s / 86_400),
+        s if s % 3600 == 0 => format!("{}h", s / 3600),
+        s if s % 60 == 0 => format!("{}m", s / 60),
+        s => format!("{s}s"),
+    }
+}
+
+/// huddle 2.0.0 (F10): which message the emoji picker is reacting to.
+pub struct EmojiPickerState {
+    pub room_id: String,
+    pub target_msg_id: String,
+}
+
+/// huddle 2.0.0 (F10): the delete-confirmation modal's target + a preview of the
+/// body being removed.
+pub struct ConfirmDeleteState {
+    pub room_id: String,
+    pub target_msg_id: String,
+    pub preview: String,
 }
 
 #[derive(Default)]
@@ -485,7 +649,53 @@ pub struct OpenRoom {
     pub input: String,
     pub stick_to_bottom: bool,
     pub last_typing_sent: Option<Instant>,
+    /// huddle 2.0.0 (F10): every reaction stored for this room (refreshed on the
+    /// ~1s tick and on `ReactionAdded`). Rendered grouped per
+    /// `target_client_msg_id` into per-emoji counts under each message.
+    pub reactions: Vec<StoredReaction>,
+    /// huddle 2.0.0 (F9): the room's disappearing-messages TTL in seconds, or
+    /// `None` when expiry is OFF. Drives the room-header indicator.
+    pub ttl_secs: Option<u32>,
+    /// huddle 2.0.0 (F10): the message currently being replied to in the
+    /// composer, as `(client_msg_id, one-line preview)`. `None` = top-level
+    /// message. Set by `StartReply`, cleared by `CancelReply` / on send.
+    pub reply_to: Option<(String, String)>,
+    /// huddle 2.0.0 (F10): the `client_msg_id` of the message being edited
+    /// inline (the composer holds the draft body). `None` = composing a new
+    /// message. Set by `StartEdit`, cleared by `CancelEdit` / on send.
+    pub edit_target: Option<String>,
 }
+
+impl OpenRoom {
+    /// huddle 2.0.0 (F10): the reactions on one message, grouped into
+    /// `(emoji, count, we_reacted)` tuples in first-seen order. `our_fp` is the
+    /// local fingerprint, used to flag which badges we can toggle off.
+    pub fn reactions_for(&self, client_msg_id: &str, our_fp: &str) -> Vec<(String, usize, bool)> {
+        let mut order: Vec<String> = Vec::new();
+        let mut counts: HashMap<String, (usize, bool)> = HashMap::new();
+        for r in self.reactions.iter().filter(|r| r.target_client_msg_id == client_msg_id) {
+            let e = counts.entry(r.emoji.clone()).or_insert_with(|| {
+                order.push(r.emoji.clone());
+                (0, false)
+            });
+            e.0 += 1;
+            if r.sender_fingerprint == our_fp {
+                e.1 = true;
+            }
+        }
+        order
+            .into_iter()
+            .map(|emoji| {
+                let (n, mine) = counts[&emoji];
+                (emoji, n, mine)
+            })
+            .collect()
+    }
+}
+
+/// huddle 2.0.0 (F10): the emoji palette offered by the reaction picker. Kept
+/// short and conventional; a sender can only carry one of these per message.
+pub const REACTION_EMOJIS: &[&str] = &["👍", "❤️", "😂", "🎉", "🔥", "😮", "😢", "🙏"];
 
 pub struct ViewModel {
     // identity
@@ -763,7 +973,38 @@ impl ViewModel {
             input: String::new(),
             stick_to_bottom: true,
             last_typing_sent: None,
+            // huddle 2.0.0 (F10/F9): hydrate reactions + disappearing TTL so the
+            // first frame already shows badges and the header indicator.
+            reactions: h.room_reactions(id),
+            ttl_secs: h.room_disappearing_ttl(id),
+            reply_to: None,
+            edit_target: None,
         });
+    }
+
+    /// huddle 2.0.0 (F10): reload one open room's message history + reactions
+    /// from the DB. The live append-on-event path shows new messages instantly
+    /// but can't carry their sender-minted `client_msg_id` (the event omits it);
+    /// this pulls the full rows so reactions / replies / edits / deletes can
+    /// target them. Called on the ~1s tick and on every F10 content event.
+    pub fn reload_room_history(&mut self, h: &AppHandle, room_id: &str) {
+        let messages = h.room_messages(room_id, 500).unwrap_or_default();
+        let reactions = h.room_reactions(room_id);
+        let ttl = h.room_disappearing_ttl(room_id);
+        if let Some(r) = self.open_room_mut(room_id) {
+            r.messages = messages;
+            r.reactions = reactions;
+            r.ttl_secs = ttl;
+        }
+    }
+
+    /// Reload every open room's history (F10 reactions/edits/deletes + F9
+    /// expiry). Mirrors [`refresh_attachments`]; runs on the ~1s tick.
+    pub fn reload_open_rooms_history(&mut self, h: &AppHandle) {
+        let ids: Vec<String> = self.open_rooms.iter().map(|r| r.room_id.clone()).collect();
+        for id in ids {
+            self.reload_room_history(h, &id);
+        }
     }
 
     /// Refresh attachments for every open room (transfers progress between
@@ -825,7 +1066,18 @@ pub fn reduce(vm: &mut ViewModel, h: &AppHandle, msg: Inbox) {
             crate::bridge::ReqOk::SavedPath(p) => vm.set_status(format!("saved to {}", p.display())),
             other => vm.push_log(format!("ok [{tag:?}]: {other:?}")),
         },
-        Inbox::ReqErr(tag, e) => vm.set_status(format!("error [{tag:?}]: {e}")),
+        Inbox::ReqErr(tag, e) => match tag {
+            // huddle 2.0.0 (F5): surface a wrong-current-passphrase inline in the
+            // change-passphrase modal instead of the transient status line.
+            crate::bridge::ReqTag::ChangePassphrase => {
+                if let Modal::ChangePassphrase(s) = &mut vm.modal {
+                    s.error = Some(e);
+                } else {
+                    vm.set_status(format!("passphrase change failed: {e}"));
+                }
+            }
+            _ => vm.set_status(format!("error [{tag:?}]: {e}")),
+        },
     }
 }
 
@@ -871,6 +1123,13 @@ fn apply_event(vm: &mut ViewModel, h: &AppHandle, ev: AppEvent) {
                         direction: "in".into(),
                         body,
                         sent_at,
+                        // The event omits the sender-minted id; the ~1s history
+                        // reload (and F10 content events) backfill the full row
+                        // so reactions / replies / edits can target it.
+                        client_msg_id: None,
+                        reply_to: None,
+                        edited_at: None,
+                        deleted_at: None,
                     },
                 );
                 r.stick_to_bottom = true;
@@ -895,6 +1154,10 @@ fn apply_event(vm: &mut ViewModel, h: &AppHandle, ev: AppEvent) {
                         direction: "out".into(),
                         body,
                         sent_at: now,
+                        client_msg_id: None,
+                        reply_to: None,
+                        edited_at: None,
+                        deleted_at: None,
                     },
                 );
                 r.stick_to_bottom = true;
@@ -992,6 +1255,58 @@ fn apply_event(vm: &mut ViewModel, h: &AppHandle, ev: AppEvent) {
         }
         AppEvent::ConnectCodeFailed { reason } => {
             vm.set_status(format!("connect code: {reason}"));
+        }
+        // huddle 2.0.0 (F3): a pinned peer key changed mid-session. Surface the
+        // alert without clobbering a modal the user is mid-way through; the
+        // offending message was already dropped by the core.
+        AppEvent::SafetyNumberChanged {
+            room_id,
+            fingerprint,
+            old_pubkey_b64,
+            new_pubkey_b64,
+            display_name,
+        } => {
+            vm.replace_modal_if_idle(Modal::SafetyNumberChanged(SafetyNumberChangedState {
+                room_id,
+                fingerprint,
+                old_pubkey_b64,
+                new_pubkey_b64,
+                display_name,
+            }));
+        }
+        // huddle 2.0.0 (F5): the master passphrase change + DB re-key succeeded.
+        AppEvent::PassphraseChanged => {
+            if matches!(vm.modal, Modal::ChangePassphrase(_)) {
+                vm.close_modal();
+            }
+            vm.set_status("passphrase updated");
+        }
+        // huddle 2.0.0 (F10): reactions / edits / deletes — re-read the affected
+        // room from the DB so badges, `[edited]`, and `[deleted]` reflect at once.
+        AppEvent::ReactionAdded { room_id, .. }
+        | AppEvent::MessageEdited { room_id, .. }
+        | AppEvent::MessageDeleted { room_id, .. } => {
+            if vm.open_room(&room_id).is_some() {
+                vm.reload_room_history(h, &room_id);
+            }
+        }
+        // huddle 2.0.0 (F9): the per-room TTL changed (locally or via a signed
+        // owner broadcast) — refresh the header indicator.
+        AppEvent::RoomTtlChanged { room_id, ttl_secs } => {
+            if let Some(r) = vm.open_room_mut(&room_id) {
+                r.ttl_secs = ttl_secs;
+            }
+            vm.set_status(match ttl_secs {
+                Some(s) => format!("disappearing messages: on ({})", ttl_label(s)),
+                None => "disappearing messages: off".to_string(),
+            });
+        }
+        // huddle 2.0.0 (F9): the pruner deleted expired messages — drop the
+        // vanished rows from every open room's view.
+        AppEvent::MessagesExpired { count } => {
+            if count > 0 {
+                vm.reload_open_rooms_history(h);
+            }
         }
         // The remaining variants surface in later phases (files, SAS, rotation,
         // inbound dial, NAT, …). They're already in the activity log above.
@@ -1125,6 +1440,10 @@ mod tests {
             input: String::new(),
             stick_to_bottom: true,
             last_typing_sent: None,
+            reactions: vec![],
+            ttl_secs: None,
+            reply_to: None,
+            edit_target: None,
         }
     }
 
@@ -1146,6 +1465,10 @@ mod tests {
                 direction: "in".into(),
                 body: "hi".into(),
                 sent_at: 0,
+                client_msg_id: None,
+                reply_to: None,
+                edited_at: None,
+                deleted_at: None,
             });
         }
         if !active {
@@ -1160,5 +1483,45 @@ mod tests {
         let mut v = vm();
         v.set_status("hello");
         assert_eq!(v.current_status(), Some("hello"));
+    }
+
+    fn reaction(target: &str, sender: &str, emoji: &str) -> StoredReaction {
+        StoredReaction {
+            id: 0,
+            room_id: "r1".into(),
+            target_client_msg_id: target.into(),
+            sender_fingerprint: sender.into(),
+            emoji: emoji.into(),
+            reacted_at: 0,
+        }
+    }
+
+    #[test]
+    fn reactions_group_by_emoji_with_counts_and_self_flag() {
+        let mut r = room("r1");
+        r.reactions = vec![
+            reaction("m1", "me", "👍"),
+            reaction("m1", "bob", "👍"),
+            reaction("m1", "carol", "❤️"),
+            reaction("m2", "bob", "🔥"),
+        ];
+        let grouped = r.reactions_for("m1", "me");
+        // first-seen order: 👍 then ❤️
+        assert_eq!(grouped[0], ("👍".to_string(), 2, true));
+        assert_eq!(grouped[1], ("❤️".to_string(), 1, false));
+        // a different message's reactions don't leak in
+        assert_eq!(r.reactions_for("m2", "me"), vec![("🔥".to_string(), 1, false)]);
+        // an un-reacted message is empty
+        assert!(r.reactions_for("m3", "me").is_empty());
+    }
+
+    #[test]
+    fn ttl_label_renders_common_buckets() {
+        assert_eq!(ttl_label(300), "5m");
+        assert_eq!(ttl_label(3600), "1h");
+        assert_eq!(ttl_label(86_400), "1d");
+        assert_eq!(ttl_label(604_800), "1w");
+        assert_eq!(ttl_label(7200), "2h");
+        assert_eq!(ttl_label(45), "45s");
     }
 }

@@ -55,6 +55,12 @@ pub fn render(f: &mut Frame, app: &TuiApp) {
         Modal::Info(msg) => modal::render_info(f, msg),
         Modal::ComposeDm(s) => modal::render_compose_dm(f, s, app),
         Modal::InvitePicker(s) => modal::render_invite_picker(f, s),
+        // huddle 2.0.0
+        Modal::SafetyNumberChanged(s) => modal::render_safety_number_changed(f, s),
+        Modal::ChangePassphrase(s) => modal::render_change_passphrase(f, s),
+        Modal::ExportSeed(s) => modal::render_export_seed(f, s),
+        Modal::EmojiPicker(s) => modal::render_emoji_picker(f, s),
+        Modal::ConfirmDelete(s) => modal::render_confirm_delete(f, s),
     }
 }
 

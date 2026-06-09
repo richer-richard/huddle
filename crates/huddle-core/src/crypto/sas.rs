@@ -39,10 +39,26 @@
 //! offset +1000 so values land in 1000..=9191); the decimal shape matches the
 //! MSC 2241 decimal SAS, but the emoji scheme is huddle↔huddle only. Since both
 //! peers run identical deterministic code, MITM detection is unaffected.
+//!
+//! ## huddle 2.0: optional post-quantum capability binding
+//!
+//! [`derive_sas_code`] takes an optional `partner_mlkem_ek`. When the partner
+//! is post-quantum capable (their signed `MemberAnnounce` carries an ML-KEM
+//! encapsulation key), the caller passes `Some(ek)`, which mixes a
+//! `b"huddle-sas-pqbind-v1"` domain tag plus `SHA-256(ek)` into the HKDF `info`
+//! — so the partner's *PQ capability* becomes part of the out-of-band trust
+//! anchor. A relay that strips the ML-KEM pubkey from one side's announce
+//! drives that side to derive with `None` while the other still binds with
+//! `Some(ek)`; the two SAS codes then diverge and the OOB comparison catches
+//! the silent classical downgrade. The salt (`tx_id`) and PRF (HKDF-SHA256) are
+//! unchanged — only the `info` domain tag + hash are added. With `None` (group
+//! members, pre-1.3 partners, or the classical fallback) the derivation is
+//! byte-for-byte identical to the 1.x `b"huddle-sas-v1"` transcript, so old and
+//! new peers that both lack the ek still agree.
 
 use hkdf::Hkdf;
 use rand::RngCore;
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use x25519_dalek::{PublicKey, StaticSecret};
 
 use crate::error::{HuddleError, Result};
@@ -50,6 +66,16 @@ use crate::error::{HuddleError, Result};
 /// Length of the transaction id used as HKDF salt. 16 bytes (128 bits)
 /// is plenty of unforgeability; sized to be base64-friendly.
 pub const TX_ID_LEN: usize = 16;
+
+/// HKDF `info` for the classical (no PQ binding) SAS transcript. Frozen since
+/// huddle 0.7 — kept byte-for-byte so a `partner_mlkem_ek = None` derivation
+/// stays compatible with every prior release.
+const SAS_INFO_V1: &[u8] = b"huddle-sas-v1";
+
+/// huddle 2.0: domain tag prefixed to `SHA-256(partner_mlkem_ek)` when the SAS
+/// transcript binds the partner's post-quantum (ML-KEM) capability. Distinct
+/// from [`SAS_INFO_V1`] so a bound and an unbound derivation can never collide.
+const SAS_INFO_PQBIND: &[u8] = b"huddle-sas-pqbind-v1";
 
 /// SAS code information given to both sides for OOB comparison.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,14 +129,24 @@ pub fn new_session() -> ([u8; TX_ID_LEN], StaticSecret, PublicKey) {
 /// comparison to succeed.
 ///
 /// Matches the MSC 2241 SAS *shape* (not wire-compatible — see the module
-/// doc): HKDF-SHA256 with `tx_id` as salt and `b"huddle-sas-v1"` as info,
+/// doc): HKDF-SHA256 with `tx_id` as salt and the SAS info string as info,
 /// expanded to 11 bytes. First 6 bytes → 7 6-bit chunks, rejection-sampled
 /// into 0..49 → emoji indices. Next 5 bytes → 3 13-bit chunks (+ 1000) → 3
 /// four-digit decimal groups.
+///
+/// `partner_mlkem_ek` is huddle 2.0's optional post-quantum capability binding
+/// (see the module doc). Pass `Some(ek)` with the partner's ML-KEM
+/// encapsulation key when they are PQ-capable — its `SHA-256` hash and a domain
+/// tag are folded into the HKDF `info`, anchoring "this peer is PQ-capable" into
+/// the verified SAS so a relay can't silently downgrade them to classical-only.
+/// Pass `None` for group members, pre-1.3 partners, or the classical fallback;
+/// that path is byte-for-byte identical to the 1.x derivation. Both peers must
+/// pass the *same* `ek` (or both `None`) to derive the same code.
 pub fn derive_sas_code(
     our_secret: &StaticSecret,
     their_public: &PublicKey,
     tx_id: &[u8; TX_ID_LEN],
+    partner_mlkem_ek: Option<&[u8]>,
 ) -> Result<SasCode> {
     let shared = our_secret.diffie_hellman(their_public);
     // huddle 1.1.4: reject a non-contributory (small-order) peer ephemeral.
@@ -124,10 +160,12 @@ pub fn derive_sas_code(
     }
     // HKDF over the shared secret. tx_id as salt prevents replay
     // (two SAS flows between the same pair must produce different
-    // codes); info domain-separates from any other HKDF use.
+    // codes); info domain-separates from any other HKDF use and — in
+    // huddle 2.0 — optionally binds the partner's ML-KEM capability.
     let hk = Hkdf::<Sha256>::new(Some(tx_id), shared.as_bytes());
+    let info = sas_info(partner_mlkem_ek);
     let mut okm = [0u8; 11];
-    hk.expand(b"huddle-sas-v1", &mut okm)
+    hk.expand(&info, &mut okm)
         .expect("11 bytes is well within HKDF output limit");
 
     // First 6 bytes = 48 bits. Use the high 42 bits (7 × 6) for emoji.
@@ -165,6 +203,28 @@ pub fn derive_sas_code(
         emoji_indices,
         decimal,
     })
+}
+
+/// Build the HKDF `info` for the main SAS expansion.
+///
+/// `None` reproduces the classical 1.x transcript byte-for-byte
+/// ([`SAS_INFO_V1`]). `Some(ek)` binds the partner's post-quantum capability by
+/// concatenating the [`SAS_INFO_PQBIND`] domain tag with `SHA-256(ek)`, so a
+/// bound derivation can never collide with an unbound one and stripping the
+/// ML-KEM key from one side makes the two SAS codes diverge (see the module
+/// doc). Only the `info` changes; the `tx_id` salt and the HKDF-SHA256 PRF are
+/// untouched.
+fn sas_info(partner_mlkem_ek: Option<&[u8]>) -> Vec<u8> {
+    match partner_mlkem_ek {
+        None => SAS_INFO_V1.to_vec(),
+        Some(ek) => {
+            let digest = Sha256::digest(ek);
+            let mut info = Vec::with_capacity(SAS_INFO_PQBIND.len() + digest.len());
+            info.extend_from_slice(SAS_INFO_PQBIND);
+            info.extend_from_slice(&digest);
+            info
+        }
+    }
 }
 
 /// huddle's 49-emoji subset of the Matrix MSC 2241 list, English labels.
@@ -311,8 +371,8 @@ mod tests {
         let (tx_id, alice_secret, alice_pub) = new_session();
         let (_, bob_secret, bob_pub) = new_session();
 
-        let alice_code = derive_sas_code(&alice_secret, &bob_pub, &tx_id).unwrap();
-        let bob_code = derive_sas_code(&bob_secret, &alice_pub, &tx_id).unwrap();
+        let alice_code = derive_sas_code(&alice_secret, &bob_pub, &tx_id, None).unwrap();
+        let bob_code = derive_sas_code(&bob_secret, &alice_pub, &tx_id, None).unwrap();
         assert_eq!(alice_code, bob_code);
         // Decimal shape: three 4-digit groups joined by '-', each in
         // [1000, 9191].
@@ -333,11 +393,11 @@ mod tests {
     fn different_tx_id_yields_different_code() {
         let (tx_id_a, alice_secret, _) = new_session();
         let (_, bob_secret, bob_pub) = new_session();
-        let alice_code = derive_sas_code(&alice_secret, &bob_pub, &tx_id_a).unwrap();
+        let alice_code = derive_sas_code(&alice_secret, &bob_pub, &tx_id_a, None).unwrap();
 
         let mut tx_id_b = tx_id_a;
         tx_id_b[0] ^= 0xff;
-        let alice_code_b = derive_sas_code(&alice_secret, &bob_pub, &tx_id_b).unwrap();
+        let alice_code_b = derive_sas_code(&alice_secret, &bob_pub, &tx_id_b, None).unwrap();
         let _ = bob_secret;
         assert_ne!(alice_code, alice_code_b);
     }
@@ -354,13 +414,13 @@ mod tests {
         let (_, bob_secret, bob_pub) = new_session();
         let (_, _mallory_secret, mallory_pub) = new_session();
 
-        let alice_thinks_bob = derive_sas_code(&alice_secret, &mallory_pub, &tx_id).unwrap();
-        let bob_thinks_alice = derive_sas_code(&bob_secret, &mallory_pub, &tx_id).unwrap();
+        let alice_thinks_bob = derive_sas_code(&alice_secret, &mallory_pub, &tx_id, None).unwrap();
+        let bob_thinks_alice = derive_sas_code(&bob_secret, &mallory_pub, &tx_id, None).unwrap();
         assert_ne!(alice_thinks_bob, bob_thinks_alice);
 
         // Sanity: without MITM, both sides agree.
-        let alice_real = derive_sas_code(&alice_secret, &bob_pub, &tx_id).unwrap();
-        let bob_real = derive_sas_code(&bob_secret, &alice_pub, &tx_id).unwrap();
+        let alice_real = derive_sas_code(&alice_secret, &bob_pub, &tx_id, None).unwrap();
+        let bob_real = derive_sas_code(&bob_secret, &alice_pub, &tx_id, None).unwrap();
         assert_eq!(alice_real, bob_real);
     }
 
@@ -371,7 +431,87 @@ mod tests {
         // secret. derive_sas_code must reject it rather than emit a code.
         let (tx_id, our_secret, _) = new_session();
         let zero_pub = PublicKey::from([0u8; 32]);
-        assert!(derive_sas_code(&our_secret, &zero_pub, &tx_id).is_err());
+        assert!(derive_sas_code(&our_secret, &zero_pub, &tx_id, None).is_err());
+    }
+
+    // ---- huddle 2.0: post-quantum capability binding ----
+
+    /// A stand-in 1184-byte ML-KEM-768 encapsulation key. The binding hashes
+    /// whatever bytes it is given, so the exact contents are irrelevant here —
+    /// only that both sides feed the *same* bytes.
+    fn fake_ek(fill: u8) -> Vec<u8> {
+        vec![fill; crate::crypto::pqc::MLKEM_EK_LEN]
+    }
+
+    #[test]
+    fn pq_binding_changes_the_code() {
+        // Same shared secret + tx_id, but binding the partner's ML-KEM ek must
+        // yield a different SAS code than the classical (None) derivation.
+        let (tx_id, alice_secret, _) = new_session();
+        let (_, _bob_secret, bob_pub) = new_session();
+        let ek = fake_ek(0xA5);
+
+        let classical = derive_sas_code(&alice_secret, &bob_pub, &tx_id, None).unwrap();
+        let bound = derive_sas_code(&alice_secret, &bob_pub, &tx_id, Some(&ek)).unwrap();
+        assert_ne!(
+            classical, bound,
+            "binding the ML-KEM ek must change the derived SAS code"
+        );
+    }
+
+    #[test]
+    fn both_sides_same_ek_agree() {
+        // Two honest PQ-capable peers that both bind the SAME partner ek derive
+        // the same code — the verification still succeeds end to end.
+        let (tx_id, alice_secret, alice_pub) = new_session();
+        let (_, bob_secret, bob_pub) = new_session();
+        let ek = fake_ek(0x11);
+
+        let alice = derive_sas_code(&alice_secret, &bob_pub, &tx_id, Some(&ek)).unwrap();
+        let bob = derive_sas_code(&bob_secret, &alice_pub, &tx_id, Some(&ek)).unwrap();
+        assert_eq!(alice, bob, "both sides binding the same ek must agree");
+    }
+
+    #[test]
+    fn one_side_bound_other_not_diverges() {
+        // The downgrade-detection invariant: a relay strips the ML-KEM key from
+        // one side's announce, so that side derives with None while the other
+        // still binds Some(ek). The codes diverge → OOB comparison catches it.
+        let (tx_id, alice_secret, alice_pub) = new_session();
+        let (_, bob_secret, bob_pub) = new_session();
+        let ek = fake_ek(0x77);
+
+        let alice_bound = derive_sas_code(&alice_secret, &bob_pub, &tx_id, Some(&ek)).unwrap();
+        let bob_stripped = derive_sas_code(&bob_secret, &alice_pub, &tx_id, None).unwrap();
+        assert_ne!(
+            alice_bound, bob_stripped,
+            "a stripped (None) side must not match a bound (Some) side"
+        );
+    }
+
+    #[test]
+    fn different_ek_yields_different_code() {
+        // Binding two different ML-KEM keys produces two different codes, so the
+        // hash genuinely covers the ek bytes (not just a fixed pqbind tag).
+        let (tx_id, secret, _) = new_session();
+        let (_, _b, peer_pub) = new_session();
+        let a = derive_sas_code(&secret, &peer_pub, &tx_id, Some(&fake_ek(0x01))).unwrap();
+        let b = derive_sas_code(&secret, &peer_pub, &tx_id, Some(&fake_ek(0x02))).unwrap();
+        assert_ne!(a, b, "different bound eks must yield different codes");
+    }
+
+    #[test]
+    fn classical_none_path_is_unchanged_golden() {
+        // Lock the classical (None) info to the exact frozen 1.x bytes, so a
+        // future refactor can't silently shift the wire-visible transcript and
+        // break verification against pre-2.0 peers.
+        assert_eq!(sas_info(None), b"huddle-sas-v1".to_vec());
+        // And Some(ek) is the domain tag followed by SHA-256(ek) (32 bytes).
+        let ek = fake_ek(0x5C);
+        let info = sas_info(Some(&ek));
+        assert_eq!(info.len(), SAS_INFO_PQBIND.len() + 32);
+        assert!(info.starts_with(SAS_INFO_PQBIND));
+        assert_eq!(&info[SAS_INFO_PQBIND.len()..], &Sha256::digest(&ek)[..]);
     }
 
     #[test]

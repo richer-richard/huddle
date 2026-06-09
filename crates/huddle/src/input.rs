@@ -246,6 +246,37 @@ pub enum Action {
     UpdateCheckOptInNo,
     ToggleUpdateCheck,
     DismissUpdateBanner,
+    // huddle 2.0.0 (F3): safety-number-change alarm modal
+    SafetyChangeNext,
+    SafetyChangePrev,
+    SafetyChangeConfirm,
+    SafetyChangeVerify,
+    SafetyChangeBlock,
+    // huddle 2.0.0 (F5): change master passphrase
+    OpenChangePassphrase,
+    ChangePassTypeChar(char),
+    ChangePassBackspace,
+    ChangePassNextField,
+    ChangePassConfirm,
+    // huddle 2.0.0 (F6): export identity seed phrase
+    OpenExportSeed,
+    ExportSeedToggleReveal,
+    ExportSeedTypeChar(char),
+    ExportSeedBackspace,
+    ExportSeedConfirm,
+    // huddle 2.0.0 (F9): per-room disappearing messages
+    ToggleDisappearingMessages,
+    // huddle 2.0.0 (F10): reactions / replies / edits / deletes
+    MsgSelectPrev,
+    MsgSelectNext,
+    ReactSelected,
+    ReplySelected,
+    EditSelected,
+    DeleteSelected,
+    EmojiPickerNext,
+    EmojiPickerPrev,
+    EmojiPickerConfirm,
+    ConfirmDeleteYes,
 }
 
 /// huddle 0.7.4: detect the "go dark" chord. Bare `!` (Shift+1) is too
@@ -659,6 +690,60 @@ pub fn map_key(key: KeyEvent, app: &TuiApp) -> Action {
             KeyCode::Char(c) => Action::InvitePickerFilterTypeChar(c),
             _ => Action::Nothing,
         },
+        // huddle 2.0.0 (F3): safety-number-change alarm. Tab/↑↓ cycle the two
+        // backed options (Verify / Block); v/b fire them directly; Enter
+        // activates the focused one; Esc dismisses (pin left unchanged).
+        Modal::SafetyNumberChanged(_) => match key.code {
+            KeyCode::Esc => Action::CloseModal,
+            KeyCode::Tab | KeyCode::Down | KeyCode::Char('j') => Action::SafetyChangeNext,
+            KeyCode::BackTab | KeyCode::Up | KeyCode::Char('k') => Action::SafetyChangePrev,
+            KeyCode::Char('v') | KeyCode::Char('V') => Action::SafetyChangeVerify,
+            KeyCode::Char('b') | KeyCode::Char('B') => Action::SafetyChangeBlock,
+            KeyCode::Enter => Action::SafetyChangeConfirm,
+            _ => Action::Nothing,
+        },
+        // huddle 2.0.0 (F5): change-master-passphrase modal — 3 masked fields.
+        Modal::ChangePassphrase(_) => match key.code {
+            KeyCode::Esc => Action::CloseModal,
+            KeyCode::Tab => Action::ChangePassNextField,
+            KeyCode::Enter => Action::ChangePassConfirm,
+            KeyCode::Backspace => Action::ChangePassBackspace,
+            KeyCode::Char(c) => Action::ChangePassTypeChar(c),
+            _ => Action::Nothing,
+        },
+        // huddle 2.0.0 (F6): export-seed modal. Space toggles reveal on the
+        // first step; Enter advances (Reveal → Reentry → verify → close);
+        // typing feeds the re-entry field.
+        Modal::ExportSeed(_) => match key.code {
+            KeyCode::Esc => Action::CloseModal,
+            KeyCode::Enter => Action::ExportSeedConfirm,
+            KeyCode::Char(' ') => {
+                // Space toggles reveal on the Reveal step, otherwise it's a
+                // literal space in the re-entry field.
+                if let Modal::ExportSeed(s) = &app.modal {
+                    if matches!(s.step, crate::app::ExportStep::Reveal) {
+                        return Action::ExportSeedToggleReveal;
+                    }
+                }
+                Action::ExportSeedTypeChar(' ')
+            }
+            KeyCode::Backspace => Action::ExportSeedBackspace,
+            KeyCode::Char(c) => Action::ExportSeedTypeChar(c),
+            _ => Action::Nothing,
+        },
+        // huddle 2.0.0 (F10): emoji picker for reactions.
+        Modal::EmojiPicker(_) => match key.code {
+            KeyCode::Esc => Action::CloseModal,
+            KeyCode::Enter | KeyCode::Char(' ') => Action::EmojiPickerConfirm,
+            KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => Action::EmojiPickerNext,
+            KeyCode::Left | KeyCode::Char('h') | KeyCode::BackTab => Action::EmojiPickerPrev,
+            _ => Action::Nothing,
+        },
+        // huddle 2.0.0 (F10): delete-message confirmation.
+        Modal::ConfirmDelete(_) => match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => Action::ConfirmDeleteYes,
+            _ => Action::CloseModal,
+        },
         Modal::None => map_normal(key, app),
     }
 }
@@ -689,6 +774,9 @@ fn map_sidebar(key: KeyEvent, app: &TuiApp) -> Action {
             KeyCode::Char('W') => return Action::OpenWhatsNew,
             KeyCode::Char('M') => return Action::SettingsToggleMdns,
             KeyCode::Char('N') => return Action::SettingsToggleNotifications,
+            // huddle 2.0.0 (F5): change master passphrase from Settings →
+            // Account. Reachable from any Settings tab for muscle memory.
+            KeyCode::Char('P') => return Action::OpenChangePassphrase,
             // huddle 1.1.4: Dark ⇄ Light. Fires from any Settings tab (like
             // the other Settings chords) for consistent muscle memory.
             KeyCode::Char('T') => return Action::SettingsToggleTheme,
@@ -840,6 +928,10 @@ fn map_sidebar(key: KeyEvent, app: &TuiApp) -> Action {
     match key.code {
         KeyCode::Char('q') => return Action::OpenQuitConfirm,
         KeyCode::Char('s') | KeyCode::Char('g') => return Action::OpenStartRoom,
+        // huddle 2.0.0 (F6): Shift+S exports the identity as a BIP39 seed
+        // phrase (show-once + re-entry verify). Capital S so it doesn't
+        // collide with lowercase `s` = start a room.
+        KeyCode::Char('S') => return Action::OpenExportSeed,
         KeyCode::Char('m') => return Action::OpenComposeDm,
         KeyCode::Char('?') => return Action::OpenHelp,
         KeyCode::Char(':') => return Action::OpenCommandPalette,
@@ -930,6 +1022,12 @@ fn map_in_room(key: KeyEvent, app: &TuiApp) -> Action {
         return Action::TabNext;
     }
 
+    // huddle 2.0.0 (F9): F9 toggles disappearing messages for this room. A
+    // function key, so it's safe to fire even while composing.
+    if matches!(key.code, KeyCode::F(9)) {
+        return Action::ToggleDisappearingMessages;
+    }
+
     // Numeric tab jump (only if input is not active).
     if !input_active {
         if let KeyCode::Char(c @ '1'..='9') = key.code {
@@ -991,6 +1089,15 @@ fn map_in_room(key: KeyEvent, app: &TuiApp) -> Action {
             // Distinct from ^B (BackToLobby) since terminals collapse
             // Ctrl+Shift+b → Ctrl+b, making the Ctrl-chord ambiguous.
             KeyCode::Char('B') => Action::ShowRoomBans,
+            // huddle 2.0.0 (F10): conversation affordances on the selected
+            // message. `[` / `]` move the selection cursor (default = newest);
+            // r react, e edit, Shift+R reply, Delete tombstone.
+            KeyCode::Char('[') => Action::MsgSelectPrev,
+            KeyCode::Char(']') => Action::MsgSelectNext,
+            KeyCode::Char('r') => Action::ReactSelected,
+            KeyCode::Char('e') => Action::EditSelected,
+            KeyCode::Char('R') => Action::ReplySelected,
+            KeyCode::Delete => Action::DeleteSelected,
             KeyCode::Esc => Action::BackToLobby,
             _ => Action::Nothing,
         }

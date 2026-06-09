@@ -7,10 +7,12 @@ use egui::{Id, RichText, TextEdit};
 
 use crate::fmt;
 use crate::model::{
-    AcceptRotationState, AddContactState, AttachPathState, ConfirmInviteState, EditAliasState,
-    EditUsernameState, GoDarkState, InboundDialState, JoinState, JoinWithCodeState, Modal,
-    NewDmState, NewGroupState, PasteInviteState, RotateState, SasStage, SasState, SearchState,
-    SetRelayState, UiAction, VerifyState, GO_DARK_CONFIRM_PHRASE, ONBOARDING_PAGES,
+    AcceptRotationState, AddContactState, AttachPathState, ChangePassphraseState,
+    ConfirmDeleteState, ConfirmInviteState, DisappearingState, EditAliasState, EditUsernameState,
+    EmojiPickerState, ExportSeedState, ExportSeedStep, GoDarkState, InboundDialState, JoinState,
+    JoinWithCodeState, Modal, NewDmState, NewGroupState, PasteInviteState, RotateState,
+    SafetyNumberChangedState, SasStage, SasState, SearchState, SetRelayState, UiAction, VerifyState,
+    DISAPPEARING_OPTIONS, GO_DARK_CONFIRM_PHRASE, ONBOARDING_PAGES, REACTION_EMOJIS,
 };
 use crate::theme::palette;
 
@@ -45,8 +47,328 @@ pub fn render(ctx: &egui::Context, modal: &mut Modal, our_id: &str, actions: &mu
         Modal::Onboarding { cursor } => onboarding(ctx, *cursor, actions),
         Modal::UpdateOptIn => update_opt_in(ctx, actions),
         Modal::QuitConfirm => quit_confirm(ctx, actions),
+        Modal::ChangePassphrase(s) => change_passphrase(ctx, s, actions),
+        Modal::ExportSeed(s) => export_seed(ctx, s, actions),
+        Modal::SafetyNumberChanged(s) => safety_number_changed(ctx, s, actions),
+        Modal::Disappearing(s) => disappearing(ctx, s, actions),
+        Modal::EmojiPicker(s) => emoji_picker(ctx, s, actions),
+        Modal::ConfirmDelete(s) => confirm_delete(ctx, s, actions),
         Modal::Error(m) => message(ctx, "error", m, palette().error, actions),
         Modal::Info(m) => message(ctx, "huddle", m, palette().text, actions),
+    }
+}
+
+/// huddle 2.0.0 (F5): change the master passphrase. Validates locally (non-empty
+/// + new == confirm); the core verifies the current passphrase and re-keys the
+/// DB. A wrong-current-passphrase error comes back tagged and lands in `s.error`.
+fn change_passphrase(
+    ctx: &egui::Context,
+    s: &mut ChangePassphraseState,
+    actions: &mut Vec<UiAction>,
+) {
+    let resp = egui::Modal::new(Id::new("modal-change-passphrase")).show(ctx, |ui| {
+        ui.set_width(420.0);
+        ui.heading("Change master passphrase");
+        ui.label(
+            RichText::new(
+                "re-encrypts your local database under a new key. There is no recovery if \
+                 you forget the new passphrase — keep a backup before changing it.",
+            )
+            .small()
+            .color(palette().text_dim),
+        );
+        ui.add_space(10.0);
+        ui.label("current passphrase");
+        ui.add(TextEdit::singleline(&mut s.current).password(true).desired_width(f32::INFINITY));
+        ui.add_space(6.0);
+        ui.label("new passphrase");
+        ui.add(TextEdit::singleline(&mut s.new).password(true).desired_width(f32::INFINITY));
+        ui.add_space(6.0);
+        ui.label("confirm new passphrase");
+        ui.add(TextEdit::singleline(&mut s.confirm).password(true).desired_width(f32::INFINITY));
+        if let Some(e) = &s.error {
+            ui.add_space(6.0);
+            ui.colored_label(palette().error, e);
+        }
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            if ui.button("Change passphrase").clicked() {
+                if s.current.is_empty() {
+                    s.error = Some("enter your current passphrase".into());
+                } else if s.new.is_empty() {
+                    s.error = Some("the new passphrase can't be empty".into());
+                } else if s.new != s.confirm {
+                    s.error = Some("the new passphrases don't match".into());
+                } else {
+                    s.error = None;
+                    actions.push(UiAction::SubmitChangePassphrase {
+                        current: s.current.clone(),
+                        new: s.new.clone(),
+                    });
+                }
+            }
+            if ui.button("Cancel").clicked() {
+                actions.push(UiAction::CloseModal);
+            }
+        });
+    });
+    if resp.should_close() {
+        actions.push(UiAction::CloseModal);
+    }
+}
+
+/// huddle 2.0.0 (F6): show the 24-word identity seed once, then make the user
+/// re-type it to prove they wrote it down before relying on it for recovery.
+fn export_seed(ctx: &egui::Context, s: &mut ExportSeedState, actions: &mut Vec<UiAction>) {
+    let resp = egui::Modal::new(Id::new("modal-export-seed")).show(ctx, |ui| {
+        ui.set_width(460.0);
+        ui.heading("Recovery seed phrase");
+        match s.step {
+            ExportSeedStep::Reveal => {
+                ui.colored_label(
+                    palette().error,
+                    "⚠ Anyone with these 24 words IS you. Write them down on paper, never \
+                     share them, and store them offline. This is shown only once.",
+                );
+                ui.add_space(10.0);
+                let body = if s.revealed {
+                    s.phrase.clone()
+                } else {
+                    "•••• •••• •••• ••••  (hidden)".to_string()
+                };
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.add(
+                        egui::Label::new(RichText::new(body).monospace().size(15.0))
+                            .wrap()
+                            .selectable(s.revealed),
+                    );
+                });
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .button(if s.revealed { "Hide" } else { "Reveal" })
+                        .clicked()
+                    {
+                        s.revealed = !s.revealed;
+                    }
+                    if s.revealed && ui.button("Copy").clicked() {
+                        actions.push(UiAction::Copy(s.phrase.clone()));
+                    }
+                    right(ui, |ui| {
+                        if ui.button("I've written it down →").clicked() {
+                            s.step = ExportSeedStep::Verify;
+                            s.revealed = false;
+                            s.error = None;
+                        }
+                    });
+                });
+            }
+            ExportSeedStep::Verify => {
+                ui.label("Re-type the full 24-word phrase to confirm your backup:");
+                ui.add_space(8.0);
+                ui.add(
+                    TextEdit::multiline(&mut s.reentry)
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(3)
+                        .hint_text("word1 word2 … word24"),
+                );
+                if let Some(e) = &s.error {
+                    ui.add_space(6.0);
+                    ui.colored_label(palette().error, e);
+                }
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Verify").clicked() {
+                        actions.push(UiAction::ExportSeedVerify {
+                            reentry: s.reentry.trim().to_string(),
+                        });
+                    }
+                    if ui.button("Back").clicked() {
+                        s.step = ExportSeedStep::Reveal;
+                        s.error = None;
+                    }
+                });
+            }
+            ExportSeedStep::Done => {
+                ui.add_space(8.0);
+                ui.colored_label(palette().success, "✓ Backup verified.");
+                ui.label(
+                    RichText::new(
+                        "store the paper somewhere safe. On a fresh install, choose \
+                         “Import existing identity” and paste these words to restore.",
+                    )
+                    .small()
+                    .color(palette().text_dim),
+                );
+                ui.add_space(12.0);
+                if ui.button("Done").clicked() {
+                    actions.push(UiAction::CloseModal);
+                }
+            }
+        }
+    });
+    if resp.should_close() {
+        actions.push(UiAction::CloseModal);
+    }
+}
+
+/// huddle 2.0.0 (F3): a pinned peer key changed mid-session (TOFU drift). The
+/// offending message was already dropped; the user re-verifies (SAS) or blocks
+/// the peer. "Dismiss" leaves the pin as-is (future messages from the new key
+/// keep getting dropped until they re-verify).
+fn safety_number_changed(
+    ctx: &egui::Context,
+    s: &SafetyNumberChangedState,
+    actions: &mut Vec<UiAction>,
+) {
+    let who = s
+        .display_name
+        .clone()
+        .unwrap_or_else(|| fmt::display_id(&s.fingerprint));
+    let resp = egui::Modal::new(Id::new("modal-safety-number")).show(ctx, |ui| {
+        ui.set_width(460.0);
+        ui.heading(RichText::new(format!("⚠ Safety number changed: {who}")).color(palette().warn));
+        ui.add_space(6.0);
+        ui.label(
+            "The identity key huddle pinned for this peer no longer matches the one signing \
+             their messages. This happens if they reinstalled or rotated their identity — \
+             but it can also be a sign of impersonation. Their last message was dropped.",
+        );
+        ui.add_space(8.0);
+        ui.label(RichText::new(format!("peer: {}", fmt::display_id(&s.fingerprint))).small().monospace().color(palette().text_dim));
+        ui.label(RichText::new(format!("old key: {}", short_key(&s.old_pubkey_b64))).small().monospace().color(palette().text_dim));
+        ui.label(RichText::new(format!("new key: {}", short_key(&s.new_pubkey_b64))).small().monospace().color(palette().text_dim));
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            if ui.button("Re-verify (SAS)").clicked() {
+                actions.push(UiAction::StartSas {
+                    room_id: s.room_id.clone(),
+                    fingerprint: s.fingerprint.clone(),
+                });
+            }
+            if ui
+                .button(RichText::new("Block peer").color(palette().error))
+                .clicked()
+            {
+                actions.push(UiAction::PersonBlock(s.fingerprint.clone()));
+                actions.push(UiAction::CloseModal);
+            }
+            right(ui, |ui| {
+                if ui.button("Dismiss").clicked() {
+                    actions.push(UiAction::CloseModal);
+                }
+            });
+        });
+    });
+    if resp.should_close() {
+        actions.push(UiAction::CloseModal);
+    }
+}
+
+/// First 10 chars of a base64 key, for a glanceable (non-authoritative) diff.
+fn short_key(b64: &str) -> String {
+    let head: String = b64.chars().take(10).collect();
+    format!("{head}…")
+}
+
+/// huddle 2.0.0 (F9): pick the room's disappearing-messages TTL. Off by default;
+/// only owners' choices propagate to other members (enforced in the core).
+fn disappearing(ctx: &egui::Context, s: &DisappearingState, actions: &mut Vec<UiAction>) {
+    let resp = egui::Modal::new(Id::new("modal-disappearing")).show(ctx, |ui| {
+        ui.set_width(360.0);
+        ui.heading("Disappearing messages");
+        ui.label(
+            RichText::new(
+                "auto-delete messages in this room after they age out — locally, on every \
+                 peer running huddle 2.0+. Best-effort (depends on each device's clock).",
+            )
+            .small()
+            .color(palette().text_dim),
+        );
+        ui.add_space(10.0);
+        for (label, ttl) in DISAPPEARING_OPTIONS {
+            let selected = s.current == *ttl;
+            if ui.selectable_label(selected, *label).clicked() && !selected {
+                actions.push(UiAction::SetDisappearing {
+                    room_id: s.room_id.clone(),
+                    ttl_secs: *ttl,
+                });
+            }
+        }
+        ui.add_space(12.0);
+        if ui.button("Cancel").clicked() {
+            actions.push(UiAction::CloseModal);
+        }
+    });
+    if resp.should_close() {
+        actions.push(UiAction::CloseModal);
+    }
+}
+
+/// huddle 2.0.0 (F10): pick an emoji to react to a message with.
+fn emoji_picker(ctx: &egui::Context, s: &EmojiPickerState, actions: &mut Vec<UiAction>) {
+    let resp = egui::Modal::new(Id::new("modal-emoji-picker")).show(ctx, |ui| {
+        ui.set_width(280.0);
+        ui.heading("React");
+        ui.add_space(8.0);
+        ui.horizontal_wrapped(|ui| {
+            for emoji in REACTION_EMOJIS {
+                if ui
+                    .button(RichText::new(*emoji).size(22.0))
+                    .clicked()
+                {
+                    actions.push(UiAction::SendReaction {
+                        room_id: s.room_id.clone(),
+                        target_msg_id: s.target_msg_id.clone(),
+                        emoji: (*emoji).to_string(),
+                        removed: false,
+                    });
+                }
+            }
+        });
+        ui.add_space(10.0);
+        if ui.button("Cancel").clicked() {
+            actions.push(UiAction::CloseModal);
+        }
+    });
+    if resp.should_close() {
+        actions.push(UiAction::CloseModal);
+    }
+}
+
+/// huddle 2.0.0 (F10): confirm a permanent (for-everyone) message delete.
+fn confirm_delete(ctx: &egui::Context, s: &ConfirmDeleteState, actions: &mut Vec<UiAction>) {
+    let resp = egui::Modal::new(Id::new("modal-confirm-delete")).show(ctx, |ui| {
+        ui.set_width(380.0);
+        ui.heading("Delete message?");
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new("This removes it for everyone in the room. It can't be undone.")
+                .small()
+                .color(palette().text_dim),
+        );
+        if !s.preview.is_empty() {
+            ui.add_space(6.0);
+            ui.label(RichText::new(format!("“{}”", s.preview)).italics().color(palette().text_dim));
+        }
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            if ui
+                .button(RichText::new("Delete").color(palette().error))
+                .clicked()
+            {
+                actions.push(UiAction::SendDelete {
+                    room_id: s.room_id.clone(),
+                    target_msg_id: s.target_msg_id.clone(),
+                });
+            }
+            if ui.button("Cancel").clicked() {
+                actions.push(UiAction::CloseModal);
+            }
+        });
+    });
+    if resp.should_close() {
+        actions.push(UiAction::CloseModal);
     }
 }
 
