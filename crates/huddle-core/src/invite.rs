@@ -197,7 +197,26 @@ pub fn decode(url: &str) -> Result<InviteLink> {
     let invite: InviteLink = serde_json::from_slice(&json)
         .map_err(|e| HuddleError::Other(format!("bad invite json: {e}")))?;
     match invite.v {
-        1 => Ok(invite),
+        1 => {
+            // huddle 1.3.4: refuse a v2/v3 → v1 downgrade. The `v` field is
+            // NOT covered by `signable_bytes`, so an attacker can flip a
+            // signed v2/v3 invite to `v=1` to skip `verify_invite_signature`
+            // / `verify_invite_freshness` entirely, then swap the relay URL,
+            // fingerprint, or room. A *genuine* legacy v1 invite predates
+            // signing and therefore carries none of the signature fields, so
+            // the presence of any of them means this is a stripped signed
+            // invite — reject it instead of accepting it unverified.
+            if invite.creator_pubkey_b64.is_some()
+                || invite.signature_b64.is_some()
+                || invite.signed_at_ms != 0
+            {
+                return Err(HuddleError::Other(
+                    "invite claims legacy v1 but carries signature fields \
+                     (possible version-downgrade attack) — refusing".into(),
+                ));
+            }
+            Ok(invite)
+        }
         // huddle 1.0: v3 adds the signed `relay_url`; it verifies identically
         // to v2 because `signable_bytes` already folds the relay in when present.
         2 | 3 => {
@@ -437,5 +456,42 @@ mod tests {
         let url = encode(&signed).unwrap();
         let err = decode(&url).unwrap_err();
         assert!(format!("{err}").contains("invite signature verify failed"));
+    }
+
+    // huddle 1.3.4: a signed v2/v3 invite flipped to v=1 must be rejected,
+    // not silently accepted unverified. The `v` field is not signature-bound,
+    // so this is the version-downgrade attack — caught by the "v1 may not
+    // carry signature fields" guard in `decode`.
+    #[test]
+    fn version_downgrade_to_v1_is_rejected() {
+        let id = Identity::generate().unwrap();
+        let mut inv = fixture();
+        inv.fingerprint = id.fingerprint().to_string();
+        inv.relay_url = Some("wss://mine.example/ws".into());
+        let mut signed = sign_invite(&id, inv).unwrap();
+        assert_eq!(signed.v, 3);
+        // Attacker flips the (unsigned) version field and swaps the relay.
+        signed.v = 1;
+        signed.relay_url = Some("wss://attacker.example/ws".into());
+        let url = encode(&signed).unwrap();
+        let err = decode(&url).unwrap_err();
+        assert!(
+            format!("{err}").contains("downgrade"),
+            "expected a downgrade rejection, got: {err}"
+        );
+    }
+
+    // A v2 invite downgraded to v1 (no relay) is likewise refused because it
+    // still carries the signature fields a real legacy v1 never had.
+    #[test]
+    fn v2_stripped_to_v1_is_rejected() {
+        let id = Identity::generate().unwrap();
+        let mut inv = fixture();
+        inv.fingerprint = id.fingerprint().to_string();
+        let mut signed = sign_invite(&id, inv).unwrap();
+        assert_eq!(signed.v, 2);
+        signed.v = 1;
+        let url = encode(&signed).unwrap();
+        assert!(decode(&url).is_err());
     }
 }

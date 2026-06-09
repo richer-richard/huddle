@@ -1,9 +1,26 @@
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tracing::warn;
 
 use crate::error::Result;
 use crate::storage::Db;
+
+/// huddle 1.3.4: a `COUNT(*)` security check must never silently treat a DB
+/// error (corruption, IO fault, locked page) as "0 rows", which several checks
+/// did via `.unwrap_or(0)` — making `is_member_banned` / `is_peer_blocked`
+/// fail *open* (a banned/blocked peer reported as allowed). This applies a
+/// fail-SECURE default instead and logs rather than swallowing the error.
+///
+/// `fail_secure_count` is the count to assume on error: `1` for a *deny* check
+/// (banned/blocked → treat as restricted), `0` for a *grant* check
+/// (contact/verified/trusted → treat as not-privileged).
+fn security_count(res: rusqlite::Result<i64>, check: &str, fail_secure_count: i64) -> i64 {
+    res.unwrap_or_else(|e| {
+        warn!(error = %e, check, "security-check query failed; applying fail-secure default");
+        fail_secure_count
+    })
+}
 
 // =========================================================================
 // Identity (unchanged — single row, our own Ed25519 + vodozemac account)
@@ -452,13 +469,15 @@ pub fn add_room_ban(
 
 pub fn is_member_banned(db: &Db, room_id: &str, fingerprint: &str) -> Result<bool> {
     let conn = db.lock().unwrap();
-    let count: i64 = conn
-        .query_row(
+    let count: i64 = security_count(
+        conn.query_row(
             "SELECT COUNT(*) FROM room_bans WHERE room_id = ?1 AND banned_fingerprint = ?2",
             params![room_id, fingerprint],
             |r| r.get(0),
-        )
-        .unwrap_or(0);
+        ),
+        "is_member_banned",
+        1, // deny-check: assume banned if the DB can't confirm otherwise
+    );
     Ok(count > 0)
 }
 
@@ -781,13 +800,15 @@ pub fn forget_known_peer(db: &Db, address: &str) -> Result<()> {
 /// trusted fingerprints bypass the user-prompt modal.
 pub fn is_fingerprint_trusted(db: &Db, fingerprint: &str) -> Result<bool> {
     let conn = db.lock().unwrap();
-    let count: i64 = conn
-        .query_row(
+    let count: i64 = security_count(
+        conn.query_row(
             "SELECT COUNT(*) FROM known_peers WHERE fingerprint = ?1 AND trusted = 1",
             params![fingerprint],
             |r| r.get(0),
-        )
-        .unwrap_or(0);
+        ),
+        "is_fingerprint_trusted",
+        0, // grant-check: assume NOT trusted on error
+    );
     Ok(count > 0)
 }
 
@@ -881,13 +902,15 @@ pub fn delete_contact(db: &Db, fingerprint: &str) -> Result<()> {
 
 pub fn is_contact(db: &Db, fingerprint: &str) -> Result<bool> {
     let conn = db.lock().unwrap();
-    let count: i64 = conn
-        .query_row(
+    let count: i64 = security_count(
+        conn.query_row(
             "SELECT COUNT(*) FROM contacts WHERE fingerprint = ?1",
             params![fingerprint],
             |r| r.get(0),
-        )
-        .unwrap_or(0);
+        ),
+        "is_contact",
+        0, // grant-check: assume NOT a contact on error
+    );
     Ok(count > 0)
 }
 
@@ -1123,13 +1146,15 @@ pub fn add_verified_peer(db: &Db, fingerprint: &str, verified_at: i64) -> Result
 /// enforcement.
 pub fn is_globally_verified(db: &Db, fingerprint: &str) -> Result<bool> {
     let conn = db.lock().unwrap();
-    let count: i64 = conn
-        .query_row(
+    let count: i64 = security_count(
+        conn.query_row(
             "SELECT COUNT(*) FROM verified_peers WHERE fingerprint = ?1",
             params![fingerprint],
             |r| r.get(0),
-        )
-        .unwrap_or(0);
+        ),
+        "is_globally_verified",
+        0, // grant-check: assume NOT verified on error
+    );
     Ok(count > 0)
 }
 
@@ -1192,13 +1217,15 @@ pub fn set_update_check_enabled(db: &Db, enabled: bool) -> Result<()> {
 
 pub fn is_peer_blocked(db: &Db, fingerprint: &str) -> Result<bool> {
     let conn = db.lock().unwrap();
-    let count: i64 = conn
-        .query_row(
+    let count: i64 = security_count(
+        conn.query_row(
             "SELECT COUNT(*) FROM blocked_peers WHERE fingerprint = ?1",
             params![fingerprint],
             |r| r.get(0),
-        )
-        .unwrap_or(0);
+        ),
+        "is_peer_blocked",
+        1, // deny-check: assume blocked if the DB can't confirm otherwise
+    );
     Ok(count > 0)
 }
 
@@ -1443,15 +1470,26 @@ pub fn get_attachment(db: &Db, room_id: &str, file_id: &str) -> Result<Option<St
 }
 
 pub fn list_room_attachments(db: &Db, room_id: &str) -> Result<Vec<StoredAttachment>> {
+    // huddle 1.3.4: bound the result set. With no LIMIT a single room member
+    // could create tens of thousands of `FileOffer`s and OOM a peer that opens
+    // the room (this loads every row into memory). Return the most recent
+    // MAX_ATTACHMENTS_PER_ROOM, still in ascending (display) order.
+    const MAX_ATTACHMENTS_PER_ROOM: i64 = 2000;
     let conn = db.lock().unwrap();
     let mut stmt = conn.prepare(
         "SELECT id, room_id, message_id, sender_fingerprint, file_id, name, mime,
                 size_bytes, status, cache_path, saved_path, error,
                 encrypted, wrapped_key, nonce, megolm_session_id, created_at,
                 content_hash
-         FROM room_attachments WHERE room_id = ?1 ORDER BY created_at ASC",
+         FROM (
+             SELECT * FROM room_attachments WHERE room_id = ?1
+             ORDER BY created_at DESC LIMIT ?2
+         ) ORDER BY created_at ASC",
     )?;
-    let rows = stmt.query_map(params![room_id], row_to_attachment)?;
+    let rows = stmt.query_map(
+        params![room_id, MAX_ATTACHMENTS_PER_ROOM],
+        row_to_attachment,
+    )?;
     Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
 }
 

@@ -1141,6 +1141,23 @@ pub struct JoinRoomState {
 const TYPING_DEBOUNCE: Duration = Duration::from_millis(800);
 
 /// A room we're currently in (a tab in the in-room view).
+/// huddle 1.3.4: cap on messages retained in an open room's in-memory buffer.
+/// A room loads ~200 from the DB on open, then every received/sent message was
+/// pushed without bound — a peer spamming a busy room would grow this Vec
+/// indefinitely on the client. When the cap is exceeded the oldest are dropped
+/// (history still lives in the DB / is scrollable via re-open); generous enough
+/// for normal scrollback.
+const OPEN_ROOM_MSG_CAP: usize = 2000;
+
+/// Push a message and drop the oldest if the buffer exceeds [`OPEN_ROOM_MSG_CAP`].
+fn push_capped(messages: &mut Vec<StoredRoomMessage>, m: StoredRoomMessage) {
+    messages.push(m);
+    if messages.len() > OPEN_ROOM_MSG_CAP {
+        let excess = messages.len() - OPEN_ROOM_MSG_CAP;
+        messages.drain(0..excess);
+    }
+}
+
 pub struct OpenRoom {
     pub room_id: String,
     pub name: String,
@@ -1687,14 +1704,17 @@ impl TuiApp {
                 let sender_for_notify = sender_fingerprint.clone();
                 let body_for_notify = body.clone();
                 if let Some(r) = self.open_room_mut(&room_id) {
-                    r.messages.push(StoredRoomMessage {
-                        id: 0,
-                        room_id: room_id.clone(),
-                        sender_fingerprint,
-                        direction: "in".into(),
-                        body,
-                        sent_at,
-                    });
+                    push_capped(
+                        &mut r.messages,
+                        StoredRoomMessage {
+                            id: 0,
+                            room_id: room_id.clone(),
+                            sender_fingerprint,
+                            direction: "in".into(),
+                            body,
+                            sent_at,
+                        },
+                    );
                 }
                 if !is_active {
                     let count = self.unread.entry(room_id.clone()).or_insert(0);
@@ -1753,14 +1773,17 @@ impl TuiApp {
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap()
                         .as_secs() as i64;
-                    r.messages.push(StoredRoomMessage {
-                        id: message_id,
-                        room_id: room_id.clone(),
-                        sender_fingerprint: self.handle.fingerprint().to_string(),
-                        direction: "out".into(),
-                        body,
-                        sent_at: now,
-                    });
+                    push_capped(
+                        &mut r.messages,
+                        StoredRoomMessage {
+                            id: message_id,
+                            room_id: room_id.clone(),
+                            sender_fingerprint: self.handle.fingerprint().to_string(),
+                            direction: "out".into(),
+                            body,
+                            sent_at: now,
+                        },
+                    );
                 }
             }
             AppEvent::ListeningOn { address } => {

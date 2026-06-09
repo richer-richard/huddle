@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::Instant;
 
 use sha2::{Digest, Sha256};
 
@@ -41,6 +42,31 @@ pub const CHUNK_SIZE: usize = 128 * 1024;
 /// NOTE: the RECEIVER enforces its own cap, so a >1 MiB file only lands if both
 /// peers are ≥1.2.5.
 pub const MAX_FILE_SIZE: u64 = 50 * 1024 * 1024;
+
+/// huddle 1.3.4: cap on concurrent *incomplete* inbound transfers. Each
+/// distinct `file_id` an attacker streams a partial transfer for would
+/// otherwise pin an `IncomingTransfer` in the reassembly map forever (no TTL,
+/// no GC). Beyond this many, the least-recently-active transfer is evicted to
+/// make room, so the map size is bounded regardless of how many file_ids a
+/// hostile peer invents.
+const MAX_CONCURRENT_INCOMING: usize = 32;
+
+/// huddle 1.3.4: hard ceiling on the total bytes buffered across ALL
+/// incomplete transfers. The per-transfer cap is `MAX_FILE_SIZE` (50 MiB), so
+/// without this a full `MAX_CONCURRENT_INCOMING` of near-complete transfers
+/// could pin 32 × 50 MiB = 1.6 GiB. A chunk that would push the global total
+/// past this drops its (over-budget) transfer instead, keeping
+/// `sum(bytes_received) <= MAX_TOTAL_INCOMING_BYTES` as a hard invariant.
+const MAX_TOTAL_INCOMING_BYTES: u64 = 256 * 1024 * 1024;
+
+/// huddle 1.3.4: a `file_id` is the lowercase-hex SHA-256 of the file bytes —
+/// exactly 64 hex characters. Anything else (path separators, `..`, NUL, wrong
+/// length) is malicious or corrupt and must NEVER be joined onto the cache dir,
+/// or it escapes into an arbitrary filesystem path (read-amplification /
+/// traversal via an unauthenticated `FileChunk`/offer). Reject up front.
+fn is_valid_file_id(file_id: &str) -> bool {
+    file_id.len() == 64 && file_id.bytes().all(|b| b.is_ascii_hexdigit())
+}
 
 /// What `prepare_outgoing` hands back: enough to drive a sequence of
 /// FileOffer + N FileChunk gossipsub messages.
@@ -70,6 +96,9 @@ struct IncomingTransfer {
     expected_size: u64,
     chunks: HashMap<u32, Vec<u8>>,
     bytes_received: u64,
+    /// huddle 1.3.4: last time a chunk was accepted for this transfer. Drives
+    /// least-recently-active eviction so the reassembly map stays bounded.
+    last_activity: Instant,
 }
 
 pub struct FileManager {
@@ -99,6 +128,12 @@ impl FileManager {
 
     /// Read a previously-completed transfer's bytes from cache.
     pub fn read_cache(&self, file_id: &str) -> Result<Vec<u8>> {
+        if !is_valid_file_id(file_id) {
+            return Err(HuddleError::Other(
+                "read_cache: file_id is not a 64-char hex digest (rejected to \
+                 prevent path traversal)".into(),
+            ));
+        }
         let path = self.cache_path(file_id);
         Ok(fs::read(&path)?)
     }
@@ -166,6 +201,15 @@ impl FileManager {
         data: Vec<u8>,
         expected_size: u64,
     ) -> Result<Option<CompletedFile>> {
+        // huddle 1.3.4: validate the (attacker-controlled) file_id BEFORE it is
+        // ever turned into a filesystem path below, so `../../…` can't escape
+        // the cache dir into an arbitrary-file read.
+        if !is_valid_file_id(file_id) {
+            return Err(HuddleError::Other(
+                "FileChunk: file_id is not a 64-char hex digest (rejected to \
+                 prevent path traversal)".into(),
+            ));
+        }
         if expected_size > MAX_FILE_SIZE {
             return Err(HuddleError::Other(format!(
                 "incoming size {} exceeds Phase 2 cap",
@@ -214,51 +258,95 @@ impl FileManager {
         }
 
         let mut map = self.incoming.lock().unwrap();
-        let entry = map.entry(file_id.to_string()).or_insert(IncomingTransfer {
-            expected_total: total_chunks,
-            expected_size,
-            chunks: HashMap::new(),
-            bytes_received: 0,
-        });
-        if entry.expected_total != total_chunks {
+
+        // huddle 1.3.4: bound the number of concurrent *incomplete* transfers.
+        // A hostile peer can stream one chunk each for thousands of distinct
+        // file_ids; without this each would pin an entry forever. When a new
+        // file_id arrives at the cap, evict the least-recently-active transfer.
+        if !map.contains_key(file_id) {
+            while map.len() >= MAX_CONCURRENT_INCOMING {
+                match lru_incoming_key(&map) {
+                    Some(victim) => {
+                        map.remove(&victim);
+                    }
+                    None => break,
+                }
+            }
+            map.insert(
+                file_id.to_string(),
+                IncomingTransfer {
+                    expected_total: total_chunks,
+                    expected_size,
+                    chunks: HashMap::new(),
+                    bytes_received: 0,
+                    last_activity: Instant::now(),
+                },
+            );
+        }
+
+        if map.get(file_id).map(|e| e.expected_total) != Some(total_chunks) {
             return Err(HuddleError::Other(
                 "chunk total disagrees with prior chunks".into(),
             ));
         }
-        if !entry.chunks.contains_key(&chunk_index) {
-            let new_total = entry.bytes_received.saturating_add(data.len() as u64);
-            let ceiling = entry.expected_size.saturating_add(1024);
+
+        let already_have = map
+            .get(file_id)
+            .map(|e| e.chunks.contains_key(&chunk_index))
+            .unwrap_or(false);
+        if !already_have {
+            let (new_total, advertised) = {
+                let e = map.get(file_id).expect("entry present");
+                (
+                    e.bytes_received.saturating_add(data.len() as u64),
+                    e.expected_size,
+                )
+            };
             // expected_size acts as the running ceiling. Some senders'
-            // expected_size may be slightly off because of encryption
-            // overhead (Megolm ciphertext > plaintext); allow a 1KiB
-            // grace before rejecting outright.
-            if new_total > ceiling {
-                let advertised = entry.expected_size;
-                // Drop the whole transfer — we've overshot the advertised
-                // size which means either the peer is malicious or the
-                // file changed mid-stream. The mutable borrow on `entry`
-                // dies here so `map.remove` can take the second mut
-                // borrow cleanly.
-                let _ = entry; // make the implicit borrow explicit-end
+            // expected_size may be slightly off because of encryption overhead
+            // (Megolm ciphertext > plaintext); allow a 1 KiB grace before
+            // dropping the whole transfer (malicious peer or file changed
+            // mid-stream).
+            if new_total > advertised.saturating_add(1024) {
                 map.remove(file_id);
                 return Err(HuddleError::Other(format!(
                     "FileChunk: bytes_received {} would exceed expected_size {}",
                     new_total, advertised
                 )));
             }
-            entry.bytes_received = new_total;
-            entry.chunks.insert(chunk_index, data);
+            // huddle 1.3.4: global memory budget across ALL incomplete
+            // transfers. Sum every OTHER transfer's buffered bytes; if adding
+            // this chunk would breach the ceiling, drop this (over-budget)
+            // transfer rather than grow past it, keeping the global sum bounded.
+            let others: u64 = map
+                .iter()
+                .filter(|(k, _)| k.as_str() != file_id)
+                .map(|(_, t)| t.bytes_received)
+                .sum();
+            if others.saturating_add(new_total) > MAX_TOTAL_INCOMING_BYTES {
+                map.remove(file_id);
+                return Err(HuddleError::Other(format!(
+                    "FileChunk: total buffered {} would exceed global cap {}",
+                    others.saturating_add(new_total),
+                    MAX_TOTAL_INCOMING_BYTES
+                )));
+            }
+            let e = map.get_mut(file_id).expect("entry present");
+            e.bytes_received = new_total;
+            e.chunks.insert(chunk_index, data);
+            e.last_activity = Instant::now();
         }
 
-        if entry.chunks.len() as u32 != entry.expected_total {
+        if map.get(file_id).map(|e| e.chunks.len() as u32) != Some(total_chunks) {
             return Ok(None);
         }
 
         // All chunks arrived — assemble and verify.
-        let total = entry.expected_total;
-        let mut assembled: Vec<u8> = Vec::with_capacity(entry.bytes_received as usize);
+        let transfer = map.get(file_id).expect("entry present and complete");
+        let total = transfer.expected_total;
+        let mut assembled: Vec<u8> = Vec::with_capacity(transfer.bytes_received as usize);
         for idx in 0..total {
-            let part = entry
+            let part = transfer
                 .chunks
                 .get(&idx)
                 .ok_or_else(|| HuddleError::Other(format!("missing chunk {idx}")))?;
@@ -328,6 +416,15 @@ impl FileManager {
 fn sha256_hex(bytes: &[u8]) -> String {
     let hash = Sha256::digest(bytes);
     hex::encode(hash)
+}
+
+/// huddle 1.3.4: the key of the least-recently-active incomplete transfer, used
+/// to evict when the reassembly map is at capacity. `None` only if the map is
+/// empty (in which case there's nothing to evict).
+fn lru_incoming_key(map: &HashMap<String, IncomingTransfer>) -> Option<String> {
+    map.iter()
+        .min_by_key(|(_, t)| t.last_activity)
+        .map(|(k, _)| k.clone())
 }
 
 fn sanitize_filename(name: &str) -> String {
@@ -542,5 +639,46 @@ mod tests {
         std::fs::write(&a, b"a").unwrap();
         let b = pick_non_colliding(&dl, "doc.txt");
         assert!(b.file_name().unwrap().to_str().unwrap().contains("doc-1"));
+    }
+
+    // huddle 1.3.4: a file_id with path-traversal must be rejected before it is
+    // turned into a filesystem path, in both accept_chunk and read_cache.
+    #[test]
+    fn file_id_path_traversal_is_rejected() {
+        assert!(is_valid_file_id(&"a".repeat(64)));
+        assert!(is_valid_file_id(&"0123456789abcdef".repeat(4)));
+        assert!(!is_valid_file_id("../../../../etc/passwd"));
+        assert!(!is_valid_file_id("..")); // too short + dots
+        assert!(!is_valid_file_id(&"a".repeat(63))); // wrong length
+        assert!(!is_valid_file_id(&"a".repeat(65)));
+        assert!(!is_valid_file_id(&format!("{}/", "a".repeat(63)))); // slash
+        assert!(!is_valid_file_id(&"g".repeat(64))); // non-hex
+
+        let (mgr, _t) = fresh_manager();
+        let err = mgr
+            .accept_chunk("../../../../etc/passwd", 0, 1, vec![1], 1)
+            .unwrap_err();
+        assert!(format!("{err}").contains("path traversal"));
+        assert!(mgr.read_cache("../../secret").is_err());
+    }
+
+    // huddle 1.3.4: the reassembly map must not grow without bound when a peer
+    // streams partial transfers for many distinct file_ids.
+    #[test]
+    fn incomplete_transfers_are_bounded() {
+        let (mgr, _t) = fresh_manager();
+        // Start far more incomplete transfers than the cap, each with a valid
+        // (but never-completed) 2-chunk file_id. Only one chunk each → none
+        // complete, so all would persist without eviction.
+        for i in 0..(MAX_CONCURRENT_INCOMING * 4) {
+            // Build a valid 64-hex id that varies per i.
+            let id = format!("{:064x}", i);
+            let _ = mgr.accept_chunk(&id, 0, 2, vec![0u8; 16], 1024);
+        }
+        let live = mgr.incoming.lock().unwrap().len();
+        assert!(
+            live <= MAX_CONCURRENT_INCOMING,
+            "incomplete-transfer map grew to {live}, cap is {MAX_CONCURRENT_INCOMING}"
+        );
     }
 }

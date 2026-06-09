@@ -30,19 +30,78 @@ pub fn keychain_salt_path() -> PathBuf {
 }
 
 /// Load the keychain salt, generating + persisting it on first launch.
+///
+/// huddle 1.3.4: this used to **silently regenerate** the salt whenever the
+/// file existed but did not read back as exactly `KEYCHAIN_SALT_LEN` bytes
+/// (and even on a non-`NotFound` read error such as a permission/IO fault).
+/// Because the salt is deterministic input to Argon2id, overwriting it
+/// derives a *different* master key and the existing SQLCipher DB becomes
+/// permanently undecryptable — surfacing only as a misleading "wrong master
+/// passphrase" later. We now regenerate **only** when the file genuinely does
+/// not exist, and otherwise refuse to clobber it, returning an actionable
+/// error so the user can restore a backup rather than lose the database.
 pub fn load_or_create_salt() -> Result<[u8; KEYCHAIN_SALT_LEN]> {
     let path = keychain_salt_path();
-    if let Ok(bytes) = fs::read(&path) {
-        if bytes.len() == KEYCHAIN_SALT_LEN {
-            let mut out = [0u8; KEYCHAIN_SALT_LEN];
-            out.copy_from_slice(&bytes);
-            return Ok(out);
+    match fs::read(&path) {
+        Ok(bytes) => match classify_existing_salt(&bytes) {
+            SaltState::Good(salt) => Ok(salt),
+            // A zero-byte file is the signature of an interrupted first-launch
+            // write (created, never filled). No key was ever derived from it,
+            // so regenerating is safe and recovers the install.
+            SaltState::EmptyRegenerable => generate_and_persist_salt(&path),
+            SaltState::Corrupt(len) => Err(HuddleError::Other(format!(
+                "keychain salt file at {} is corrupt: {len} bytes, expected {}. \
+                 Refusing to overwrite it, because regenerating the salt would \
+                 make the existing encrypted database permanently undecryptable. \
+                 Restore your backup of this file, or (only if you accept losing \
+                 the existing database) delete it and restart to begin fresh.",
+                path.display(),
+                KEYCHAIN_SALT_LEN
+            ))),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            generate_and_persist_salt(&path)
         }
+        Err(e) => Err(HuddleError::Other(format!(
+            "failed to read keychain salt at {} ({e}). Refusing to regenerate, \
+             since overwriting a present-but-unreadable salt would brick the \
+             existing encrypted database. Fix the file's permissions/IO and retry.",
+            path.display()
+        ))),
     }
+}
+
+/// The three meaningful states of an *existing* salt file, split out as a
+/// pure function so the corrupt-vs-empty-vs-good decision is unit-testable.
+#[derive(Debug, PartialEq, Eq)]
+enum SaltState {
+    /// Correct length — use it verbatim.
+    Good([u8; KEYCHAIN_SALT_LEN]),
+    /// Zero-length (interrupted first write) — safe to regenerate.
+    EmptyRegenerable,
+    /// Present but wrong length — must NOT be overwritten (carries the length).
+    Corrupt(usize),
+}
+
+fn classify_existing_salt(bytes: &[u8]) -> SaltState {
+    if bytes.len() == KEYCHAIN_SALT_LEN {
+        let mut out = [0u8; KEYCHAIN_SALT_LEN];
+        out.copy_from_slice(bytes);
+        SaltState::Good(out)
+    } else if bytes.is_empty() {
+        SaltState::EmptyRegenerable
+    } else {
+        SaltState::Corrupt(bytes.len())
+    }
+}
+
+/// Generate a fresh random salt and persist it. Only called when there is no
+/// usable existing salt to protect (first launch / empty file).
+fn generate_and_persist_salt(path: &PathBuf) -> Result<[u8; KEYCHAIN_SALT_LEN]> {
     config::ensure_data_dir()?;
     let mut salt = [0u8; KEYCHAIN_SALT_LEN];
     rand::thread_rng().fill_bytes(&mut salt);
-    fs::write(&path, salt).map_err(|e| HuddleError::Other(format!("write salt: {e}")))?;
+    fs::write(path, salt).map_err(|e| HuddleError::Other(format!("write salt: {e}")))?;
     Ok(salt)
 }
 
@@ -102,5 +161,21 @@ mod tests {
         let a = derive_subkey(&mk, b"megolm-persist");
         let b = derive_subkey(&mk, b"db-encryption");
         assert_ne!(a, b);
+    }
+
+    // huddle 1.3.4: corruption must be detected, never silently overwritten.
+    #[test]
+    fn classify_salt_good_empty_corrupt() {
+        let good = [7u8; KEYCHAIN_SALT_LEN];
+        assert_eq!(classify_existing_salt(&good), SaltState::Good(good));
+        assert_eq!(classify_existing_salt(&[]), SaltState::EmptyRegenerable);
+        // Truncated (8 bytes) and expanded (24 bytes) both count as corrupt.
+        assert_eq!(classify_existing_salt(&[1u8; 8]), SaltState::Corrupt(8));
+        assert_eq!(classify_existing_salt(&[1u8; 24]), SaltState::Corrupt(24));
+        // One byte short of correct is still corrupt, not "good".
+        assert_eq!(
+            classify_existing_salt(&[1u8; KEYCHAIN_SALT_LEN - 1]),
+            SaltState::Corrupt(KEYCHAIN_SALT_LEN - 1)
+        );
     }
 }

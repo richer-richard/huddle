@@ -27,6 +27,22 @@ use crate::fmt;
 const LOG_CAP: usize = 1000;
 const STATUS_TTL: std::time::Duration = std::time::Duration::from_secs(6);
 
+/// huddle 1.3.4: cap on messages retained in an open room's in-memory buffer.
+/// A room loads ~500 from the DB on open, then every received/sent message was
+/// pushed without bound — a peer spamming a busy room would grow this Vec
+/// indefinitely on the GUI client. Oldest are dropped past the cap (history
+/// stays in the DB); generous enough for normal scrollback.
+const OPEN_ROOM_MSG_CAP: usize = 2000;
+
+/// Push a message and drop the oldest if the buffer exceeds [`OPEN_ROOM_MSG_CAP`].
+fn push_capped(messages: &mut Vec<StoredRoomMessage>, m: StoredRoomMessage) {
+    messages.push(m);
+    if messages.len() > OPEN_ROOM_MSG_CAP {
+        let excess = messages.len() - OPEN_ROOM_MSG_CAP;
+        messages.drain(0..excess);
+    }
+}
+
 /// Which pane the central area renders.
 #[derive(Clone, PartialEq, Eq)]
 pub enum Pane {
@@ -846,32 +862,41 @@ fn apply_event(vm: &mut ViewModel, h: &AppHandle, ev: AppEvent) {
         AppEvent::MessageReceived { room_id, sender_fingerprint, body, sent_at } => {
             let active = vm.is_active_room(&room_id);
             if let Some(r) = vm.open_room_mut(&room_id) {
-                r.messages.push(StoredRoomMessage {
-                    id: 0,
-                    room_id: room_id.clone(),
-                    sender_fingerprint,
-                    direction: "in".into(),
-                    body,
-                    sent_at,
-                });
+                push_capped(
+                    &mut r.messages,
+                    StoredRoomMessage {
+                        id: 0,
+                        room_id: room_id.clone(),
+                        sender_fingerprint,
+                        direction: "in".into(),
+                        body,
+                        sent_at,
+                    },
+                );
                 r.stick_to_bottom = true;
             }
             if !active {
-                *vm.unread.entry(room_id).or_insert(0) += 1;
+                // huddle 1.3.4: saturating, matching the TUI — never panic/wrap
+                // the unread counter on overflow.
+                let c = vm.unread.entry(room_id).or_insert(0);
+                *c = c.saturating_add(1);
             }
         }
         AppEvent::MessageSent { room_id, body, message_id } => {
             let me = vm.our_fp.clone();
             let now = now_unix();
             if let Some(r) = vm.open_room_mut(&room_id) {
-                r.messages.push(StoredRoomMessage {
-                    id: message_id,
-                    room_id,
-                    sender_fingerprint: me,
-                    direction: "out".into(),
-                    body,
-                    sent_at: now,
-                });
+                push_capped(
+                    &mut r.messages,
+                    StoredRoomMessage {
+                        id: message_id,
+                        room_id,
+                        sender_fingerprint: me,
+                        direction: "out".into(),
+                        body,
+                        sent_at: now,
+                    },
+                );
                 r.stick_to_bottom = true;
             }
         }

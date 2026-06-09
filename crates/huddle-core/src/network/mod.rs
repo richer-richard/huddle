@@ -4,7 +4,7 @@ pub mod protocol;
 pub mod server;
 pub mod transport;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -315,6 +315,37 @@ enum PendingPeer {
     InboundUnknown { address: Multiaddr },
 }
 
+/// huddle 1.3.4: a FIFO-bounded set of peer ids. `session_blocklist` used to
+/// be an unbounded `HashSet` that was only ever inserted into (never evicted),
+/// so a peer churning fresh Ed25519 identities through rejected inbound dials
+/// could grow it without limit. This caps the set and evicts the
+/// oldest-inserted id once the cap is reached — still cheap O(1) membership for
+/// the hot inbound-connection check.
+#[derive(Default)]
+struct BoundedPeerSet {
+    order: VecDeque<PeerId>,
+    set: HashSet<PeerId>,
+}
+
+impl BoundedPeerSet {
+    const CAP: usize = 4096;
+
+    fn insert(&mut self, peer: PeerId) {
+        if self.set.insert(peer) {
+            self.order.push_back(peer);
+            if self.order.len() > Self::CAP {
+                if let Some(old) = self.order.pop_front() {
+                    self.set.remove(&old);
+                }
+            }
+        }
+    }
+
+    fn contains(&self, peer: &PeerId) -> bool {
+        self.set.contains(peer)
+    }
+}
+
 struct NetworkTask {
     swarm: Swarm<HuddleBehavior>,
     cmd_rx: mpsc::Receiver<NetworkCommand>,
@@ -335,7 +366,7 @@ struct NetworkTask {
     /// Persistent across runs via `blocked_peers`; this in-memory copy
     /// is loaded at startup (TODO: not yet wired; falls back to the DB
     /// check in the app layer for now) and updated on `RejectInbound`.
-    session_blocklist: HashSet<PeerId>,
+    session_blocklist: BoundedPeerSet,
     /// Phase D: configured relay multiaddrs. When Identify lands for a
     /// peer whose multiaddr matches one of these, we call
     /// `listen_on("<addr>/p2p-circuit")` to register a reservation.
@@ -343,7 +374,14 @@ struct NetworkTask {
     /// until Identify) plus a set of peer_ids of confirmed relays so
     /// we only register once per relay.
     configured_relays: Vec<Multiaddr>,
-    relay_peer_ids: HashSet<PeerId>,
+    /// huddle 1.3.4: maps a confirmed relay's PeerId to the multiaddr we
+    /// actually reached it at. Previously a `HashSet<PeerId>`, which forced the
+    /// Identify handler to re-derive the address from `configured_relays` — and
+    /// that lookup silently failed for a relay configured without a `/p2p/`
+    /// suffix (the `dial_attempts` fallback was already cleared by then), so the
+    /// `/p2p-circuit` reservation was never registered. Carrying the address
+    /// here removes the fragile re-match entirely.
+    relay_peer_ids: HashMap<PeerId, Multiaddr>,
     /// huddle 0.7.11: per-peer DCUtR failure counter. Logged at warn
     /// once the count crosses `DCUTR_FAIL_BUDGET` so symmetric-NAT
     /// pairs don't generate runaway hole-punch attempts in the logs.
@@ -511,9 +549,9 @@ pub fn start_network_with(
         discovered_peers: HashSet::new(),
         dial_attempts: HashMap::new(),
         pending_inbound: HashMap::new(),
-        session_blocklist: HashSet::new(),
+        session_blocklist: BoundedPeerSet::default(),
         configured_relays: relays.clone(),
-        relay_peer_ids: HashSet::new(),
+        relay_peer_ids: HashMap::new(),
         dcutr_failures: HashMap::new(),
     };
     // Phase D: dial each configured relay so Identify can complete and
@@ -599,7 +637,10 @@ impl NetworkTask {
                     let is_relay = self.configured_relays.iter().any(|r| r == &addr);
                     if is_relay {
                         info!(%peer_id, %addr, "connected to configured relay");
-                        self.relay_peer_ids.insert(peer_id);
+                        // huddle 1.3.4: remember the exact address we reached
+                        // the relay at, so Identify can register the circuit
+                        // without re-matching against `configured_relays`.
+                        self.relay_peer_ids.insert(peer_id, addr.clone());
                     } else {
                         info!(%peer_id, %addr, "user-dialed peer connected");
                         // Treat dialed peers like mDNS-discovered: add
@@ -751,24 +792,17 @@ impl NetworkTask {
                 // a `/p2p-circuit` reservation on first identify. Idem-
                 // potent — only fire if we haven't listened on this
                 // relay already (identify fires periodically).
-                if self.relay_peer_ids.contains(&peer_id) {
+                // huddle 1.3.4: resolve the relay's address directly from the
+                // PeerId→addr map recorded at ConnectionEstablished, instead of
+                // re-matching against `configured_relays` (which failed for a
+                // relay configured without a `/p2p/<peer-id>` suffix, leaving
+                // the circuit reservation unregistered).
+                if let Some(relay_addr) = self.relay_peer_ids.get(&peer_id).cloned() {
                     use libp2p::multiaddr::Protocol;
-                    if let Some(relay_addr) = self
-                        .configured_relays
-                        .iter()
-                        .find(|a| {
-                            // Match by /p2p/<peer-id> suffix when
-                            // present, else by the addr we dialed.
-                            a.iter().any(|p| matches!(p, Protocol::P2p(pid) if pid == peer_id))
-                                || self.dial_attempts.values().any(|d| d == *a)
-                        })
-                        .cloned()
-                    {
-                        let circuit = relay_addr.with(Protocol::P2pCircuit);
-                        match self.swarm.listen_on(circuit.clone()) {
-                            Ok(_) => info!(%circuit, "listening on relay circuit"),
-                            Err(e) => warn!(%e, %circuit, "relay listen_on failed"),
-                        }
+                    let circuit = relay_addr.with(Protocol::P2pCircuit);
+                    match self.swarm.listen_on(circuit.clone()) {
+                        Ok(_) => info!(%circuit, "listening on relay circuit"),
+                        Err(e) => warn!(%e, %circuit, "relay listen_on failed"),
                     }
                 }
                 // Decode the remote's Ed25519 pubkey and derive our

@@ -3485,6 +3485,12 @@ impl AppHandle {
                     let now_ms = now_unix_ms();
                     let should_send = {
                         let mut last = self.last_profile_broadcast_at_ms.lock().unwrap();
+                        // huddle 1.3.4: evict entries older than the rebroadcast
+                        // floor so this map can't grow without bound as distinct
+                        // peer fingerprints churn through (e.g. an attacker
+                        // cycling Ed25519 identities). Anything older than the
+                        // floor would re-broadcast anyway, so dropping it is free.
+                        last.retain(|_fp, t| now_ms - *t < PROFILE_REBROADCAST_FLOOR_MS);
                         match last.get(&fingerprint) {
                             Some(prev) if now_ms - prev < PROFILE_REBROADCAST_FLOOR_MS => false,
                             _ => {
@@ -3897,6 +3903,11 @@ impl AppHandle {
                             let now = now_unix();
                             let due = {
                                 let mut cd = self.key_request_cooldown.lock().unwrap();
+                                // huddle 1.3.4: evict entries older than the
+                                // cooldown so this map stays bounded as room ids
+                                // churn; anything older than the window is "due"
+                                // anyway, so dropping it changes no behavior.
+                                cd.retain(|_room, t| now - *t < KEY_REQUEST_COOLDOWN_SECS);
                                 let last = cd.get(room_id).copied().unwrap_or(0);
                                 if now - last >= KEY_REQUEST_COOLDOWN_SECS {
                                     cd.insert(room_id.to_string(), now);
@@ -4053,6 +4064,11 @@ impl AppHandle {
                             let now = now_unix();
                             let due = {
                                 let mut cd = self.key_request_cooldown.lock().unwrap();
+                                // huddle 1.3.4: evict entries older than the
+                                // cooldown so this map stays bounded as room ids
+                                // churn; anything older than the window is "due"
+                                // anyway, so dropping it changes no behavior.
+                                cd.retain(|_room, t| now - *t < KEY_REQUEST_COOLDOWN_SECS);
                                 let last = cd.get(room_id).copied().unwrap_or(0);
                                 if now - last >= KEY_REQUEST_COOLDOWN_SECS {
                                     cd.insert(room_id.to_string(), now);
@@ -5661,6 +5677,20 @@ impl AppHandle {
             let flow = flows
                 .get_mut(tx_id)
                 .ok_or_else(|| HuddleError::Other("unknown SAS tx_id".into()))?;
+            // huddle 1.3.4: never confirm a SAS before the code has actually
+            // been derived from the partner's ephemeral key. The initiator's
+            // flow starts with `sas_code = None` and only gets a code once the
+            // SasResponse arrives; an alternate codepath (e.g. a TUI keypress
+            // not gated on the handshake stage) could otherwise send
+            // SasConfirm{matched:true} while `sas_code` is still None — i.e. the
+            // user confirmed a match they never saw, defeating the whole
+            // out-of-band-comparison MITM defense.
+            if flow.sas_code.is_none() {
+                return Err(HuddleError::Other(
+                    "SAS code not computed yet — wait for the partner's response \
+                     before confirming a match".into(),
+                ));
+            }
             flow.our_confirmed = true;
             // huddle 0.7.11: latch finalize so the inbound SasConfirm
             // handler won't fire `finish_sas` a second time. See

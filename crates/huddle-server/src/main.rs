@@ -35,10 +35,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, Semaphore};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::WebSocketStream;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// huddle 1.1.4: must match `huddle_core::identity::RELAY_AUTH_DOMAIN`.
 const RELAY_AUTH_DOMAIN: &[u8] = b"huddle-relay-auth-v1";
@@ -76,6 +76,18 @@ const MAX_MSG_ID_LEN: usize = 256;
 /// Keep at most this many queued messages per offline recipient.
 const MAX_MAILBOX_PER_FP: usize = 500;
 const MAX_ROOMS_PER_HELLO: usize = 1000;
+/// huddle 1.3.4: cap concurrent sockets a single authenticated fingerprint may
+/// register. Each registered connection is a target in the per-room publish
+/// fan-out (one `ServerMsg` clone + `try_send` apiece), so an identity opening
+/// thousands of sockets turns every message into O(N) work + N×payload
+/// allocations. A handful of devices is plenty; reject beyond this.
+const MAX_CONNECTIONS_PER_FP: usize = 16;
+/// huddle 1.3.4: global ceiling on concurrent accepted connections. The accept
+/// loop previously spawned a handler per socket with no bound, so an attacker
+/// could exhaust memory/FDs with idle connections (and the per-fingerprint cap
+/// above only limits *registered* sockets, not pre-auth ones). A permit is held
+/// for each connection's lifetime; new connections beyond this are dropped.
+const MAX_TOTAL_CONNECTIONS: usize = 4096;
 
 // ---- wire protocol (server level — cleartext routing only) ----
 
@@ -252,10 +264,26 @@ async fn main() -> Result<()> {
     let listener = TcpListener::bind(&bind).await?;
     info!(%bind, db = %db_path, "huddle-server listening (WebSocket + /health)");
 
+    // huddle 1.3.4: bound the number of concurrent connections. A permit is
+    // acquired per accepted socket and released when its handler returns.
+    let conn_limit = Arc::new(Semaphore::new(MAX_TOTAL_CONNECTIONS));
     loop {
         let (stream, _peer) = listener.accept().await?;
+        let permit = match conn_limit.clone().try_acquire_owned() {
+            Ok(p) => p,
+            Err(_) => {
+                warn!(
+                    cap = MAX_TOTAL_CONNECTIONS,
+                    "connection limit reached — dropping new connection"
+                );
+                drop(stream);
+                continue;
+            }
+        };
         let shared = shared.clone();
         tokio::spawn(async move {
+            // Hold the permit for the whole connection lifetime.
+            let _permit = permit;
             if let Err(e) = handle_conn(stream, shared).await {
                 debug!(error = %e, "connection ended");
             }
@@ -517,13 +545,29 @@ async fn handle_client_msg(
             // proved (and drain that identity's mailbox). A re-Hello may only
             // re-assert room memberships.
             let fp = require_fp(fingerprint)?;
-            {
+            // huddle 1.3.4: enforce a per-identity connection cap so one
+            // fingerprint can't register thousands of sockets and turn every
+            // room publish into an O(N)-clone fan-out amplification.
+            let registered = {
                 let mut conns = shared.conns.lock().await;
                 let entry = conns.entry(fp.clone()).or_default();
-                // Don't register the same socket twice on a repeat Hello.
-                if !entry.iter().any(|s| s.same_channel(tx)) {
+                if entry.iter().any(|s| s.same_channel(tx)) {
+                    // Repeat Hello on an already-registered socket — fine.
+                    true
+                } else if entry.len() >= MAX_CONNECTIONS_PER_FP {
+                    false
+                } else {
                     entry.push(tx.clone());
+                    true
                 }
+            };
+            if !registered {
+                let _ = tx
+                    .send(ServerMsg::Error {
+                        message: "too many concurrent connections for this identity".into(),
+                    })
+                    .await;
+                bail!("per-fingerprint connection limit ({MAX_CONNECTIONS_PER_FP}) exceeded");
             }
             {
                 let db = shared.db.lock().await;

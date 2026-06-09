@@ -28,6 +28,38 @@ use tracing::warn;
 use crate::error::{HuddleError, Result};
 use crate::identity::{relay_auth_msg, Identity};
 
+/// huddle 1.3.4: WebSocket frame/message ceiling for the relay **client**.
+/// The relay was hardened in 1.3.1 to cap inbound frames at 512 KiB, but the
+/// client connecting *to* a relay used tungstenite's 64 MiB default, so a
+/// malicious (or compromised) relay could blast 64 MiB frames at it. Mirror
+/// the server's 512 KiB ceiling so the WS layer is the real per-frame bound.
+const RELAY_WS_FRAME_CAP: usize = 512 * 1024;
+
+/// huddle 1.3.4: post-parse guard on a `ServerMsg::Message` payload, matching
+/// the relay's own `MAX_PAYLOAD_B64`. Even under the frame cap, reject an
+/// over-large base64 blob before allocating its decoded bytes.
+const MAX_PAYLOAD_B64: usize = 256 * 1024;
+
+/// huddle 1.3.4: the relay's auth nonce is a fixed 32 bytes (~44 base64
+/// chars). Cap the accepted `nonce_b64` length generously so a hostile relay
+/// can't make us allocate/concatenate a huge "nonce" in `relay_auth_msg`.
+const MAX_NONCE_B64: usize = 256;
+
+/// huddle 1.3.4: cap on app messages buffered before the authenticated `Hello`
+/// goes out. A relay that accepts the socket but never sends its `Challenge`
+/// (the server still closes it after its 20 s pre-auth timeout) can't make the
+/// writer's pre-auth `pending` queue grow without bound in the meantime.
+const MAX_PENDING_PREAUTH: usize = 1024;
+
+/// Shared WebSocket config (frame caps) for every relay-client door.
+fn relay_ws_config() -> tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+    tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+        max_message_size: Some(RELAY_WS_FRAME_CAP),
+        max_frame_size: Some(RELAY_WS_FRAME_CAP),
+        ..Default::default()
+    }
+}
+
 /// Messages we send to the server. Mirrors `huddle-server`'s `ClientMsg`.
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -147,18 +179,23 @@ impl ServerClient {
                 let stream = tokio_socks::tcp::Socks5Stream::connect(proxy, target.as_str())
                     .await
                     .map_err(|e| HuddleError::Network(format!("tor socks connect: {e}")))?;
-                let (ws, _resp) = tokio_tungstenite::client_async(url, stream)
-                    .await
-                    .map_err(|e| HuddleError::Network(format!("ws handshake: {e}")))?;
+                let (ws, _resp) =
+                    tokio_tungstenite::client_async_with_config(url, stream, Some(relay_ws_config()))
+                        .await
+                        .map_err(|e| HuddleError::Network(format!("ws handshake: {e}")))?;
                 Ok(Self::spawn(ws, identity, rooms))
             }
             // Plain `ws://` and `wss://` with the system trust store both go
             // through `connect_async`, which negotiates TLS from the URL
             // scheme (tokio-tungstenite's rustls-tls-native-roots feature).
             DialMode::Direct | DialMode::Tls { pinned_cert_der: None } => {
-                let (ws, _resp) = tokio_tungstenite::connect_async(url)
-                    .await
-                    .map_err(|e| HuddleError::Network(format!("ws connect: {e}")))?;
+                let (ws, _resp) = tokio_tungstenite::connect_async_with_config(
+                    url,
+                    Some(relay_ws_config()),
+                    false,
+                )
+                .await
+                .map_err(|e| HuddleError::Network(format!("ws connect: {e}")))?;
                 Ok(Self::spawn(ws, identity, rooms))
             }
             // Self-signed cert pinning is structured but not wired in this
@@ -188,9 +225,10 @@ impl ServerClient {
                     .connect((host, port))
                     .await
                     .map_err(|e| HuddleError::Network(format!("arti connect: {e}")))?;
-                let (ws, _resp) = tokio_tungstenite::client_async(url, stream)
-                    .await
-                    .map_err(|e| HuddleError::Network(format!("ws handshake: {e}")))?;
+                let (ws, _resp) =
+                    tokio_tungstenite::client_async_with_config(url, stream, Some(relay_ws_config()))
+                        .await
+                        .map_err(|e| HuddleError::Network(format!("ws handshake: {e}")))?;
                 Ok(Self::spawn(ws, identity, rooms))
             }
         }
@@ -223,6 +261,17 @@ impl ServerClient {
             while let Some(msg) = out_rx.recv().await {
                 let is_hello = matches!(msg, ClientMsg::Hello { .. });
                 if !hello_sent && !is_hello {
+                    // huddle 1.3.4: bound the pre-auth backlog. If the relay
+                    // accepts the socket but never sends its Challenge (the
+                    // server still closes it after its 20 s pre-auth timeout),
+                    // this keeps `pending` from growing without limit.
+                    if pending.len() >= MAX_PENDING_PREAUTH {
+                        warn!(
+                            cap = MAX_PENDING_PREAUTH,
+                            "relay has not authenticated us yet; dropping a queued message"
+                        );
+                        continue;
+                    }
                     pending.push(msg);
                     continue;
                 }
@@ -277,6 +326,13 @@ impl ServerClient {
                 };
                 match serde_json::from_str::<ServerMsg>(&text) {
                     Ok(ServerMsg::Challenge { nonce_b64 }) => {
+                        if nonce_b64.len() > MAX_NONCE_B64 {
+                            warn!(
+                                len = nonce_b64.len(),
+                                "relay sent an oversized challenge nonce — dropping connection"
+                            );
+                            break;
+                        }
                         if let Some(tx) = hello_tx.take() {
                             match B64.decode(nonce_b64.as_bytes()) {
                                 Ok(nonce) => {
@@ -315,6 +371,13 @@ impl ServerClient {
                         });
                     }
                     Ok(ServerMsg::Message { room, id, payload_b64 }) => {
+                        if payload_b64.len() > MAX_PAYLOAD_B64 {
+                            warn!(
+                                len = payload_b64.len(),
+                                "server sent an oversized payload — dropping"
+                            );
+                            continue;
+                        }
                         match B64.decode(payload_b64.as_bytes()) {
                             Ok(payload) => {
                                 let _ = ev_tx.send(ServerEvent::Message { room, id, payload });

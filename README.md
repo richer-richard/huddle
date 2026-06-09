@@ -206,7 +206,7 @@ per-OS app directory:
 
 ```
 +----------------------------------------------------------------------+
-| huddle 1.3.3  ·  745e-fe8a-…  ·  relay ●               12:34 UTC     |
+| huddle 1.3.4  ·  745e-fe8a-…  ·  relay ●               12:34 UTC     |
 +------------------------+---------------------------------------------+
 | ▾ Profile              | # general                                   |
 |   alice  HD-AAAA-…  ●  |   4 members · encrypted                     |
@@ -651,6 +651,58 @@ native dialog for a path-entry box.
   two parties (Megolm message keys still ratchet, but the wrap key
   doesn't). Per-DM ephemeral ratchets (Double Ratchet-style) are a
   candidate follow-up.
+
+## What's new in 1.3.4 — security & DoS hardening (73-agent audit of 1.3.3)
+
+A focused hardening release on top of 1.3.3 (no wire-format change; fully
+compatible with 1.3.x and pre-1.3 peers), closing 19 issues confirmed by a
+multi-agent adversarial audit of the whole tree (each finding verified by three
+independent skeptics, then re-reviewed per file for regressions).
+
+- **Closed a critical invite version-downgrade.** The invite `v` field isn't
+  covered by the signature, so an attacker could flip a signed v2/v3 invite to
+  `v=1` — which skipped signature *and* freshness verification entirely — then
+  swap the relay URL or fingerprint. `decode` now refuses any `v=1` invite that
+  carries signature fields (a genuine legacy v1 never does).
+- **Fail-secure database security checks.** `is_member_banned` and
+  `is_peer_blocked` masked any DB error as "0 rows" (`.unwrap_or(0)`), i.e. they
+  failed **open** — a banned/blocked peer reported as allowed. Security `COUNT(*)`
+  checks now apply a fail-secure default (deny on error) and log instead of
+  silently swallowing.
+- **SAS can't be confirmed before the code exists.** `sas_match` now refuses to
+  send a match confirmation while the SAS code is still `None` (before the
+  partner's response), so no alternate codepath can confirm a comparison the
+  user never actually made.
+- **Relay-client DoS hardening.** The client connecting *to* a relay now caps
+  WebSocket frames at 512 KiB (matching the server; was tungstenite's 64 MiB
+  default), bounds the challenge-nonce and message-payload sizes before
+  decoding, and caps the pre-auth send backlog — so a malicious relay can't
+  exhaust client memory.
+- **Relay-server connection limits.** A single fingerprint may now register at
+  most 16 concurrent sockets (each is a target in the per-room publish fan-out,
+  so unlimited sockets meant O(N)-clone amplification), and a global semaphore
+  caps total concurrent connections.
+- **Bounded memory everywhere a peer controls the count.** Incomplete file
+  transfers (LRU-capped + a global byte budget), the session reject-list, the
+  per-peer profile-broadcast and per-room key-request throttle maps, attachment
+  listings, and the TUI/GUI open-room message buffers are all now bounded, so a
+  peer churning identities or spamming a room can't grow client/relay memory
+  without limit.
+- **Path-traversal guard on file transfer.** An attacker-supplied `file_id` is
+  now validated as a 64-char hex digest before it's ever joined onto the cache
+  path, closing a read-amplification/traversal vector via unauthenticated
+  `FileChunk`s.
+- **No more bricked database on a corrupt salt.** `load_or_create_salt` used to
+  silently regenerate the keychain salt whenever it read back the wrong length
+  (or on an IO error), permanently locking the existing SQLCipher DB. It now
+  refuses to overwrite a present-but-corrupt salt and returns actionable
+  recovery guidance.
+- **Relay circuit registers without a `/p2p/` suffix.** A relay configured by
+  bare address (no `/p2p/<peer-id>`) never registered its `/p2p-circuit`
+  reservation, because the address re-match failed after `dial_attempts` was
+  cleared. The reached address is now carried with the relay's PeerId, so the
+  circuit registers either way.
+- **GUI unread counter is saturating** (was a wrapping `+= 1`, matching the TUI).
 
 ## What's new in 1.3.3 — hardening follow-up (audit of 1.3.2)
 
