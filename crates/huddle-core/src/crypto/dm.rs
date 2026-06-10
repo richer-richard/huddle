@@ -161,7 +161,7 @@ pub fn derive_dm_key_hybrid_responder(
 /// an ML-KEM key on the current signed `MemberAnnounce`, the durable
 /// `room_members.mlkem_pubkey` pin, **or** the out-of-band
 /// `verified_peers.pq_capable` flag set when the peer SAS-verified with the F1
-/// capability binding (`crypto::sas::derive_sas_code(.., Some(ek))`). The
+/// capability binding (`crypto::sas::derive_sas_code` with the partner's ek). The
 /// verified-peer anchor is the strongest of the three: it survives a relay
 /// dropping both the live announce key and the pin, so a peer we once confirmed
 /// PQ-capable can never be silently re-keyed classical.

@@ -13,7 +13,7 @@ members = [
 # every release, and the documented "most error-prone manual step". Now the
 # version lives once here and every member inherits it via `version.workspace`.
 [workspace.package]
-version = "2.0.0"
+version = "2.0.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/richer-richard/huddle"
@@ -22,4 +22,4 @@ homepage = "https://github.com/richer-richard/huddle"
 # Internal path dependency, single-sourced so the version requirement bumps
 # in lockstep with `workspace.package.version`.
 [workspace.dependencies]
-huddle-core = { path = "crates/huddle-core", version = "2.0.0" }
+huddle-core = { path = "crates/huddle-core", version = "2.0.1" }

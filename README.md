@@ -209,7 +209,7 @@ per-OS app directory:
 
 ```
 +----------------------------------------------------------------------+
-| huddle 2.0.0  ·  745e-fe8a-…  ·  relay ●               12:34 UTC     |
+| huddle 2.0.1  ·  745e-fe8a-…  ·  relay ●               12:34 UTC     |
 +------------------------+---------------------------------------------+
 | ▾ Profile              | # general                                   |
 |   alice  HD-AAAA-…  ●  |   4 members · encrypted                     |
@@ -655,6 +655,21 @@ native dialog for a path-entry box.
   rotates on a schedule + on membership change), bounding the exposure
   window; the full fix — a Double Ratchet seeded from the hybrid root key —
   is sequenced in `docs/ROADMAP-2.0-and-beyond.md`.
+
+## What's new in 2.0.1 — SAS verification fix (post-quantum capability binding)
+
+A focused fix release. **2.0.0's SAS post-quantum capability binding (F1) was
+asymmetric**: each peer folded the *other* peer's ML-KEM key into the SAS
+transcript, so two post-quantum-capable peers derived **different** safety
+numbers and could never complete out-of-band verification. It failed *closed* —
+the channel was never weakened and no MITM could forge a match — but verification
+between two 2.0 peers was effectively impossible, and the `verified_peers.pq_capable`
+anchor could never be set. 2.0.1 binds **both** peers' ML-KEM keys in a canonical
+(byte-sorted) order, so honest peers again derive the same code; a genuine
+capability mismatch, or a relay stripping one side's key, still makes the codes
+diverge (downgrade detection preserved). **No wire or on-disk change** — the relay
+and SAS against 1.3.x / classical / group peers are byte-for-byte unaffected; only
+client-side SAS derivation changed.
 
 ## What's new in 2.0.0 — forward secrecy steps, recovery, and richer chat
 

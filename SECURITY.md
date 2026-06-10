@@ -1,6 +1,6 @@
 # Security
 
-This document describes huddle's security model as of **2.0.0**: what is
+This document describes huddle's security model as of **2.0.1**: what is
 protected, how, and — just as importantly — what is *not*. Read the
 "Known limitations / by-design tradeoffs" section before trusting huddle
 with anything that matters.
@@ -261,9 +261,15 @@ own careful review.
   (`verified_peers.pq_capable`, fail-secure: a DB error refuses the downgrade
   rather than allowing it), and the classical fallback is refused for that peer
   from then on. So a relay can no longer silently downgrade a peer you have
-  verified or been invited by. (Both ends must be 2.0+ for the SAS binding; a
-  capability mismatch makes the SAS codes diverge — i.e. it fails *loud*, never
-  silently weak.)
+  verified or been invited by. (Both ends must be 2.0+ for the SAS binding. The
+  binding is **symmetric** — both peers' ML-KEM keys are hashed in canonical
+  byte-sorted order — so two honest PQ-capable peers derive the *same* code,
+  while a relay stripping one side, or a genuine capability mismatch, makes the
+  codes diverge, so a downgrade fails *loud*, never silently weak. **2.0.1 fixes
+  a 2.0.0 regression** where this binding was asymmetric — each side hashed only
+  the *other* peer's key — so two PQ-capable peers always diverged and could not
+  complete SAS; the channel was never weakened, but verification was impossible
+  until both upgrade to ≥2.0.1.)
 - **Content-layer replay protection.** A durable seen-set keyed by
   `(room, sender, megolm_session_id, message_index)` drops a wire-level replay of
   an already-processed **content** message, even across a restart or a

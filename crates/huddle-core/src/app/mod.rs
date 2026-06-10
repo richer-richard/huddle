@@ -5206,10 +5206,15 @@ impl AppHandle {
                 // is then caught by the human comparison.
                 let partner_ek = self.partner_mlkem_ek_bytes(&signer);
                 let partner_pq_capable = partner_ek.is_some();
+                // huddle 2.0.0 (F1 fix): bind BOTH eks (sorted-canonical) so the
+                // two peers — who hold the keys in opposite roles — derive the
+                // same code. Gating stays on the partner's ek inside sas_info.
+                let our_ek = self.identity.mlkem_public_bytes();
                 let sas_code = match crate::crypto::sas::derive_sas_code(
                     &our_secret,
                     &their_pub,
                     &tx_id_bytes,
+                    Some(&our_ek),
                     partner_ek.as_deref(),
                 ) {
                     Ok(c) => c,
@@ -5287,6 +5292,10 @@ impl AppHandle {
                 // while the flows mutex is held).
                 let partner_ek = self.partner_mlkem_ek_bytes(&signer);
                 let partner_pq_capable = partner_ek.is_some();
+                // huddle 2.0.0 (F1 fix): our own ek, fetched outside the
+                // sas_flows lock; bound symmetrically with the partner's (see
+                // the SasInit handler).
+                let our_ek = self.identity.mlkem_public_bytes();
                 let emit = {
                     let mut flows = self.sas_flows.lock().unwrap();
                     let flow = match flows.get_mut(&tx_id) {
@@ -5307,6 +5316,7 @@ impl AppHandle {
                         &flow.our_secret,
                         &their_pub,
                         &tx_id_bytes,
+                        Some(&our_ek),
                         partner_ek.as_deref(),
                     ) {
                         Ok(c) => c,

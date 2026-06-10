@@ -248,7 +248,10 @@ proptest! {
         let their_public = PublicKey::from(&their_secret);
 
         let partner_ek = if bind { Some(ek.as_slice()) } else { None };
-        let code = derive_sas_code(&our_secret, &their_public, &tx_id, partner_ek).unwrap();
+        // Mirror the app: pass our own ek too (range invariants hold for any
+        // ek combination; the partner-ek gate decides classical vs bound).
+        let code =
+            derive_sas_code(&our_secret, &their_public, &tx_id, partner_ek, partner_ek).unwrap();
 
         // All 7 emoji indices index INTO the 49-entry table.
         for idx in code.emoji_indices {
