@@ -3663,6 +3663,15 @@ impl AppHandle {
             interval.tick().await; // skip the immediate tick
             loop {
                 interval.tick().await;
+                // huddle 2.0.2 (audit M-3): stop the heartbeat once shutdown
+                // has begun, so we don't keep reading/writing the DB or
+                // publishing announces during/after the rekey + close window.
+                if handle
+                    .shutting_down
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    return;
+                }
                 // huddle 1.3.1: alongside the room re-announce, find Direct rooms
                 // whose hybrid handshake hasn't converged (no wrap key yet, or
                 // keyed classical while the partner is PQ-capable = upgrade
@@ -3771,6 +3780,13 @@ impl AppHandle {
             interval.tick().await;
             loop {
                 interval.tick().await;
+                // huddle 2.0.2 (audit M-3): honor shutdown in the pruner too.
+                if handle
+                    .shutting_down
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    return;
+                }
                 let now = now_unix();
                 let mut to_drop = Vec::new();
                 {
@@ -4891,6 +4907,22 @@ impl AppHandle {
                 if sender_fingerprint == our_fp {
                     return;
                 }
+                // huddle 2.0.2 (audit H-1): an encrypted room must only ever
+                // carry `Encrypted` (Megolm-authenticated) content. A `Plain`
+                // message here is unauthenticated — its `sender_fingerprint` is
+                // attacker-controlled — so any node that learns the (discoverable)
+                // room id could otherwise inject a forged message attributed to a
+                // trusted member, rendered indistinguishably from real traffic.
+                // Drop unsigned plaintext in encrypted rooms.
+                if repo::get_room(&self.db, room_id)
+                    .ok()
+                    .flatten()
+                    .map(|r| r.encrypted)
+                    .unwrap_or(false)
+                {
+                    warn!(%sender_fingerprint, %room_id, "dropping unsigned Plain in an encrypted room (anti-spoof)");
+                    return;
+                }
                 if repo::is_member_banned(&self.db, room_id, &sender_fingerprint).unwrap_or(false) {
                     debug!(%sender_fingerprint, %room_id, "dropping Plain from banned peer");
                     return;
@@ -5134,6 +5166,13 @@ impl AppHandle {
                     now_unix(),
                 ) {
                     warn!(%e, "BanMember: add_room_ban failed");
+                }
+                // huddle 2.0.2 (audit M-10): demote the banned target out of the
+                // `owner` role so they drop from `owner_fingerprints` announcements
+                // and can never regain admin by un-ban races. (is_owner also now
+                // excludes banned fps, so this is defense-in-depth + clean state.)
+                if let Err(e) = repo::revoke_owner_role(&self.db, room_id, &target_fingerprint) {
+                    warn!(%e, "BanMember: revoke_owner_role failed");
                 }
                 self.evict_banned_member(room_id, &target_fingerprint);
             }
@@ -5861,6 +5900,13 @@ impl AppHandle {
                 if signer != sender_fingerprint {
                     return;
                 }
+                // huddle 2.0.2 (audit L-22): mirror the banned-member filter that
+                // every other content arm has — a banned peer (incl. a demoted
+                // co-owner, see M-10) must not be able to tombstone messages.
+                if repo::is_member_banned(&self.db, room_id, &signer).unwrap_or(false) {
+                    debug!(%signer, %room_id, "dropping Delete from banned peer");
+                    return;
+                }
                 let target =
                     match repo::find_message_by_client_id(&self.db, room_id, &target_msg_id) {
                         Ok(Some(m)) => m,
@@ -6218,6 +6264,13 @@ impl AppHandle {
     /// Phase B: is `fingerprint` an owner of `room_id`? Used by the TUI
     /// to gate `^K` / `^G` and the kick/grant member-picker actions.
     pub fn is_owner(&self, room_id: &str, fingerprint: &str) -> bool {
+        // huddle 2.0.2 (audit M-10): a banned fingerprint is never an owner,
+        // even if its `owner` role row hasn't been cleaned up yet. This closes
+        // the "banned co-owner keeps full admin" hole at the authorization
+        // gate (delete-any, ban-back, grant-owner, RoomSetting/TTL).
+        if repo::is_member_banned(&self.db, room_id, fingerprint).unwrap_or(false) {
+            return false;
+        }
         repo::list_room_owners(&self.db, room_id)
             .unwrap_or_default()
             .iter()

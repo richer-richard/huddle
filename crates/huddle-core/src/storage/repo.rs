@@ -466,6 +466,19 @@ pub fn add_room_ban(
     Ok(())
 }
 
+/// huddle 2.0.2 (audit M-10): demote a member out of the `owner` role. Called
+/// on ban so a banned co-owner can't retain administrative power and is dropped
+/// from future `owner_fingerprints` announcements. Idempotent; no-op if they
+/// weren't an owner or aren't a member.
+pub fn revoke_owner_role(db: &Db, room_id: &str, fingerprint: &str) -> Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "UPDATE room_members SET role = 'member' WHERE room_id = ?1 AND fingerprint = ?2 AND role = 'owner'",
+        params![room_id, fingerprint],
+    )?;
+    Ok(())
+}
+
 pub fn is_member_banned(db: &Db, room_id: &str, fingerprint: &str) -> Result<bool> {
     let conn = db.lock().unwrap();
     let count: i64 = security_count(

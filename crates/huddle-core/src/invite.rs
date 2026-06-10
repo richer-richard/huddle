@@ -348,8 +348,17 @@ fn verify_invite_freshness(invite: &InviteLink) -> Result<()> {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
-    let age = now - invite.signed_at_ms;
-    if age > INVITE_MAX_AGE_MS {
+    // huddle 2.0.2 (audit L-21): compute the age in i128 so an attacker-chosen
+    // `signed_at_ms` near i64::MIN/MAX can't overflow the subtraction (a debug
+    // panic / release wrap that would bypass the freshness check). Also reject
+    // future-dated invites outright instead of letting a wrapped value pass.
+    let age = (now as i128) - (invite.signed_at_ms as i128);
+    if age < 0 {
+        return Err(HuddleError::Other(
+            "invite timestamp is in the future — check the system clock".into(),
+        ));
+    }
+    if age > INVITE_MAX_AGE_MS as i128 {
         return Err(HuddleError::Other(format!(
             "invite is {}h old — re-generate (max {}h)",
             age / 3_600_000,
