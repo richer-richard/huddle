@@ -509,15 +509,15 @@ async fn serve_metrics(mut stream: TcpStream, head: &str, shared: &Arc<Shared>) 
             None
         }
     });
-    let authorized = matches!((&want, &provided), (Some(tok), Some(p)) if *p == format!("Bearer {tok}"));
+    let authorized =
+        matches!((&want, &provided), (Some(tok), Some(p)) if *p == format!("Bearer {tok}"));
     if !authorized {
         let code = if want.is_none() {
             "404 Not Found"
         } else {
             "401 Unauthorized"
         };
-        let resp =
-            format!("HTTP/1.1 {code}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        let resp = format!("HTTP/1.1 {code}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
         stream.write_all(resp.as_bytes()).await?;
         stream.flush().await?;
         return Ok(());

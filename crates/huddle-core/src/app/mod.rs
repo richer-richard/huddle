@@ -7175,6 +7175,17 @@ impl AppHandle {
             room.info.clone()
         };
 
+        // huddle 2.0.2 (audit M-4 follow-up): a rotation mints a fresh outbound
+        // session, so a peer that accepts the rotation will (legitimately) send a
+        // `SessionKeyRequest` to re-fetch our new key. Clear any in-flight
+        // announce cooldown for this room so that request is served — the cooldown
+        // only exists to collapse request *storms*, never to suppress a re-share
+        // after our key actually changed.
+        self.announce_on_request_cooldown
+            .lock()
+            .unwrap()
+            .remove(room_id);
+
         // Broadcast before persisting: peers learn about the rotation even
         // if we crash before the DB write lands, and our own restore path
         // can recover from the persisted Megolm session plus the announced
@@ -7223,6 +7234,14 @@ impl AppHandle {
             room.info.passphrase_salt = Some(new_salt.to_vec());
             room.info.clone()
         };
+        // huddle 2.0.2 (audit M-4 follow-up): accepting a rotation means our key
+        // state just changed, so clear our announce cooldown for this room — we
+        // must serve peers' post-rotation re-share requests rather than throttle
+        // them.
+        self.announce_on_request_cooldown
+            .lock()
+            .unwrap()
+            .remove(room_id);
         // Ask the rotator (and anyone) to re-share their session key
         // before persisting, so a crash before the DB write still leaves
         // peers aware we've moved to the new salt.

@@ -245,10 +245,11 @@ impl FileManager {
                 total_chunks, MAX_CHUNKS_PER_FILE
             )));
         }
-        if data.is_empty() {
-            return Err(HuddleError::Other(
-                "FileChunk: empty chunk rejected".into(),
-            ));
+        // Reject empty chunks (they carry no bytes and so evade the byte budget),
+        // EXCEPT the one legitimate case: a genuine zero-byte file, which
+        // `prepare_outgoing_from_bytes` encodes as a single empty chunk.
+        if data.is_empty() && !(total_chunks == 1 && expected_size == 0) {
+            return Err(HuddleError::Other("FileChunk: empty chunk rejected".into()));
         }
         if chunk_index >= total_chunks {
             return Err(HuddleError::Other(format!(
