@@ -22,7 +22,20 @@ all-features = false
 # breaking the build on a transitive dep we can't immediately replace.
 version = 2
 yanked = "deny"
-ignore = []
+# Only fail on unmaintained crates a workspace member depends on DIRECTLY. The
+# unmaintained advisories in our tree (paste/proc-macro-error2 via libp2p &
+# vodozemac, bincode) are deep transitive deps we can't replace; they still
+# surface in `cargo audit` but don't break this gate.
+unmaintained = "workspace"
+# Transitive advisories reviewed and accepted (see .cargo/audit.toml for the same
+# list with full rationale). Each is unfixable upstream now; revisit on dep bumps.
+# A NEW advisory still fails the gate. (rsa's RUSTSEC-2023-0071 lives only in
+# .cargo/audit.toml — cargo-deny uses default features, so it never resolves the
+# optional, default-OFF Arti path that pulls rsa.)
+ignore = [
+    "RUSTSEC-2026-0118", # hickory-proto NSEC3 DoS — no upstream fix; via libp2p-mdns (LAN, opt-in)
+    "RUSTSEC-2026-0119", # hickory-proto O(n^2) DoS — fixed in 0.26.1 but pinned by libp2p-mdns 0.48
+]
 
 [licenses]
 version = 2
@@ -43,6 +56,13 @@ allow = [
     "CC0-1.0",
     "OpenSSL",
     "BSL-1.0",
+    # Permissive font licenses for the default fonts bundled by epaint/egui
+    # (huddle-gui). Standard open-font licenses, fine to redistribute.
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+    # Mozilla's CA root certificate data shipped by webpki-roots (via ureq's
+    # TLS). A permissive data license.
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.8
 # NOTE: `ring` carries a non-SPDX license file that cargo-deny will ask you to

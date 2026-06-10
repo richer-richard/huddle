@@ -1,0 +1,25 @@
+# cargo-audit configuration for huddle.
+#
+# Each ignored advisory is a TRANSITIVE dependency that is either unfixable
+# upstream right now or not present in shipped default builds. They are reviewed
+# here (not silently suppressed) and should be revisited on each dependency bump.
+# Run `cargo audit` to re-check. NOTE: this only ignores the listed IDs — any
+# NEW advisory still fails the gate.
+
+[advisories]
+ignore = [
+    # hickory-proto 0.25.2 — NSEC3 closest-encloser proof unbounded loop (DoS).
+    # No fixed upstream release exists. Reaches us only via libp2p-mdns 0.48
+    # (LAN peer discovery); the relay/onion is huddle's default transport and
+    # libp2p (hence mDNS) is opt-in. LAN-scoped DoS on an opt-in path.
+    "RUSTSEC-2026-0118",
+    # hickory-proto 0.25.2 — O(n^2) name compression CPU exhaustion (DoS).
+    # Fixed in hickory-proto >= 0.26.1, but libp2p-mdns 0.48 pins hickory ^0.25,
+    # so the upgrade is blocked until libp2p bumps it. Same LAN/opt-in scope.
+    "RUSTSEC-2026-0119",
+    # rsa 0.9.x — Marvin timing sidechannel (medium 5.9). Reaches the lockfile
+    # ONLY through the optional, default-OFF Arti stack (tor-llcrypto). Arti is
+    # feature-gated and not compiled into shipped default builds, and huddle
+    # performs no RSA decryption. Not applicable to the shipped binaries.
+    "RUSTSEC-2023-0071",
+]

@@ -118,6 +118,9 @@ jobs:
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          # Transitive advisories reviewed in .cargo/audit.toml; kept in sync here
+          # because the action passes --ignore explicitly. A NEW advisory still fails.
+          ignore: RUSTSEC-2026-0118,RUSTSEC-2026-0119,RUSTSEC-2023-0071
 
   docs:
     name: doc build
