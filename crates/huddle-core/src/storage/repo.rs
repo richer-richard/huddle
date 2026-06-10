@@ -34,8 +34,16 @@ pub struct StoredIdentity {
 
 pub fn save_identity(db: &Db, secret: &[u8], created_at: i64) -> Result<()> {
     let conn = db.lock().unwrap();
+    // huddle 2.0.2 (audit L-13): UPSERT only the secret + created_at. The previous
+    // `INSERT OR REPLACE` deleted and re-inserted the single identity row, which
+    // silently wiped later-added columns (display_name, onboarding_seen) on any
+    // re-save. Now an existing row keeps those columns.
     conn.execute(
-        "INSERT OR REPLACE INTO identity (id, ed25519_secret, olm_account_data, created_at) VALUES (1, ?1, NULL, ?2)",
+        "INSERT INTO identity (id, ed25519_secret, olm_account_data, created_at)
+         VALUES (1, ?1, NULL, ?2)
+         ON CONFLICT(id) DO UPDATE SET
+            ed25519_secret = excluded.ed25519_secret,
+            created_at = excluded.created_at",
         params![secret, created_at],
     )?;
     Ok(())

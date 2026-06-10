@@ -203,7 +203,18 @@ pub fn log_path() -> PathBuf {
 }
 
 pub fn ensure_data_dir() -> std::io::Result<()> {
-    std::fs::create_dir_all(data_dir())
+    let dir = data_dir();
+    std::fs::create_dir_all(&dir)?;
+    // huddle 2.0.2 (audit L-11): the data dir holds the SQLCipher DB (+ WAL/SHM),
+    // the keychain salt, and logs. Restrict it to the owner (0700) on Unix so
+    // other local users can't traverse in to read the encrypted DB or salt. This
+    // also protects files created inside with a default umask. Best-effort.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

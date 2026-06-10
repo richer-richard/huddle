@@ -2476,10 +2476,16 @@ impl AppHandle {
                     .into(),
             ));
         }
-        if new.is_empty() {
-            return Err(HuddleError::Other(
-                "new passphrase must not be empty".into(),
-            ));
+        // huddle 2.0.2 (audit L-4): enforce a minimum length on the NEW passphrase.
+        // The floor is applied only at set/change time (never at derive/verify), so
+        // an existing short passphrase can still unlock — but new ones can't be
+        // trivially weak. The at-rest key's strength is Argon2id-over-passphrase, so
+        // a 1-char passphrase is brute-forceable regardless of KDF cost.
+        const MIN_PASSPHRASE_LEN: usize = 8;
+        if new.chars().count() < MIN_PASSPHRASE_LEN {
+            return Err(HuddleError::Other(format!(
+                "new passphrase must be at least {MIN_PASSPHRASE_LEN} characters"
+            )));
         }
         // 1. Verify the current passphrase against the live persist key.
         let salt = storage::keychain::load_or_create_salt()?;

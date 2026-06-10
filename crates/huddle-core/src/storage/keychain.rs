@@ -138,6 +138,14 @@ pub fn persist_salt(path: &Path, salt: &[u8; KEYCHAIN_SALT_LEN]) -> Result<()> {
     {
         let mut f =
             fs::File::create(&tmp).map_err(|e| HuddleError::Other(format!("stage salt: {e}")))?;
+        // huddle 2.0.2 (audit L-11): owner-only (0600) on the at-rest salt before
+        // it's renamed into place, so it isn't world-readable even outside the
+        // 0700 data dir. Best-effort on Unix.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = f.set_permissions(fs::Permissions::from_mode(0o600));
+        }
         f.write_all(salt)
             .map_err(|e| HuddleError::Other(format!("write salt: {e}")))?;
         f.sync_all()
