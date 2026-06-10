@@ -960,7 +960,20 @@ impl NetworkTask {
         let topic = message.topic.to_string();
         if topic == ROOMS_TOPIC {
             match serde_json::from_slice::<RoomAnnouncement>(&message.data) {
-                Ok(ann) => {
+                Ok(mut ann) => {
+                    // huddle 2.0.2 (audit L-15): clamp attacker-controlled fields
+                    // on the global topic before they propagate into every peer's
+                    // discovered-rooms cache. Sender-side caps are advisory, so
+                    // bound them here on ingest. (char-wise truncation avoids a
+                    // panic on a non-UTF-8-boundary byte cut.)
+                    const MAX_ANN_NAME_CHARS: usize = 128;
+                    const MAX_ANN_HOST_ADDRS: usize = 4;
+                    const MAX_ANN_OWNERS: usize = 64;
+                    if ann.name.chars().count() > MAX_ANN_NAME_CHARS {
+                        ann.name = ann.name.chars().take(MAX_ANN_NAME_CHARS).collect();
+                    }
+                    ann.host_addrs.truncate(MAX_ANN_HOST_ADDRS);
+                    ann.owner_fingerprints.truncate(MAX_ANN_OWNERS);
                     let _ = self
                         .event_tx
                         .send(NetworkEvent::RoomAnnouncementReceived(ann))

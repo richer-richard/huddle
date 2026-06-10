@@ -229,6 +229,27 @@ impl FileManager {
                 "FileChunk: total_chunks must be ≥ 1".into(),
             ));
         }
+        // huddle 2.0.2 (audit M-8): bound the chunk COUNT, not just total bytes.
+        // The byte budget below doesn't limit the number of entries in the
+        // per-transfer `chunks` map — an attacker advertising total_chunks ≈
+        // u32::MAX and streaming empty/tiny chunks at distinct indices would grow
+        // that map (and its allocator overhead) without tripping the byte cap.
+        // A legitimate MAX_FILE_SIZE (50 MiB) transfer needs ≤ a few hundred
+        // 256-KiB chunks; this ceiling allows ~3 KiB chunks and still bounds the
+        // map to MAX_CHUNKS_PER_FILE * MAX_CONCURRENT_INCOMING entries. Empty
+        // chunks (which carry no bytes and so evade the byte budget) are rejected.
+        const MAX_CHUNKS_PER_FILE: u32 = 16_384;
+        if total_chunks > MAX_CHUNKS_PER_FILE {
+            return Err(HuddleError::Other(format!(
+                "FileChunk: total_chunks {} exceeds cap of {}",
+                total_chunks, MAX_CHUNKS_PER_FILE
+            )));
+        }
+        if data.is_empty() {
+            return Err(HuddleError::Other(
+                "FileChunk: empty chunk rejected".into(),
+            ));
+        }
         if chunk_index >= total_chunks {
             return Err(HuddleError::Other(format!(
                 "FileChunk: chunk_index {} >= total_chunks {}",
