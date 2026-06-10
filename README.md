@@ -209,7 +209,7 @@ per-OS app directory:
 
 ```
 +----------------------------------------------------------------------+
-| huddle 2.0.1  ·  745e-fe8a-…  ·  relay ●               12:34 UTC     |
+| huddle 2.0.2  ·  745e-fe8a-…  ·  relay ●               12:34 UTC     |
 +------------------------+---------------------------------------------+
 | ▾ Profile              | # general                                   |
 |   alice  HD-AAAA-…  ●  |   4 members · encrypted                     |
@@ -655,6 +655,34 @@ native dialog for a path-entry box.
   rotates on a schedule + on membership change), bounding the exposure
   window; the full fix — a Double Ratchet seeded from the hybrid root key —
   is sequenced in `docs/ROADMAP-2.0-and-beyond.md`.
+
+## What's new in 2.0.2 — security audit hardening
+
+A security-fix release closing findings from an exhaustive multi-agent audit of
+2.0.1. No wire or on-disk format change — fully compatible with 1.3.x / 2.0.x
+peers and relays. Highlights:
+
+- **Sender-spoofing in encrypted rooms (HIGH):** unsigned `Plain` messages are
+  now rejected in encrypted rooms, so a node that learns a room id can no longer
+  inject a forged message attributed to a trusted member.
+- **Relay disk-fill DoS (HIGH):** the relay enforces a global mailbox ceiling
+  (shed-on-full, never evicting other recipients) plus a per-identity membership
+  cap; `/metrics` is now disabled unless a bearer token is configured.
+- **Relay-weaponizable integrity bugs (MEDIUM):** inbound Megolm sessions never
+  regress forward (no relay-assisted message suppression); mailbox messages are
+  ACKed only after they're durably handled (no ACK-then-lose); message edits use
+  the signature-bound timestamp for last-write-wins (a relay can't revert content
+  by reordering); `SessionKeyRequest` re-announces are rate-limited (anti-
+  amplification, with rotations exempt so key re-shares still flow.)
+- **Authorization:** a ban now strips the target's owner role and is enforced at
+  the `is_owner` gate; the `Delete` handler gained the banned-member filter every
+  other content arm already had.
+- **At-rest hygiene:** the data dir is `0700` and the keychain salt `0600`; a
+  minimum length is enforced on passphrase changes; file-transfer reassembly caps
+  the chunk count (not just bytes); untrusted `RoomAnnouncement` fields are
+  clamped on ingest; an invite-freshness integer overflow was fixed.
+
+See `AUDIT-2.0.1.md` for the full findings and the per-fix mapping.
 
 ## What's new in 2.0.1 — SAS verification fix (post-quantum capability binding)
 
