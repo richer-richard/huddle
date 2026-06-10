@@ -265,6 +265,12 @@ const DM_KEY_RETRY_MAX: u8 = 10;
 /// receive the missing key, decrypts succeed and no more requests fire.
 const KEY_REQUEST_COOLDOWN_SECS: i64 = 15;
 
+/// huddle 2.0.2 (audit M-4): minimum seconds between MemberAnnounce *responses*
+/// to inbound `SessionKeyRequest`s, per room. The request is unsigned and
+/// unthrottled on the wire, so without this a storm makes every member re-emit a
+/// full announce — an amplification/reflection DoS against the room and relay.
+const ANNOUNCE_ON_REQUEST_COOLDOWN_SECS: i64 = 10;
+
 impl Drop for ActiveRoom {
     /// huddle 1.3: wipe the DM/group **wrap key** (the classical or hybrid
     /// `passphrase_key` that unwraps Megolm session keys) when the room leaves
@@ -440,6 +446,10 @@ pub struct AppHandle {
     /// decrypt-miss `SessionKeyRequest` heal — a burst of undecryptable
     /// messages triggers at most one key request per `KEY_REQUEST_COOLDOWN_SECS`.
     key_request_cooldown: Arc<Mutex<HashMap<String, i64>>>,
+    /// huddle 2.0.2 (audit M-4): per-room cooldown (room_id → last unix) for
+    /// re-announcing in response to an inbound `SessionKeyRequest`, throttling
+    /// the amplification/reflection vector.
+    announce_on_request_cooldown: Arc<Mutex<HashMap<String, i64>>>,
     /// huddle 0.5: per-peer last-broadcast timestamp (ms) for our own
     /// `ProfileUpdate`. The `PeerIdentified` handler re-broadcasts our
     /// current username to a newly-identified peer so they learn it
@@ -797,6 +807,7 @@ impl AppHandle {
             relay_circuit_addrs: Arc::new(Mutex::new(HashSet::new())),
             host_addr_dial_attempts: Arc::new(Mutex::new(HashMap::new())),
             key_request_cooldown: Arc::new(Mutex::new(HashMap::new())),
+            announce_on_request_cooldown: Arc::new(Mutex::new(HashMap::new())),
             last_profile_broadcast_at_ms: Arc::new(Mutex::new(HashMap::new())),
             pending_auto_dm_addrs: Arc::new(Mutex::new(HashSet::new())),
             app_event_tx,
@@ -3593,25 +3604,23 @@ impl AppHandle {
                                 mailbox_id,
                                 ..
                             } => {
-                                handle
-                                    .process_network_event(NetworkEvent::RoomMessageReceived {
-                                        room_id: room,
-                                        payload,
-                                        from_peer: PeerId::random(),
-                                    })
-                                    .await;
-                                // huddle 2.0.0 (F7): at-least-once relay delivery.
-                                // `process_network_event` persists the message
-                                // synchronously (room_messages INSERT) before it
-                                // returns, so by here the message is durably
-                                // handled — ACK the mailbox row so the relay may
-                                // delete its copy. `mailbox_id` is `Some` only for
-                                // an offline-mailbox delivery from a 2.0+ relay;
-                                // live fan-out and pre-2.0 relays leave it `None`
-                                // and we skip the ACK (safe — acts as best-effort
-                                // delivery, the relay's 24h sweep is the backstop).
-                                if let Some(id) = mailbox_id {
-                                    let _ = handle.network.send_mailbox_ack(id);
+                                // huddle 2.0.0 (F7) + 2.0.2 (audit M-2): at-least-
+                                // once relay delivery. `process_relay_message`
+                                // dispatches the message and returns whether it was
+                                // durably handled. We ACK the mailbox row (so the
+                                // relay may delete its copy) ONLY when it was — an
+                                // `Encrypted` body whose Megolm session key hasn't
+                                // arrived returns false and is left in the mailbox
+                                // for redelivery rather than ACKed-then-lost.
+                                // `mailbox_id` is `Some` only for an offline-mailbox
+                                // delivery from a 2.0+ relay; live fan-out and
+                                // pre-2.0 relays leave it `None`. The relay's 24h
+                                // sweep is the backstop.
+                                let ack_ok = handle.process_relay_message(room, payload).await;
+                                if ack_ok {
+                                    if let Some(id) = mailbox_id {
+                                        let _ = handle.network.send_mailbox_ack(id);
+                                    }
                                 }
                             }
                             ServerEvent::Ready | ServerEvent::Sent { .. } => {}
@@ -4035,10 +4044,13 @@ impl AppHandle {
                         return;
                     }
                 };
-                let (msg, verified_signer) = match wire {
-                    WireMessage::Plain(m) => (m, None),
+                let (msg, verified_signer, signed_at_ms) = match wire {
+                    WireMessage::Plain(m) => (m, None, None),
                     WireMessage::Signed(env) => {
                         let claimed_pubkey = env.ed25519_pubkey_b64.clone();
+                        // huddle 2.0.2 (audit M-6): the signature binds this
+                        // timestamp, so it's a clock the relay can't forge.
+                        let signed_at = env.signed_at_ms;
                         match crate::crypto::verify_signed(&env) {
                             Ok((m, fp)) => {
                                 // Defense in depth: if we've persisted
@@ -4073,7 +4085,7 @@ impl AppHandle {
                                     }
                                     _ => {}
                                 }
-                                (m, Some(fp))
+                                (m, Some(fp), Some(signed_at))
                             }
                             Err(e) => {
                                 warn!(%e, fp = %env.fingerprint, "signed envelope verify failed");
@@ -4082,7 +4094,7 @@ impl AppHandle {
                         }
                     }
                 };
-                self.handle_room_message(&room_id, msg, verified_signer)
+                self.handle_room_message(&room_id, msg, verified_signer, signed_at_ms)
                     .await;
             }
             NetworkEvent::DialSucceeded { peer_id, address } => {
@@ -4419,11 +4431,52 @@ impl AppHandle {
     /// see the DM-key path below. This is also enforced mechanically:
     /// this fn runs inside a `Send` task, so a `!Send` `MutexGuard` held
     /// across `.await` would fail to compile.
+    /// huddle 2.0.2 (audit M-2): can we currently decrypt an `Encrypted` body
+    /// tagged with `session_id` from `sender`? Returns false when the room,
+    /// its crypto, or the inbound session isn't present yet.
+    fn can_decrypt(&self, room_id: &str, sender: &str, session_id: &str) -> bool {
+        self.active_rooms
+            .lock()
+            .unwrap()
+            .get(room_id)
+            .and_then(|r| r.crypto.as_ref())
+            .map(|c| c.has_inbound_session(sender, session_id))
+            .unwrap_or(false)
+    }
+
+    /// huddle 2.0.2 (audit M-2): process a mailbox-delivered relay message and
+    /// report whether the caller may ACK it (let the relay delete its copy). An
+    /// `Encrypted` body we can't decrypt yet (its Megolm session key hasn't
+    /// arrived) is still dispatched — which triggers a `SessionKeyRequest` heal —
+    /// but is NOT ACKed, so the relay keeps the only copy for redelivery instead
+    /// of dropping it. The relay's 24h sweep remains the backstop.
+    async fn process_relay_message(&self, room_id: String, payload: Vec<u8>) -> bool {
+        let ack_ok = match serde_json::from_slice::<WireMessage>(&payload) {
+            Ok(WireMessage::Plain(RoomMessage::Encrypted {
+                ref sender_fingerprint,
+                ref session_id,
+                ..
+            })) => self.can_decrypt(&room_id, sender_fingerprint, session_id),
+            _ => true,
+        };
+        self.process_network_event(NetworkEvent::RoomMessageReceived {
+            room_id,
+            payload,
+            from_peer: PeerId::random(),
+        })
+        .await;
+        ack_ok
+    }
+
     async fn handle_room_message(
         &self,
         room_id: &str,
         msg: RoomMessage,
         verified_signer: Option<String>,
+        // huddle 2.0.2 (audit M-6): the signature-bound send time (Some for a
+        // verified Signed envelope), used as the authenticated last-write-wins
+        // clock for edits so a relay can't revert content by reordering.
+        signed_at_ms: Option<i64>,
     ) {
         let our_fp = self.identity.fingerprint().to_string();
         // huddle 1.2: lazily re-activate a known DM that isn't currently in
@@ -4722,6 +4775,21 @@ impl AppHandle {
             } => {
                 if requester_fingerprint == our_fp {
                     return;
+                }
+                // huddle 2.0.2 (audit M-4): rate-limit our re-announce so an
+                // unsigned SessionKeyRequest storm can't make us (and every other
+                // member) flood the room with full MemberAnnounces. At most one
+                // response per room per ANNOUNCE_ON_REQUEST_COOLDOWN_SECS; a genuine
+                // joiner is still served on the next tick / their own re-announce.
+                {
+                    let now = now_unix();
+                    let mut cd = self.announce_on_request_cooldown.lock().unwrap();
+                    if now - cd.get(room_id).copied().unwrap_or(0)
+                        < ANNOUNCE_ON_REQUEST_COOLDOWN_SECS
+                    {
+                        return;
+                    }
+                    cd.insert(room_id.to_string(), now);
                 }
                 // Re-announce ourselves to share our session key with the new joiner.
                 if let Err(e) = self.broadcast_member_announce(room_id).await {
@@ -5865,7 +5933,10 @@ impl AppHandle {
                     room_id,
                     &target_msg_id,
                     &new_plaintext,
-                    now_unix_ms(),
+                    // huddle 2.0.2 (audit M-6): LWW on the signature-bound send
+                    // time, not the receiver clock — a relay can no longer revert
+                    // an edit by reordering/replaying signed envelopes.
+                    signed_at_ms.unwrap_or_else(now_unix_ms),
                 ) {
                     Ok(true) => {
                         let _ = self.app_event_tx.send(AppEvent::MessageEdited {

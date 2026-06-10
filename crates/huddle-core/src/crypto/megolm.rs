@@ -214,6 +214,21 @@ impl RoomCrypto {
         let session = InboundGroupSession::new(&key, SessionConfig::version_1());
         let session_id = session.session_id();
 
+        // huddle 2.0.2 (audit M-1): never regress an existing inbound session
+        // FORWARD. A re-shared MemberAnnounce (e.g. a late joiner's heal request,
+        // or a malicious relay inducing a re-announce) carries the sender's
+        // CURRENT ratchet position. Blindly replacing would discard the ability
+        // to decrypt earlier message indices forever — intermittent loss under
+        // normal reordering, and a relay-assisted suppression primitive. Keep the
+        // session with the EARLIER first-known-index; only replace/persist when
+        // the incoming one can decrypt from an earlier point.
+        let map_key = (sender_fingerprint.to_string(), session_id.clone());
+        if let Some(existing) = self.inbound.get(&map_key) {
+            if existing.first_known_index() <= session.first_known_index() {
+                return Ok(());
+            }
+        }
+
         let persisted = session.pickle().encrypt(&self.persist_key);
         repo::save_megolm_session(
             &self.db,
@@ -227,9 +242,17 @@ impl RoomCrypto {
             },
         )?;
 
-        self.inbound
-            .insert((sender_fingerprint.to_string(), session_id), session);
+        self.inbound.insert(map_key, session);
         Ok(())
+    }
+
+    /// huddle 2.0.2 (audit M-2): do we already hold the inbound session needed to
+    /// decrypt a ciphertext tagged with `session_id` from `sender_fingerprint`?
+    /// The relay-delivery path uses this to avoid ACKing (and thus letting the
+    /// relay delete) a message whose Megolm session key hasn't arrived yet.
+    pub fn has_inbound_session(&self, sender_fingerprint: &str, session_id: &str) -> bool {
+        self.inbound
+            .contains_key(&(sender_fingerprint.to_string(), session_id.to_string()))
     }
 
     /// huddle 1.3.1: rotate ONLY our outbound session, preserving every
