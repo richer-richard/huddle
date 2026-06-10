@@ -76,7 +76,19 @@ const MAX_ID_LEN: usize = 128;
 const MAX_MSG_ID_LEN: usize = 256;
 /// Keep at most this many queued messages per offline recipient.
 const MAX_MAILBOX_PER_FP: usize = 500;
+/// huddle 2.0.2 (audit H-2): global ceiling on total queued mailbox rows across
+/// ALL recipients. The per-fp cap alone doesn't bound disk because a client can
+/// mint unlimited Ed25519 identities and `SendDirect` to unlimited fabricated
+/// recipients (500 rows × N fake fps). At ≤256 KiB/row this bounds worst-case
+/// mailbox disk; operators with more storage can raise it. We SHED (refuse new
+/// rows) when full rather than evict, so a flooder can't push out other
+/// recipients' legitimately-queued messages.
+const MAX_MAILBOX_TOTAL_ROWS: usize = 100_000;
 const MAX_ROOMS_PER_HELLO: usize = 1000;
+/// huddle 2.0.2 (audit L-17): cap distinct rooms a single identity may join, so
+/// the `memberships` table can't be grown without bound by re-Hello'ing fresh
+/// room ids. Far above any real user's room count.
+const MAX_ROOMS_PER_FP: usize = 10_000;
 /// huddle 1.3.4: cap concurrent sockets a single authenticated fingerprint may
 /// register. Each registered connection is a target in the per-room publish
 /// fan-out (one `ServerMsg` clone + `try_send` apiece), so an identity opening
@@ -457,7 +469,7 @@ async fn handle_conn(stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
         // clients (the CLI, and any future frontend) hit `/ws`.
         match request_target(&head) {
             "/health" => serve_health(stream).await,
-            "/metrics" => serve_metrics(stream, &shared).await,
+            "/metrics" => serve_metrics(stream, &head, &shared).await,
             _ => serve_landing(stream).await,
         }
     }
@@ -482,7 +494,34 @@ async fn serve_health(mut stream: TcpStream) -> Result<()> {
 /// same port the WebSocket relay rides; an operator points Prometheus (or
 /// `curl`) at it directly, or via the onion. It exposes only aggregate counts,
 /// never room ids, fingerprints, or ciphertext.
-async fn serve_metrics(mut stream: TcpStream, shared: &Arc<Shared>) -> Result<()> {
+async fn serve_metrics(mut stream: TcpStream, head: &str, shared: &Arc<Shared>) -> Result<()> {
+    // huddle 2.0.2 (audit L-16): /metrics exposes live activity metadata (online
+    // users, message volume, mailbox backlog). It is now DISABLED by default and,
+    // when enabled via HUDDLE_METRICS_TOKEN, requires a matching bearer token.
+    let want = std::env::var("HUDDLE_METRICS_TOKEN")
+        .ok()
+        .filter(|t| !t.is_empty());
+    let provided = head.lines().find_map(|l| {
+        let (name, val) = l.split_once(':')?;
+        if name.trim().eq_ignore_ascii_case("authorization") {
+            Some(val.trim().to_string())
+        } else {
+            None
+        }
+    });
+    let authorized = matches!((&want, &provided), (Some(tok), Some(p)) if *p == format!("Bearer {tok}"));
+    if !authorized {
+        let code = if want.is_none() {
+            "404 Not Found"
+        } else {
+            "401 Unauthorized"
+        };
+        let resp =
+            format!("HTTP/1.1 {code}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        stream.write_all(resp.as_bytes()).await?;
+        stream.flush().await?;
+        return Ok(());
+    }
     let m = &shared.metrics;
     let active = m.active_connections.load(Ordering::Relaxed);
     let delivered = m.publish_delivered.load(Ordering::Relaxed);
@@ -864,12 +903,13 @@ async fn handle_client_msg(
                         .fetch_add(1, Ordering::Relaxed);
                 } else {
                     let db = shared.db.lock().await;
-                    enqueue(&db, &member, &room, &id, &payload_b64)?;
-                    queued += 1;
-                    shared
-                        .metrics
-                        .publish_queued
-                        .fetch_add(1, Ordering::Relaxed);
+                    if enqueue(&db, &member, &room, &id, &payload_b64)? {
+                        queued += 1;
+                        shared
+                            .metrics
+                            .publish_queued
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             }
             let _ = tx
@@ -926,12 +966,16 @@ async fn handle_client_msg(
                 (1usize, 0usize)
             } else {
                 let db = shared.db.lock().await;
-                enqueue(&db, &to, &room, &id, &payload_b64)?;
-                shared
-                    .metrics
-                    .publish_queued
-                    .fetch_add(1, Ordering::Relaxed);
-                (0usize, 1usize)
+                if enqueue(&db, &to, &room, &id, &payload_b64)? {
+                    shared
+                        .metrics
+                        .publish_queued
+                        .fetch_add(1, Ordering::Relaxed);
+                    (0usize, 1usize)
+                } else {
+                    // Mailbox full (global cap): shed without disconnecting.
+                    (0usize, 0usize)
+                }
             };
             let _ = tx
                 .send(OutEvent::Msg(ServerMsg::Sent {
@@ -1258,6 +1302,25 @@ fn migrate(c: &Connection) -> Result<()> {
 }
 
 fn add_membership(c: &Connection, fp: &str, room: &str) -> Result<()> {
+    // huddle 2.0.2 (audit L-17): bound distinct rooms per identity. Re-asserting
+    // an existing (fp,room) is always allowed (idempotent); only NEW rooms beyond
+    // the cap are shed. The COUNT uses the memberships(fingerprint,room) primary
+    // key index, so it stays cheap on the hot publish path.
+    let count: i64 = c.query_row(
+        "SELECT COUNT(*) FROM memberships WHERE fingerprint = ?1",
+        params![fp],
+        |r| r.get(0),
+    )?;
+    if count as usize >= MAX_ROOMS_PER_FP {
+        let exists: i64 = c.query_row(
+            "SELECT COUNT(*) FROM memberships WHERE fingerprint = ?1 AND room = ?2",
+            params![fp, room],
+            |r| r.get(0),
+        )?;
+        if exists == 0 {
+            return Ok(()); // at cap; shed the new membership silently
+        }
+    }
     c.execute(
         "INSERT OR IGNORE INTO memberships(fingerprint, room) VALUES(?1, ?2)",
         params![fp, room],
@@ -1271,7 +1334,15 @@ fn room_members(c: &Connection, room: &str) -> Result<Vec<String>> {
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
-fn enqueue(c: &Connection, fp: &str, room: &str, id: &str, payload_b64: &str) -> Result<()> {
+/// Returns `Ok(true)` if the message was queued, `Ok(false)` if it was shed
+/// because the global mailbox ceiling is reached (the caller should NOT count it
+/// as queued, but must not disconnect the client — the relay is simply full).
+fn enqueue(c: &Connection, fp: &str, room: &str, id: &str, payload_b64: &str) -> Result<bool> {
+    // huddle 2.0.2 (audit H-2): global mailbox ceiling — shed rather than evict.
+    let total: i64 = c.query_row("SELECT COUNT(*) FROM mailbox", [], |r| r.get(0))?;
+    if total as usize >= MAX_MAILBOX_TOTAL_ROWS {
+        return Ok(false);
+    }
     c.execute(
         "INSERT INTO mailbox(fingerprint, room, msg_id, payload_b64, created_at)
          VALUES(?1, ?2, ?3, ?4, ?5)",
@@ -1284,7 +1355,7 @@ fn enqueue(c: &Connection, fp: &str, room: &str, id: &str, payload_b64: &str) ->
         )",
         params![fp, MAX_MAILBOX_PER_FP as i64],
     )?;
-    Ok(())
+    Ok(true)
 }
 
 /// huddle 1.1.4: read a recipient's queued ciphertext WITHOUT deleting it, so
