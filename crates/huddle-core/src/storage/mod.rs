@@ -38,6 +38,20 @@ pub fn open_db(path: &Path, master_key: Option<&[u8; 32]>) -> Result<Db> {
     }
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
     run_migrations(&conn)?;
+    // huddle 2.0.3 (audit N-L13): restrict the DB (and its WAL/SHM sidecars) to
+    // owner-only. The pages are SQLCipher-encrypted, but this is defense in depth:
+    // a copied-out or backup profile shouldn't carry world-readable perms, and we
+    // shouldn't rely solely on the 0700 data dir.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        for suffix in ["", "-wal", "-shm"] {
+            let mut p = path.as_os_str().to_os_string();
+            p.push(suffix);
+            let _ = std::fs::set_permissions(std::path::Path::new(&p), perms.clone());
+        }
+    }
     Ok(Arc::new(Mutex::new(conn)))
 }
 

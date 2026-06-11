@@ -3,6 +3,9 @@
 # local planning notes (kept out of git)
 plan.md
 
+# personal agent working-method notes (Claude Code), not for git
+CLAUDE.local.md
+
 # local agent/session state (Claude Code, etc.)
 .claude/
 

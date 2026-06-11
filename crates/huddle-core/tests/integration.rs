@@ -133,7 +133,7 @@ async fn two_node_encrypted_room_message_exchange() {
     let mut events_b = handle_b.subscribe();
 
     let room_id = handle_a
-        .start_room("secret-room", true, Some("hunter2"), RoomKind::Group)
+        .start_room("secret-room", true, Some("hunter2!"), RoomKind::Group)
         .await
         .unwrap();
 
@@ -155,7 +155,10 @@ async fn two_node_encrypted_room_message_exchange() {
         return;
     }
 
-    handle_b.join_room(&room_id, Some("hunter2")).await.unwrap();
+    handle_b
+        .join_room(&room_id, Some("hunter2!"))
+        .await
+        .unwrap();
 
     tokio::time::sleep(Duration::from_millis(2500)).await;
 

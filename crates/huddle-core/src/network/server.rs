@@ -50,6 +50,11 @@ const MAX_NONCE_B64: usize = 256;
 /// (the server still closes it after its 20 s pre-auth timeout) can't make the
 /// writer's pre-auth `pending` queue grow without bound in the meantime.
 const MAX_PENDING_PREAUTH: usize = 1024;
+/// huddle 2.0.3 (audit N-M7): how often to send an application keepalive
+/// (`ClientMsg::Ping`) once authenticated. The relay reaps a socket that sends
+/// no frame for ~150 s, so a quiet-but-healthy connection must speak up well
+/// inside that window; 60 s gives a comfortable margin.
+const RELAY_KEEPALIVE_SECS: u64 = 60;
 
 /// Shared WebSocket config (frame caps) for every relay-client door.
 fn relay_ws_config() -> tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
@@ -320,36 +325,65 @@ impl ServerClient {
         tokio::spawn(async move {
             let mut hello_sent = false;
             let mut pending: Vec<ClientMsg> = Vec::new();
-            while let Some(msg) = out_rx.recv().await {
-                let is_hello = matches!(msg, ClientMsg::Hello { .. });
-                if !hello_sent && !is_hello {
-                    // huddle 1.3.4: bound the pre-auth backlog. If the relay
-                    // accepts the socket but never sends its Challenge (the
-                    // server still closes it after its 20 s pre-auth timeout),
-                    // this keeps `pending` from growing without limit.
-                    if pending.len() >= MAX_PENDING_PREAUTH {
-                        warn!(
-                            cap = MAX_PENDING_PREAUTH,
-                            "relay has not authenticated us yet; dropping a queued message"
-                        );
-                        continue;
+            // huddle 2.0.3 (audit N-M7): application keepalive. The relay now reaps
+            // an authenticated socket that sends no frame for ~150 s, so send a
+            // ClientMsg::Ping on a 60 s cadence to keep a healthy-but-quiet
+            // connection alive. Folded into the writer rather than a separate task
+            // holding an `out_tx` clone: a permanent clone would keep `out_rx` from
+            // ending when every public handle drops, so the socket would never
+            // close and the server would never mark us offline (breaking mailboxing).
+            let mut keepalive =
+                tokio::time::interval(std::time::Duration::from_secs(RELAY_KEEPALIVE_SECS));
+            keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    // Prefer real app messages over the keepalive when both are ready.
+                    biased;
+                    recv = out_rx.recv() => {
+                        // When `out_rx` ends (every `ServerClient` handle dropped)
+                        // break to close the socket so the server marks us offline
+                        // and starts mailboxing.
+                        let Some(msg) = recv else { break; };
+                        let is_hello = matches!(msg, ClientMsg::Hello { .. });
+                        if !hello_sent && !is_hello {
+                            // huddle 1.3.4: bound the pre-auth backlog. If the relay
+                            // accepts the socket but never sends its Challenge (the
+                            // server still closes it after its 20 s pre-auth timeout),
+                            // this keeps `pending` from growing without limit.
+                            if pending.len() >= MAX_PENDING_PREAUTH {
+                                warn!(
+                                    cap = MAX_PENDING_PREAUTH,
+                                    "relay has not authenticated us yet; dropping a queued message"
+                                );
+                                continue;
+                            }
+                            pending.push(msg);
+                            continue;
+                        }
+                        let json = match serde_json::to_string(&msg) {
+                            Ok(j) => j,
+                            Err(_) => continue,
+                        };
+                        if sink.send(WsMessage::Text(json.into())).await.is_err() {
+                            return;
+                        }
+                        if is_hello {
+                            hello_sent = true;
+                            // Flush anything the app queued while we waited for the
+                            // challenge, preserving its order after the Hello.
+                            for m in pending.drain(..) {
+                                let json = match serde_json::to_string(&m) {
+                                    Ok(j) => j,
+                                    Err(_) => continue,
+                                };
+                                if sink.send(WsMessage::Text(json.into())).await.is_err() {
+                                    return;
+                                }
+                            }
+                        }
                     }
-                    pending.push(msg);
-                    continue;
-                }
-                let json = match serde_json::to_string(&msg) {
-                    Ok(j) => j,
-                    Err(_) => continue,
-                };
-                if sink.send(WsMessage::Text(json.into())).await.is_err() {
-                    return;
-                }
-                if is_hello {
-                    hello_sent = true;
-                    // Flush anything the app queued while we waited for the
-                    // challenge, preserving its order after the Hello.
-                    for m in pending.drain(..) {
-                        let json = match serde_json::to_string(&m) {
+                    _ = keepalive.tick(), if hello_sent => {
+                        let json = match serde_json::to_string(&ClientMsg::Ping) {
                             Ok(j) => j,
                             Err(_) => continue,
                         };
@@ -359,8 +393,6 @@ impl ServerClient {
                     }
                 }
             }
-            // When `out_rx` ends (every `ServerClient` handle dropped) close
-            // the socket so the server marks us offline and starts mailboxing.
             let _ = sink.close().await;
         });
 

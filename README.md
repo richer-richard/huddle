@@ -209,7 +209,7 @@ per-OS app directory:
 
 ```
 +----------------------------------------------------------------------+
-| huddle 2.0.2  ·  745e-fe8a-…  ·  relay ●               12:34 UTC     |
+| huddle 2.0.3  ·  745e-fe8a-…  ·  relay ●               12:34 UTC     |
 +------------------------+---------------------------------------------+
 | ▾ Profile              | # general                                   |
 |   alice  HD-AAAA-…  ●  |   4 members · encrypted                     |
@@ -655,6 +655,45 @@ native dialog for a path-entry box.
   rotates on a schedule + on membership change), bounding the exposure
   window; the full fix — a Double Ratchet seeded from the hybrid root key —
   is sequenced in `docs/ROADMAP-2.0-and-beyond.md`.
+
+## What's new in 2.0.3 — security audit hardening (round 2)
+
+A second security-fix release closing the bulk of a fresh multi-agent audit of
+2.0.2. Wire changes are **additive only** — the three signed control messages gain
+an optional `room_id` that older peers ignore — so 2.0.3 stays fully compatible
+with 1.3.x / 2.0.x peers and relays. Highlights:
+
+- **Relay mailbox-squat DoS (HIGH):** the 2.0.2 global mailbox cap is no longer
+  squattable by a single identity. The relay now rate-limits the mailbox-writing
+  ops per connection and caps the rows any one sender can hold outstanding, so a
+  free keypair can't fill the pool in a burst and shut off everyone's offline
+  delivery. Clients send a lightweight keepalive and the relay reaps truly-idle
+  sockets (connection-pool-exhaustion defense — the keepalive also keeps
+  cloudflare-tunnelled connections from idling out).
+- **Release-pipeline token exposure (HIGH):** `cargo publish` runs with
+  `--no-verify` so the crates.io token is never in the env of a verify-build that
+  executes untrusted transitive build scripts; the release workflow drops to a
+  read-only default token with per-job write scope and `persist-credentials: false`.
+- **Cross-room signature replay (MEDIUM):** signatures don't bind the gossip
+  topic, so `RoomSetting` / `RotateRoomKey` / `MemberLeave` now carry and
+  cross-check the room they apply to — a malicious relay can no longer replay a
+  signed control message from one room into another.
+- **More authz & integrity fixes (MEDIUM):** a banned room creator can no longer
+  force a disappearing-messages TTL; mailbox-delivered edits/deletes/reactions are
+  no longer ACK-dropped before their target arrives (no silent suppression of a
+  retraction); `JoinRefused` is owner-authenticated (no spoofed phishing toast);
+  the GUI recovery-seed "Copy" button is gone (the 24-word root secret no longer
+  touches the OS clipboard / Universal Clipboard).
+- **Hardening:** an 8-char floor on room/master passphrases at set time; onion
+  dialing matches `.onion` as a host suffix, not a substring (which could tunnel a
+  clearnet host through Tor); Windows reserved device filenames neutralized on
+  saved files; the SQLCipher DB + GUI log are owner-only (0600); the
+  discovered-rooms map is bounded and untrusted announcement fields clamped;
+  `cargo-deny` is now a hard CI gate.
+
+The relay stays transport-agnostic: clients on Tor, raw clearnet, and a
+cloudflare/clearnet TLS door all reach the same mailbox + room fan-out, so users
+on different transports chat together.
 
 ## What's new in 2.0.2 — security audit hardening
 

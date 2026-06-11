@@ -42,10 +42,14 @@ ensure_tor() {
     return 0
   fi
   log "starting Tor…"
+  # huddle 2.0.3 (audit N-L12): write Tor's log to a per-run mktemp file, not a
+  # predictable /tmp path a local attacker could pre-create as a symlink to clobber.
+  local tor_log
+  tor_log="$(mktemp -t huddle-tor.XXXXXX)"
   if command -v brew >/dev/null 2>&1 && brew list tor >/dev/null 2>&1; then
-    brew services start tor >/dev/null 2>&1 || tor >/tmp/huddle-tor.log 2>&1 &
+    brew services start tor >/dev/null 2>&1 || tor >"$tor_log" 2>&1 &
   else
-    tor >/tmp/huddle-tor.log 2>&1 &
+    tor >"$tor_log" 2>&1 &
   fi
   # Wait up to ~30s for the SOCKS port to come up.
   for _ in $(seq 1 60); do

@@ -464,7 +464,20 @@ fn sanitize_filename(name: &str) -> String {
         .collect();
     let trimmed = cleaned.trim_matches(|c: char| c == ' ' || c == '.');
     if trimmed.is_empty() {
-        "untitled".into()
+        return "untitled".into();
+    }
+    // huddle 2.0.3 (audit N-L4): neutralize Windows reserved device names
+    // (CON, PRN, AUX, NUL, COM1-9, LPT1-9). They pass the alphanumeric filter,
+    // and on Windows `dir.join("NUL")` resolves to a device, not a file. Match
+    // the base name case-insensitively, with or without an extension.
+    let stem = trimmed.split('.').next().unwrap_or(trimmed);
+    let up = stem.to_ascii_uppercase();
+    let is_reserved = matches!(up.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ((up.starts_with("COM") || up.starts_with("LPT"))
+            && up.len() == 4
+            && matches!(up.as_bytes()[3], b'1'..=b'9'));
+    if is_reserved {
+        format!("_{trimmed}")
     } else {
         trimmed.to_string()
     }

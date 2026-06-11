@@ -201,6 +201,7 @@ mod tests {
     fn sample_msg() -> RoomMessage {
         RoomMessage::MemberLeave {
             sender_fingerprint: "test-fp".into(),
+            room_id: None,
         }
     }
 

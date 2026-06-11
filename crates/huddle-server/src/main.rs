@@ -101,6 +101,55 @@ const MAX_CONNECTIONS_PER_FP: usize = 16;
 /// above only limits *registered* sockets, not pre-auth ones). A permit is held
 /// for each connection's lifetime; new connections beyond this are dropped.
 const MAX_TOTAL_CONNECTIONS: usize = 4096;
+/// huddle 2.0.3 (audit N-H1): cap the rows a single SENDER may have outstanding
+/// in the mailbox. The H-2 global ceiling alone let one identity squat the whole
+/// 100k pool with rows for fabricated, never-draining recipients; bounding
+/// per-sender outstanding rows (idx_mailbox_sender) makes squatting cost many
+/// identities, and the per-connection rate limit slows each. Generous enough for
+/// a heavy poster in a large mostly-offline group (rows drain as members ACK).
+const MAX_MAILBOX_PER_SENDER: usize = 10_000;
+/// huddle 2.0.3 (audit N-H1): per-connection token bucket for the mailbox-writing
+/// ops (Publish/SendDirect) — burst capacity then a sustained refill, well above
+/// any human or file-transfer cadence yet far below a flood.
+const RATE_BUCKET_CAPACITY: f64 = 300.0;
+const RATE_BUCKET_REFILL_PER_SEC: f64 = 100.0;
+/// huddle 2.0.3 (audit N-M7): drop an authenticated socket that sends no frame
+/// for this long. Healthy clients send an application keepalive every
+/// ~60 s, so this only reaps idle/dead sockets — closing the "authenticate then
+/// hold the socket forever" connection-pool exhaustion. Must exceed the client
+/// keepalive period with margin.
+const RELAY_IDLE_TIMEOUT_SECS: u64 = 150;
+
+/// huddle 2.0.3 (audit N-H1): minimal per-connection token-bucket rate limiter.
+struct RateLimiter {
+    tokens: f64,
+    last: std::time::Instant,
+}
+
+impl RateLimiter {
+    fn new() -> Self {
+        Self {
+            tokens: RATE_BUCKET_CAPACITY,
+            last: std::time::Instant::now(),
+        }
+    }
+
+    /// Refill by elapsed time and try to consume one token. Returns `false` when
+    /// the bucket is empty (the caller should shed the op).
+    fn allow(&mut self) -> bool {
+        let now = std::time::Instant::now();
+        let elapsed = now.duration_since(self.last).as_secs_f64();
+        self.last = now;
+        self.tokens =
+            (self.tokens + elapsed * RATE_BUCKET_REFILL_PER_SEC).min(RATE_BUCKET_CAPACITY);
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
 
 // ---- wire protocol (server level — cleartext routing only) ----
 
@@ -509,8 +558,15 @@ async fn serve_metrics(mut stream: TcpStream, head: &str, shared: &Arc<Shared>) 
             None
         }
     });
-    let authorized =
-        matches!((&want, &provided), (Some(tok), Some(p)) if *p == format!("Bearer {tok}"));
+    // huddle 2.0.3 (audit N-L7): compare fixed-length SHA-256 digests rather than
+    // the raw token strings, so neither the token length nor a byte-prefix match
+    // leaks through comparison timing.
+    let authorized = match (&want, &provided) {
+        (Some(tok), Some(p)) => {
+            Sha256::digest(format!("Bearer {tok}").as_bytes()) == Sha256::digest(p.as_bytes())
+        }
+        _ => false,
+    };
     if !authorized {
         let code = if want.is_none() {
             "404 Not Found"
@@ -676,6 +732,14 @@ async fn serve_ws(ws: WebSocketStream<TcpStream>, shared: Arc<Shared>) -> Result
     // (idle pre-auth DoS defense). Disabled once authenticated.
     let auth_deadline = tokio::time::sleep(std::time::Duration::from_secs(PRE_AUTH_TIMEOUT_SECS));
     tokio::pin!(auth_deadline);
+    // huddle 2.0.3 (audit N-M7): once authenticated, reap a socket that sends no
+    // frame for RELAY_IDLE_TIMEOUT_SECS. Healthy clients send an application
+    // keepalive well within that window, so this only drops idle/dead sockets —
+    // closing the "authenticate then hold 4096 sockets forever" pool exhaustion.
+    let idle_deadline = tokio::time::sleep(std::time::Duration::from_secs(RELAY_IDLE_TIMEOUT_SECS));
+    tokio::pin!(idle_deadline);
+    // huddle 2.0.3 (audit N-H1): per-connection token bucket for mailbox writes.
+    let mut limiter = RateLimiter::new();
 
     loop {
         let frame = tokio::select! {
@@ -684,11 +748,19 @@ async fn serve_ws(ws: WebSocketStream<TcpStream>, shared: Arc<Shared>) -> Result
                 shared.metrics.pre_auth_timeouts.fetch_add(1, Ordering::Relaxed);
                 break;
             }
+            _ = &mut idle_deadline, if authenticated => {
+                debug!("authenticated client idle past timeout; dropping");
+                break;
+            }
             f = stream.next() => match f {
                 Some(Ok(fr)) => fr,
                 Some(Err(_)) | None => break,
             },
         };
+        // Any received frame counts as liveness; push the idle deadline out.
+        idle_deadline.as_mut().reset(
+            tokio::time::Instant::now() + std::time::Duration::from_secs(RELAY_IDLE_TIMEOUT_SECS),
+        );
         let text = match frame {
             WsMessage::Text(t) => t.as_str().to_string(),
             WsMessage::Binary(b) => String::from_utf8_lossy(&b).into_owned(),
@@ -749,6 +821,7 @@ async fn serve_ws(ws: WebSocketStream<TcpStream>, shared: Arc<Shared>) -> Result
             &mut acks_enabled,
             &tx,
             &shared,
+            &mut limiter,
         )
         .await
         {
@@ -781,6 +854,7 @@ async fn handle_client_msg(
     acks_enabled: &mut bool,
     tx: &Tx,
     shared: &Arc<Shared>,
+    limiter: &mut RateLimiter,
 ) -> Result<()> {
     match msg {
         ClientMsg::Hello { rooms, acks, .. } => {
@@ -862,6 +936,20 @@ async fn handle_client_msg(
             if payload_b64.len() > MAX_PAYLOAD_B64 {
                 bail!("payload too large");
             }
+            // huddle 2.0.3 (audit N-H1): rate-limit the mailbox-writing op. Shed
+            // (report as not-delivered, preserving the Sent contract) rather than
+            // disconnect, so a legit burst degrades gracefully and a flooder is
+            // throttled instead of being able to fill the global pool in a burst.
+            if !limiter.allow() {
+                let _ = tx
+                    .send(OutEvent::Msg(ServerMsg::Sent {
+                        id,
+                        delivered: 0,
+                        queued: 0,
+                    }))
+                    .await;
+                return Ok(());
+            }
             // The sender is, by definition, a member of the room.
             let members = {
                 let db = shared.db.lock().await;
@@ -903,7 +991,7 @@ async fn handle_client_msg(
                         .fetch_add(1, Ordering::Relaxed);
                 } else {
                     let db = shared.db.lock().await;
-                    if enqueue(&db, &member, &room, &id, &payload_b64)? {
+                    if enqueue(&db, &fp, &member, &room, &id, &payload_b64)? {
                         queued += 1;
                         shared
                             .metrics
@@ -933,7 +1021,7 @@ async fn handle_client_msg(
             // same per-fingerprint mailbox group fan-out uses for offline
             // members. This makes 1:1 DMs and friend requests work without the
             // both-sides-subscribed-the-same-room dance.
-            let _from = require_fp(fingerprint)?;
+            let from = require_fp(fingerprint)?;
             let to = clean_id(&to).ok_or_else(|| anyhow!("invalid recipient"))?;
             let room = clean_id(&room).ok_or_else(|| anyhow!("invalid room"))?;
             if id.is_empty() || id.len() > MAX_MSG_ID_LEN {
@@ -941,6 +1029,17 @@ async fn handle_client_msg(
             }
             if payload_b64.len() > MAX_PAYLOAD_B64 {
                 bail!("payload too large");
+            }
+            // huddle 2.0.3 (audit N-H1): rate-limit the mailbox-writing op.
+            if !limiter.allow() {
+                let _ = tx
+                    .send(OutEvent::Msg(ServerMsg::Sent {
+                        id,
+                        delivered: 0,
+                        queued: 0,
+                    }))
+                    .await;
+                return Ok(());
             }
             let online = {
                 let conns = shared.conns.lock().await;
@@ -966,7 +1065,7 @@ async fn handle_client_msg(
                 (1usize, 0usize)
             } else {
                 let db = shared.db.lock().await;
-                if enqueue(&db, &to, &room, &id, &payload_b64)? {
+                if enqueue(&db, &from, &to, &room, &id, &payload_b64)? {
                     shared
                         .metrics
                         .publish_queued
@@ -1294,10 +1393,27 @@ fn migrate(c: &Connection) -> Result<()> {
             room        TEXT NOT NULL,
             msg_id      TEXT NOT NULL,
             payload_b64 TEXT NOT NULL,
-            created_at  INTEGER NOT NULL
+            created_at  INTEGER NOT NULL,
+            sender      TEXT
         );
-        CREATE INDEX IF NOT EXISTS idx_mailbox_fp ON mailbox(fingerprint);",
+        CREATE INDEX IF NOT EXISTS idx_mailbox_fp ON mailbox(fingerprint);
+        -- huddle 2.0.3 (audit N-H1): index the sender so the per-sender
+        -- outstanding-rows cap in `enqueue` stays cheap on the hot path.
+        CREATE INDEX IF NOT EXISTS idx_mailbox_sender ON mailbox(sender);
+        -- huddle 2.0.3 (audit N-L5): index memberships by room so the
+        -- per-Publish fan-out lookup isn't a full table scan.
+        CREATE INDEX IF NOT EXISTS idx_memberships_room ON memberships(room);",
     )?;
+    // huddle 2.0.3 (audit N-H1): add the `sender` column to a pre-2.0.3 mailbox
+    // table. SQLite has no "ADD COLUMN IF NOT EXISTS", so guard on table_info.
+    let has_sender: i64 = c.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('mailbox') WHERE name = 'sender'",
+        [],
+        |r| r.get(0),
+    )?;
+    if has_sender == 0 {
+        c.execute_batch("ALTER TABLE mailbox ADD COLUMN sender TEXT;")?;
+    }
     Ok(())
 }
 
@@ -1337,16 +1453,37 @@ fn room_members(c: &Connection, room: &str) -> Result<Vec<String>> {
 /// Returns `Ok(true)` if the message was queued, `Ok(false)` if it was shed
 /// because the global mailbox ceiling is reached (the caller should NOT count it
 /// as queued, but must not disconnect the client — the relay is simply full).
-fn enqueue(c: &Connection, fp: &str, room: &str, id: &str, payload_b64: &str) -> Result<bool> {
+fn enqueue(
+    c: &Connection,
+    sender: &str,
+    fp: &str,
+    room: &str,
+    id: &str,
+    payload_b64: &str,
+) -> Result<bool> {
     // huddle 2.0.2 (audit H-2): global mailbox ceiling — shed rather than evict.
     let total: i64 = c.query_row("SELECT COUNT(*) FROM mailbox", [], |r| r.get(0))?;
     if total as usize >= MAX_MAILBOX_TOTAL_ROWS {
         return Ok(false);
     }
+    // huddle 2.0.3 (audit N-H1): per-sender outstanding-rows cap. Without it the
+    // global ceiling above is squattable by one identity (the H-2 residual):
+    // ~200 fabricated, never-connecting recipients × 500 rows fills the pool and
+    // sheds every honest user's offline message for 30 days. Bounding the rows a
+    // single sender can hold outstanding (cheap via idx_mailbox_sender) means
+    // squatting now costs many identities; legit rows drain as recipients ACK.
+    let by_sender: i64 = c.query_row(
+        "SELECT COUNT(*) FROM mailbox WHERE sender = ?1",
+        params![sender],
+        |r| r.get(0),
+    )?;
+    if by_sender as usize >= MAX_MAILBOX_PER_SENDER {
+        return Ok(false);
+    }
     c.execute(
-        "INSERT INTO mailbox(fingerprint, room, msg_id, payload_b64, created_at)
-         VALUES(?1, ?2, ?3, ?4, ?5)",
-        params![fp, room, id, payload_b64, now_unix()],
+        "INSERT INTO mailbox(fingerprint, room, msg_id, payload_b64, created_at, sender)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+        params![fp, room, id, payload_b64, now_unix(), sender],
     )?;
     // Trim to the newest MAX_MAILBOX_PER_FP entries for this recipient.
     c.execute(
@@ -1522,7 +1659,7 @@ mod tests {
         {
             let db = shared.db.lock().await;
             for i in 0..3 {
-                enqueue(&db, fp, "room", &format!("m{i}"), "p").unwrap();
+                enqueue(&db, "sender", fp, "room", &format!("m{i}"), "p").unwrap();
             }
         }
         let (tx, mut rx) = mpsc::channel::<OutEvent>(OUTBOUND_CAP);
@@ -1562,7 +1699,7 @@ mod tests {
         {
             let db = shared.db.lock().await;
             for i in 0..3 {
-                enqueue(&db, fp, "room", &format!("m{i}"), "p").unwrap();
+                enqueue(&db, "sender", fp, "room", &format!("m{i}"), "p").unwrap();
             }
         }
         let (tx, mut rx) = mpsc::channel::<OutEvent>(OUTBOUND_CAP);
@@ -1592,8 +1729,8 @@ mod tests {
         let fp = "fp-ack";
         {
             let db = shared.db.lock().await;
-            enqueue(&db, fp, "room", "m0", "p").unwrap();
-            enqueue(&db, fp, "room", "m1", "p").unwrap();
+            enqueue(&db, "sender", fp, "room", "m0", "p").unwrap();
+            enqueue(&db, "sender", fp, "room", "m1", "p").unwrap();
         }
         let (tx, mut rx) = mpsc::channel::<OutEvent>(OUTBOUND_CAP);
         let collector = tokio::spawn(async move {

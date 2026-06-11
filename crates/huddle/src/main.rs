@@ -210,6 +210,16 @@ async fn main() -> Result<()> {
         if prompt.passphrase.is_empty() {
             return Ok(());
         }
+        // huddle 2.0.3 (audit N-L2): floor the master passphrase when SETTING it on
+        // a fresh launch. An existing DB only verifies the passphrase here, so its
+        // (possibly older, shorter) secret must still be accepted — floor only when new.
+        if is_new && prompt.passphrase.chars().count() < huddle_core::app::MIN_PASSPHRASE_LEN {
+            eprintln!(
+                "Master passphrase must be at least {} characters.",
+                huddle_core::app::MIN_PASSPHRASE_LEN
+            );
+            return Ok(());
+        }
         // Only persist the salt once the user has committed a
         // passphrase — otherwise pressing Esc on first launch leaves
         // a salt file behind and a future launch would think the DB

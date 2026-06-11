@@ -1,6 +1,6 @@
 # Security
 
-This document describes huddle's security model as of **2.0.2**: what is
+This document describes huddle's security model as of **2.0.3**: what is
 protected, how, and — just as importantly — what is *not*. Read the
 "Known limitations / by-design tradeoffs" section before trusting huddle
 with anything that matters.

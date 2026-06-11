@@ -11,6 +11,12 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# huddle 2.0.3 (audit N-L9): CI only reads the repo. Pin the token scope here
+# rather than inheriting the (potentially read-write) repo/org default — these
+# jobs run arbitrary dependency build code via cargo build/test.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -100,8 +106,10 @@ jobs:
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest
-    # Informational for now; remove `continue-on-error` to promote to a hard gate.
-    continue-on-error: true
+    # huddle 2.0.3 (audit N-L10): hard gate. `cargo deny check` (advisories +
+    # licenses + bans + sources) passes today, so a future PR that pulls in a
+    # banned license, an untrusted source, or a yanked crate now fails CI rather
+    # than slipping through (it is the only gate covering those classes).
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

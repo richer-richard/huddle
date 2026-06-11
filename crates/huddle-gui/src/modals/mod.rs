@@ -163,9 +163,11 @@ fn export_seed(ctx: &egui::Context, s: &mut ExportSeedState, actions: &mut Vec<U
                     {
                         s.revealed = !s.revealed;
                     }
-                    if s.revealed && ui.button("Copy").clicked() {
-                        actions.push(UiAction::Copy(s.phrase.clone()));
-                    }
+                    // huddle 2.0.3 (audit N-M5): no "Copy" for the recovery seed.
+                    // Writing the 24-word root identity secret to the OS clipboard
+                    // exposes it to every process and (on macOS) syncs it off-device
+                    // via Universal Clipboard. The Verify step below already assumes
+                    // manual transcription, so a copy affordance is pure risk.
                     right(ui, |ui| {
                         if ui.button("I've written it down →").clicked() {
                             s.step = ExportSeedStep::Verify;

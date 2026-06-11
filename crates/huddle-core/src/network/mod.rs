@@ -969,9 +969,29 @@ impl NetworkTask {
                     const MAX_ANN_NAME_CHARS: usize = 128;
                     const MAX_ANN_HOST_ADDRS: usize = 4;
                     const MAX_ANN_OWNERS: usize = 64;
+                    // huddle 2.0.3 (audit L-15 residual): the room_id is a map
+                    // key, the creator fingerprint an identity, and the salt a
+                    // secret — none can be safely truncated, so reject a
+                    // structurally-implausible announcement outright. Also bound
+                    // each host_addr's length (the count was already capped).
+                    const MAX_ANN_ID_CHARS: usize = 128;
+                    const MAX_ANN_FP_CHARS: usize = 128;
+                    const MAX_ANN_SALT_BYTES: usize = 64;
+                    const MAX_ANN_ADDR_CHARS: usize = 256;
+                    if ann.room_id.len() > MAX_ANN_ID_CHARS
+                        || ann.creator_fingerprint.len() > MAX_ANN_FP_CHARS
+                        || ann
+                            .passphrase_salt
+                            .as_ref()
+                            .is_some_and(|s| s.len() > MAX_ANN_SALT_BYTES)
+                    {
+                        warn!("oversized RoomAnnouncement id/fp/salt; dropping");
+                        return;
+                    }
                     if ann.name.chars().count() > MAX_ANN_NAME_CHARS {
                         ann.name = ann.name.chars().take(MAX_ANN_NAME_CHARS).collect();
                     }
+                    ann.host_addrs.retain(|a| a.len() <= MAX_ANN_ADDR_CHARS);
                     ann.host_addrs.truncate(MAX_ANN_HOST_ADDRS);
                     ann.owner_fingerprints.truncate(MAX_ANN_OWNERS);
                     let _ = self

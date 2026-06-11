@@ -254,7 +254,17 @@ pub enum RoomMessage {
         reply_to: Option<String>,
     },
     /// Explicit leave notification.
-    MemberLeave { sender_fingerprint: String },
+    MemberLeave {
+        sender_fingerprint: String,
+        /// huddle 2.0.3 (audit N-M2): the room this leave is for. The Ed25519
+        /// signature commits to the payload but NOT the gossip topic, so without
+        /// this a malicious relay could replay a signed leave from room A onto
+        /// room B's topic. `Option` + `skip_serializing_if` keeps the wire
+        /// byte-identical to pre-2.0.3 when unset (graceful back-compat); honest
+        /// receivers cross-check it against the delivery topic when present.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        room_id: Option<String>,
+    },
     /// "I'm rotating the room key — derive a new passphrase key from
     /// `new_salt` + the new passphrase you'll be told out-of-band, then
     /// wait for my MemberAnnounce." Phase 3 v1: simplistic — only the
@@ -264,6 +274,11 @@ pub enum RoomMessage {
         rotator_fingerprint: String,
         /// Argon2id salt for the new passphrase-derived key.
         new_salt: Vec<u8>,
+        /// huddle 2.0.3 (audit N-M2): the room being rotated, cross-checked
+        /// against the delivery topic so a signed rotation can't be replayed
+        /// into another room. Optional for pre-2.0.3 back-compat.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        room_id: Option<String>,
     },
     /// Ephemeral "I'm typing" signal. TTL on the receive side is 3s.
     Typing { sender_fingerprint: String },
@@ -457,6 +472,13 @@ pub enum RoomMessage {
     RoomSetting {
         sender_fingerprint: String,
         disappearing_ttl_secs: u64,
+        /// huddle 2.0.3 (audit N-M2): the room this setting applies to. Without
+        /// it a malicious relay could replay a signed disappearing-TTL from one
+        /// room (where the signer is an owner) onto another room they also own,
+        /// forcing a retroactive history purge there (chains L-24). Cross-checked
+        /// against the delivery topic on receive. Optional for back-compat.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        room_id: Option<String>,
     },
 }
 
@@ -554,6 +576,7 @@ mod tests {
             },
             RoomMessage::MemberLeave {
                 sender_fingerprint: "fp".into(),
+                room_id: None,
             },
             RoomMessage::FileOffer {
                 sender_fingerprint: "fp".into(),
@@ -574,6 +597,7 @@ mod tests {
             RoomMessage::RotateRoomKey {
                 rotator_fingerprint: "fp".into(),
                 new_salt: vec![1u8; 16],
+                room_id: None,
             },
             RoomMessage::Typing {
                 sender_fingerprint: "fp".into(),
@@ -606,6 +630,7 @@ mod tests {
             RoomMessage::RoomSetting {
                 sender_fingerprint: "fp".into(),
                 disappearing_ttl_secs: 3600,
+                room_id: None,
             },
         ];
         for m in msgs {

@@ -32,8 +32,12 @@ jobs:
         run: cargo install cargo-fuzz --locked
       - name: Run each target briefly
         working-directory: crates/huddle-core
+        # huddle 2.0.3 (audit N-L11): pass the workflow input through an env var
+        # rather than interpolating ${{ }} directly into the shell (injection-safe).
+        env:
+          SECONDS_INPUT: ${{ github.event.inputs.seconds || '120' }}
         run: |
-          SECS="${{ github.event.inputs.seconds || '120' }}"
+          SECS="$SECONDS_INPUT"
           # The fuzz crate is a detached workspace under crates/huddle-core/fuzz.
           targets=$(cargo fuzz list)
           echo "Fuzz targets: $targets"

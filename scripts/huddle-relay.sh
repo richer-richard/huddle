@@ -71,8 +71,13 @@ if [ "$NO_TUNNEL" = "1" ]; then
   IP="$(curl -fsS https://api.ipify.org 2>/dev/null || echo '<your-vps-ip>')"
   log "server up (no tunnel). Point clients at a raw clearnet door:"
   log "    ws://${IP}:${PORT}/ws"
-  log "(open the firewall for tcp/${PORT}; this exposes your IP + WS metadata,"
-  log " messages stay end-to-end encrypted). Ctrl-C to stop."
+  # huddle 2.0.3 (audit N-L8): be explicit that plaintext ws:// leaks identity-
+  # level metadata, not just "IP + WS metadata".
+  log "(open the firewall for tcp/${PORT}. WARNING: plaintext ws:// lets any"
+  log " on-path observer read your server IP AND the client + recipient"
+  log " fingerprints, room ids, and message ids in the clear — only the message"
+  log " BODIES stay end-to-end encrypted. Prefer the Tor/cloudflared tunnel.)"
+  log "Ctrl-C to stop."
   wait "$SERVER_PID"
   exit 0
 fi

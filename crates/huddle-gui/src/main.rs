@@ -65,6 +65,21 @@ fn init_logging() {
     use tracing_subscriber::EnvFilter;
     let dir = huddle_core::config::data_dir();
     let _ = std::fs::create_dir_all(&dir);
+    // huddle 2.0.3 (audit N-L13): the gui log holds cleartext network metadata
+    // (peer addrs, fingerprints). Ensure it's owner-only on Unix — create it 0600
+    // if absent, and tighten it if a prior run left it world-readable — before the
+    // appender opens it.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let log_path = dir.join("huddle-gui.log");
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(&log_path);
+        let _ = std::fs::set_permissions(&log_path, std::fs::Permissions::from_mode(0o600));
+    }
     let appender = tracing_appender::rolling::never(&dir, "huddle-gui.log");
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("huddle_gui=debug,huddle_core=info"));

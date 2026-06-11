@@ -1538,6 +1538,15 @@ fn render_locked(
         form.error = Some("passphrase can't be empty".into());
         return None;
     }
+    // huddle 2.0.3 (audit N-L2): floor the master passphrase when SETTING it on a
+    // fresh launch (an existing DB only verifies, so don't floor that path).
+    if form.first_launch && form.passphrase.chars().count() < huddle_core::app::MIN_PASSPHRASE_LEN {
+        form.error = Some(format!(
+            "passphrase must be at least {} characters",
+            huddle_core::app::MIN_PASSPHRASE_LEN
+        ));
+        return None;
+    }
     if form.first_launch && form.confirm != form.passphrase {
         form.error = Some("passphrases don't match — try again".into());
         form.confirm.clear();

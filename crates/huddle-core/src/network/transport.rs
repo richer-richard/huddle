@@ -147,10 +147,19 @@ fn unavailable(id: TransportId, reason: &'static str) -> TransportProfile {
 
 /// How to dial an "onion" relay URL. A real `.onion` goes through Tor's
 /// SOCKS5 proxy; a plain `ws://` / `wss://` host pointed at by `--server`
-/// (tests, or a non-Tor relay) is dialed directly / over TLS. This preserves
-/// the pre-1.0 `if url.contains(".onion")` behavior.
+/// (tests, or a non-Tor relay) is dialed directly / over TLS.
+///
+/// huddle 2.0.3 (audit N-L3): the door is chosen by the URL's HOST, matching
+/// `.onion` as a real TLD suffix. The pre-1.0 `url.contains(".onion")` was a
+/// substring test, so `ws://x.onion.evil.com` matched and would be routed
+/// through a Tor exit to the clearnet host `evil.com`, leaking the cleartext
+/// `Hello` (fingerprint + room list). A genuine onion host always goes through
+/// Tor regardless of scheme.
 fn onion_dial(url: &str, tor_socks: &str) -> DialMode {
-    if url.contains(".onion") {
+    let host = ws_url_host(url);
+    let is_onion =
+        host.eq_ignore_ascii_case("onion") || host.to_ascii_lowercase().ends_with(".onion");
+    if is_onion {
         DialMode::Socks5 {
             proxy: tor_socks.to_string(),
         }
@@ -161,6 +170,24 @@ fn onion_dial(url: &str, tor_socks: &str) -> DialMode {
     } else {
         DialMode::Direct
     }
+}
+
+/// Extract the bare host from a `ws://`/`wss://` URL: strip the scheme, any
+/// `userinfo@`, the path/query/fragment, the `:port`, and IPv6 brackets.
+fn ws_url_host(url: &str) -> &str {
+    let after_scheme = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .rsplit('@')
+        .next()
+        .unwrap_or("");
+    let no_port = authority
+        .rsplit_once(':')
+        .map(|(h, _)| h)
+        .unwrap_or(authority);
+    no_port.trim_start_matches('[').trim_end_matches(']')
 }
 
 /// Build the full set of doors from resolved config. Always returns all five
@@ -311,5 +338,41 @@ mod tests {
         assert!(arti.available());
         #[cfg(not(feature = "arti"))]
         assert!(!arti.available());
+    }
+
+    #[test]
+    fn onion_dial_matches_onion_as_host_suffix_not_substring() {
+        // huddle 2.0.3 (audit N-L3): a genuine onion host routes through Tor…
+        assert!(matches!(
+            onion_dial("ws://abcdefghij234567.onion:80/ws", "127.0.0.1:9050"),
+            DialMode::Socks5 { .. }
+        ));
+        // …but `.onion` as a mere substring of a clearnet host must NOT (that
+        // would tunnel a clearnet host through a Tor exit and leak the Hello).
+        assert!(!matches!(
+            onion_dial("ws://x.onion.evil.example/ws", "127.0.0.1:9050"),
+            DialMode::Socks5 { .. }
+        ));
+        // Cross-transport doors onto the same relay: cloudflare/clearnet TLS via
+        // wss → TLS; raw clearnet ws → Direct. (Tor is the third door above.)
+        assert!(matches!(
+            onion_dial("wss://relay.example.com/ws", "127.0.0.1:9050"),
+            DialMode::Tls { .. }
+        ));
+        assert!(matches!(
+            onion_dial("ws://1.2.3.4:8787/ws", "127.0.0.1:9050"),
+            DialMode::Direct
+        ));
+    }
+
+    #[test]
+    fn ws_url_host_strips_scheme_port_path_and_userinfo() {
+        assert_eq!(
+            ws_url_host("wss://relay.example.com:443/ws"),
+            "relay.example.com"
+        );
+        assert_eq!(ws_url_host("ws://1.2.3.4:8787/ws"), "1.2.3.4");
+        assert_eq!(ws_url_host("ws://user@host.example/x"), "host.example");
+        assert_eq!(ws_url_host("ws://abc.onion"), "abc.onion");
     }
 }

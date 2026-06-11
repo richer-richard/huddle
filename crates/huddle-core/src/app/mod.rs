@@ -289,6 +289,28 @@ const TYPING_TTL_SECS: i64 = 3;
 /// happen every 15 seconds; after 45s of silence we drop it).
 const DISCOVERED_TTL_SECS: i64 = 45;
 const ANNOUNCE_INTERVAL_SECS: u64 = 15;
+/// huddle 2.0.3 (audit L-15 residual): hard ceiling on the in-memory
+/// discovered-rooms map so a gossipsub flood of distinct room_ids can't grow it
+/// without bound between the 45s TTL prunes. Eviction is stalest-first.
+const MAX_DISCOVERED_ROOMS: usize = 1024;
+
+/// huddle 2.0.3 (audit N-L2/L-4): minimum length for any passphrase we SET — a
+/// master passphrase (setup / change / go-dark) or a room passphrase (create /
+/// rotate). Enforced only at set time, never at derive/verify, so an existing
+/// short passphrase still unlocks and a joiner can still enter a room whose
+/// passphrase predates this floor. Argon2id raises a guess's cost but can't
+/// rescue a trivially short secret — and a room's salt is broadcast in the clear,
+/// so a weak room passphrase is directly offline-brute-forceable.
+pub const MIN_PASSPHRASE_LEN: usize = 8;
+
+fn validate_passphrase_len(p: &str) -> Result<()> {
+    if p.chars().count() < MIN_PASSPHRASE_LEN {
+        return Err(HuddleError::Other(format!(
+            "passphrase must be at least {MIN_PASSPHRASE_LEN} characters"
+        )));
+    }
+    Ok(())
+}
 
 /// huddle 1.3.1: bound the in-memory `sas_flows` map. Inbound `SasInit`
 /// inserts an entry keyed by the initiator-chosen `tx_id`, so without a sweep
@@ -1133,6 +1155,12 @@ impl AppHandle {
             return Err(HuddleError::Other(
                 "encrypted room requires a passphrase".into(),
             ));
+        }
+        // huddle 2.0.3 (audit N-L2): floor the room passphrase at creation — its
+        // Argon2id salt rides the cleartext RoomAnnouncement, so a weak one is
+        // directly offline-brute-forceable to break the room's confidentiality.
+        if let Some(p) = passphrase {
+            validate_passphrase_len(p)?;
         }
 
         let created_at = now_unix();
@@ -1987,6 +2015,8 @@ impl AppHandle {
         // member's leave to evict them from honest rosters.
         let leave_msg = RoomMessage::MemberLeave {
             sender_fingerprint: self.identity.fingerprint().to_string(),
+            // huddle 2.0.3 (audit N-M2): bind the room to this signed leave.
+            room_id: Some(room_id.to_string()),
         };
         let dispatched =
             match crate::crypto::sign_message(&self.identity, &leave_msg).and_then(|env| {
@@ -2398,6 +2428,9 @@ impl AppHandle {
         let msg = RoomMessage::RoomSetting {
             sender_fingerprint: our_fp,
             disappearing_ttl_secs: ttl_secs.map(u64::from).unwrap_or(0),
+            // huddle 2.0.3 (audit N-M2): bind the room so the signed setting
+            // can't be replayed onto another room's topic by a hostile relay.
+            room_id: Some(room_id.to_string()),
         };
         let env = crate::crypto::sign_message(&self.identity, &msg)?;
         let bytes = crate::network::protocol::encode_wire_signed(&env)?;
@@ -2476,17 +2509,12 @@ impl AppHandle {
                     .into(),
             ));
         }
-        // huddle 2.0.2 (audit L-4): enforce a minimum length on the NEW passphrase.
-        // The floor is applied only at set/change time (never at derive/verify), so
-        // an existing short passphrase can still unlock — but new ones can't be
-        // trivially weak. The at-rest key's strength is Argon2id-over-passphrase, so
-        // a 1-char passphrase is brute-forceable regardless of KDF cost.
-        const MIN_PASSPHRASE_LEN: usize = 8;
-        if new.chars().count() < MIN_PASSPHRASE_LEN {
-            return Err(HuddleError::Other(format!(
-                "new passphrase must be at least {MIN_PASSPHRASE_LEN} characters"
-            )));
-        }
+        // huddle 2.0.2 (audit L-4) / 2.0.3 (N-L2): floor the NEW passphrase. The
+        // floor is applied only at set/change time (never at derive/verify), so an
+        // existing short passphrase can still unlock — but new ones can't be
+        // trivially weak. The at-rest key's strength is Argon2id-over-passphrase,
+        // so a 1-char passphrase is brute-forceable regardless of KDF cost.
+        validate_passphrase_len(new)?;
         // 1. Verify the current passphrase against the live persist key.
         let salt = storage::keychain::load_or_create_salt()?;
         let cur_master = storage::keychain::derive_master_key(current, &salt)?;
@@ -4026,10 +4054,22 @@ impl AppHandle {
                     });
                     return;
                 }
-                self.discovered_rooms
-                    .lock()
-                    .unwrap()
-                    .insert(ann.room_id.clone(), discovered.clone());
+                {
+                    let mut map = self.discovered_rooms.lock().unwrap();
+                    // huddle 2.0.3 (audit L-15 residual): cap the map so a flood
+                    // of distinct group room_ids can't grow it without bound
+                    // between TTL prunes; evict the stalest entry to make room.
+                    if !map.contains_key(&ann.room_id) && map.len() >= MAX_DISCOVERED_ROOMS {
+                        if let Some(stale) = map
+                            .iter()
+                            .min_by_key(|(_, r)| r.last_seen)
+                            .map(|(k, _)| k.clone())
+                        {
+                            map.remove(&stale);
+                        }
+                    }
+                    map.insert(ann.room_id.clone(), discovered.clone());
+                }
                 let _ = self.app_event_tx.send(AppEvent::RoomDiscovered(discovered));
             }
             NetworkEvent::RoomMessageReceived {
@@ -4450,6 +4490,33 @@ impl AppHandle {
             .unwrap_or(false)
     }
 
+    /// huddle 2.0.3 (audit N-M3): whether a mailbox-delivered signed affordance
+    /// (`Edit`/`Delete`/`Reaction`) can be durably applied right now — i.e. its
+    /// target message is already present. The handlers drop an affordance whose
+    /// target hasn't arrived yet; if we ACK such a drop, a relay that reorders
+    /// the mailbox (affordance before its target) permanently suppresses the
+    /// edit/deletion/retraction. Non-affordances (and envelopes that don't
+    /// verify) return `true` so the normal ACK proceeds.
+    fn relay_affordance_resolved(
+        &self,
+        room_id: &str,
+        env: &crate::network::protocol::SignedRoomMessage,
+    ) -> bool {
+        let Ok((msg, _signer)) = crate::crypto::verify_signed(env) else {
+            return true;
+        };
+        let target = match &msg {
+            RoomMessage::Edit { target_msg_id, .. }
+            | RoomMessage::Delete { target_msg_id, .. }
+            | RoomMessage::Reaction { target_msg_id, .. } => target_msg_id,
+            _ => return true,
+        };
+        matches!(
+            repo::find_message_by_client_id(&self.db, room_id, target),
+            Ok(Some(_))
+        )
+    }
+
     /// huddle 2.0.2 (audit M-2): process a mailbox-delivered relay message and
     /// report whether the caller may ACK it (let the relay delete its copy). An
     /// `Encrypted` body we can't decrypt yet (its Megolm session key hasn't
@@ -4463,6 +4530,9 @@ impl AppHandle {
                 ref session_id,
                 ..
             })) => self.can_decrypt(&room_id, sender_fingerprint, session_id),
+            // huddle 2.0.3 (audit N-M3): don't ACK a signed Edit/Delete/Reaction
+            // whose target hasn't arrived — leave it for the relay to redeliver.
+            Ok(WireMessage::Signed(ref env)) => self.relay_affordance_resolved(&room_id, env),
             _ => true,
         };
         self.process_network_event(NetworkEvent::RoomMessageReceived {
@@ -5041,7 +5111,17 @@ impl AppHandle {
             RoomMessage::RotateRoomKey {
                 rotator_fingerprint,
                 new_salt,
+                room_id: announced_room_id,
             } => {
+                // huddle 2.0.3 (audit N-M2): a signed message that names its room
+                // must match the topic it arrived on, else a hostile relay
+                // replayed it cross-room.
+                if let Some(rid) = &announced_room_id {
+                    if rid != room_id {
+                        warn!(%room_id, announced = %rid, "RotateRoomKey room mismatch; dropping cross-room replay");
+                        return;
+                    }
+                }
                 if rotator_fingerprint == our_fp {
                     return;
                 }
@@ -5069,7 +5149,18 @@ impl AppHandle {
                     new_salt,
                 });
             }
-            RoomMessage::MemberLeave { sender_fingerprint } => {
+            RoomMessage::MemberLeave {
+                sender_fingerprint,
+                room_id: announced_room_id,
+            } => {
+                // huddle 2.0.3 (audit N-M2): drop a signed leave replayed onto a
+                // different room's topic.
+                if let Some(rid) = &announced_room_id {
+                    if rid != room_id {
+                        warn!(%room_id, announced = %rid, "MemberLeave room mismatch; dropping cross-room replay");
+                        return;
+                    }
+                }
                 if sender_fingerprint == our_fp {
                     return;
                 }
@@ -5628,6 +5719,26 @@ impl AppHandle {
                 if announced_room_id != room_id || target_fingerprint != our_fp {
                     return;
                 }
+                // huddle 2.0.3 (audit N-L1): JoinRefused MUST be owner-signed
+                // (protocol.rs must-be-signed list), but the receiver previously
+                // surfaced the attacker-controlled `reason` from *any* sender —
+                // including an unsigned `Plain` — which is an attacker-controlled
+                // phishing toast. Require a verified signature (kills the
+                // anonymous spoof), and enforce room-owner authority when we know
+                // the room's owners; if we don't yet (a refused first-contact),
+                // a valid signature at least makes the reason attributable.
+                let signer = match verified_signer {
+                    Some(fp) => fp,
+                    None => {
+                        warn!(%room_id, "dropping unsigned JoinRefused");
+                        return;
+                    }
+                };
+                let owners = self.room_owners(room_id);
+                if !owners.is_empty() && !owners.iter().any(|o| o == &signer) {
+                    warn!(%signer, %room_id, "JoinRefused from non-owner; dropping");
+                    return;
+                }
                 // Surface the refusal as an Error so the user sees why
                 // their join didn't take. The Phase 3 modal-queue rule
                 // means this won't clobber typing in another modal.
@@ -6013,7 +6124,16 @@ impl AppHandle {
             RoomMessage::RoomSetting {
                 sender_fingerprint,
                 disappearing_ttl_secs,
+                room_id: announced_room_id,
             } => {
+                // huddle 2.0.3 (audit N-M2): drop a signed RoomSetting replayed
+                // onto a different room's topic by a hostile relay.
+                if let Some(rid) = &announced_room_id {
+                    if rid != room_id {
+                        warn!(%room_id, announced = %rid, "RoomSetting room mismatch; dropping cross-room replay");
+                        return;
+                    }
+                }
                 if sender_fingerprint == our_fp {
                     return;
                 }
@@ -6025,6 +6145,14 @@ impl AppHandle {
                     }
                 };
                 if signer != sender_fingerprint {
+                    return;
+                }
+                // huddle 2.0.3 (audit N-M6): a banned principal — including the
+                // room creator, who bypasses the `is_owner` ban-exclusion via the
+                // `is_creator` shortcut below — must not be able to force a
+                // (retroactive, history-purging) disappearing-TTL change.
+                if repo::is_member_banned(&self.db, room_id, &signer).unwrap_or(false) {
+                    warn!(%signer, %room_id, "RoomSetting from banned member; dropping");
                     return;
                 }
                 let is_creator = repo::get_room(&self.db, room_id)
@@ -7142,9 +7270,9 @@ impl AppHandle {
     /// new wrapped session key. Old inbound sessions stay in storage
     /// for decrypting historic messages.
     pub async fn rotate_room(&self, room_id: &str, new_passphrase: &str) -> Result<()> {
-        if new_passphrase.is_empty() {
-            return Err(HuddleError::Other("new passphrase is empty".into()));
-        }
+        // huddle 2.0.3 (audit N-L2): floor the new room passphrase on rotation
+        // (subsumes the old non-empty check; the salt is broadcast in the clear).
+        validate_passphrase_len(new_passphrase)?;
         let new_salt = passphrase::random_salt();
         let new_key = passphrase::derive_key(new_passphrase, &new_salt)?;
 
@@ -7194,6 +7322,8 @@ impl AppHandle {
         let rot = RoomMessage::RotateRoomKey {
             rotator_fingerprint: self.identity.fingerprint().to_string(),
             new_salt: new_salt.to_vec(),
+            // huddle 2.0.3 (audit N-M2): bind the room to this signed rotation.
+            room_id: Some(room_id.to_string()),
         };
         // Signed: rotations are self-attested, so peers can prove the
         // claimed `rotator_fingerprint` really came from that identity.
@@ -7477,6 +7607,13 @@ impl AppHandle {
     /// `DELETE EVERYTHING` confirmation in the TUI is the only gate.
     pub async fn go_dark(&self, master_passphrase: &str) -> Result<()> {
         let no_master = self.persist_key() == [0u8; 32];
+        // huddle 2.0.3 (audit N-L2): when go-dark SETS the master passphrase for
+        // the first time, floor it. When a master already exists this call only
+        // verifies the existing one, so don't floor (an older short passphrase
+        // must still be accepted to unlock).
+        if no_master {
+            validate_passphrase_len(master_passphrase)?;
+        }
         if !no_master {
             let salt = storage::keychain::load_or_create_salt()?;
             let candidate_master = storage::keychain::derive_master_key(master_passphrase, &salt)?;
