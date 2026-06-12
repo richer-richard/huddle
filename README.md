@@ -209,7 +209,7 @@ per-OS app directory:
 
 ```
 +----------------------------------------------------------------------+
-| huddle 2.0.8  ·  745e-fe8a-…  ·  relay ●               12:34 UTC     |
+| huddle 2.1.0  ·  745e-fe8a-…  ·  relay ●               12:34 UTC     |
 +------------------------+---------------------------------------------+
 | ▾ Profile              | # general                                   |
 |   alice  HD-AAAA-…  ●  |   4 members · encrypted                     |
@@ -660,6 +660,32 @@ native dialog for a path-entry box.
   rotates on a schedule + on membership change), bounding the exposure
   window; the full fix — a Double Ratchet seeded from the hybrid root key —
   is sequenced in `docs/ROADMAP-2.0-and-beyond.md`.
+
+## What's new in 2.1.0 — the MLS group-messaging wire (post-quantum-ready groups, opt-in)
+
+The foundation for **MLS (RFC 9420) group messaging** — the IETF-standard group
+layer with forward secrecy, post-compromise security, cryptographically-enforced
+removal, and a path to post-quantum groups. **No behaviour change** for existing
+peers; the additions are additive and opt-in.
+
+- **The MLS wire is defined.** Four new `RoomMessage` variants (`MlsKeyPackage`,
+  `MlsWelcome`, `MlsCommit`, `MlsApplication`) carry MLS handshake + application
+  traffic. They're additive — a pre-2.1 peer drops the unknown variant, so MLS
+  rooms and classical Megolm rooms coexist — and engine-agnostic (opaque
+  TLS-serialized payloads), so the `huddle-protocol` crate stays runtime-free.
+- **Built on the foundations shipped this series.** MLS needs a total order on
+  group commits; that's exactly the per-room sequence the relay gained in 2.0.8.
+  Commits apply in `seq` order so every member converges on the same epoch chain.
+- **Sequenced rollout.** The MLS engine (openmls, behind a default-off `mls`
+  feature), per-room adoption, and the post-quantum ciphersuite are designed in
+  `docs/superpowers/specs/2026-06-12-mls-rollout.md`. Megolm stays the default and
+  is byte-unaffected.
+
+This completes the WS2 foundations + protocol arc: the runtime-free
+`huddle-protocol` crate (2.0.4), the SAS actor extraction (2.0.5), hybrid PQ
+authentication (2.0.6), the durable event journal (2.0.7), per-room ordered
+delivery (2.0.8), and now the MLS wire (2.1.0). See
+`docs/ROADMAP-ecosystem-importance.md`.
 
 ## What's new in 2.0.8 — foundations: per-room ordered delivery (the MLS ordering primitive)
 
