@@ -5400,12 +5400,10 @@ impl AppHandle {
                 use x25519_dalek::{PublicKey, StaticSecret};
                 let our_secret = StaticSecret::random_from_rng(rand::thread_rng());
                 let our_pub = PublicKey::from(&our_secret);
-                let shared = our_secret.diffie_hellman(&their_pub);
-                // HKDF the shared secret into a 32-byte wrap key.
-                let hk = hkdf::Hkdf::<sha2::Sha256>::new(None, shared.as_bytes());
-                let mut wrap_key = [0u8; passphrase::KEY_LEN];
-                hk.expand(b"huddle-code-join-v1", &mut wrap_key)
-                    .expect("32 bytes is within HKDF limits");
+                // huddle 2.0.7 (WS2 foundations): the ECDH+HKDF wrap-key derivation
+                // is one tested helper in huddle-protocol (was open-coded here and
+                // in the CodeJoinResponse handler).
+                let wrap_key = crate::crypto::code_join::derive_wrap_key(&our_secret, &their_pub);
                 // Wrap our session key under the ECDH-derived key,
                 // reusing the existing AEAD primitives.
                 let wrapped = match passphrase::wrap(wrap_input.as_bytes(), &wrap_key) {
@@ -5469,11 +5467,7 @@ impl AppHandle {
                         return;
                     }
                 };
-                let shared = our_secret.diffie_hellman(&owner_pub);
-                let hk = hkdf::Hkdf::<sha2::Sha256>::new(None, shared.as_bytes());
-                let mut wrap_key = [0u8; passphrase::KEY_LEN];
-                hk.expand(b"huddle-code-join-v1", &mut wrap_key)
-                    .expect("32 bytes within HKDF limits");
+                let wrap_key = crate::crypto::code_join::derive_wrap_key(&our_secret, &owner_pub);
                 let session_key_bytes =
                     match passphrase::unwrap(&wrapped_session_key_b64, &wrap_key) {
                         Ok(b) => b,

@@ -13,6 +13,7 @@ pub use megolm::RoomCrypto;
 // private `signed_bytes` / `now_unix_ms` helpers stay internal to the protocol
 // crate.)
 pub use huddle_protocol::crypto::{
-    dm, mnemonic, passphrase, pqc, sas, sign_message, sign_message_at, verify_signed,
-    verify_signed_at, SIGNED_ENVELOPE_WINDOW_MS,
+    code_join, dm, mldsa, mnemonic, passphrase, pqc, sas, sign_message, sign_message_at,
+    sign_message_hybrid_pq, sign_message_hybrid_pq_at, verify_signed, verify_signed_at,
+    verify_signed_mldsa, SIGNED_ENVELOPE_WINDOW_MS,
 };

@@ -1,3 +1,4 @@
+pub mod code_join;
 pub mod dm;
 pub mod mldsa;
 pub mod mnemonic;
