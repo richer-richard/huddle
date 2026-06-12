@@ -209,7 +209,7 @@ per-OS app directory:
 
 ```
 +----------------------------------------------------------------------+
-| huddle 2.0.5  ·  745e-fe8a-…  ·  relay ●               12:34 UTC     |
+| huddle 2.0.6  ·  745e-fe8a-…  ·  relay ●               12:34 UTC     |
 +------------------------+---------------------------------------------+
 | ▾ Profile              | # general                                   |
 |   alice  HD-AAAA-…  ●  |   4 members · encrypted                     |
@@ -660,6 +660,26 @@ native dialog for a path-entry box.
   rotates on a schedule + on membership change), bounding the exposure
   window; the full fix — a Double Ratchet seeded from the hybrid root key —
   is sequenced in `docs/ROADMAP-2.0-and-beyond.md`.
+
+## What's new in 2.0.6 — hybrid post-quantum authentication (Ed25519 + ML-DSA-65)
+
+A protocol-library release that extends huddle's post-quantum posture from
+*confidentiality* (the hybrid X25519 + ML-KEM-768 DM key agreement) to
+**authenticity**. No wire or behaviour change for existing peers — the additions
+are optional and additive, so 1.3.x / 2.0.x peers ignore them.
+
+- **Composite signatures.** Identity / authority envelopes can now be signed with
+  Ed25519 **and** ML-DSA-65 (FIPS 204), so a forgery requires breaking *both* — a
+  future quantum computer that breaks Ed25519 still can't forge a huddle envelope.
+  The ML-DSA keypair is derived deterministically from the same identity seed (no
+  new on-disk material), exactly like the ML-KEM key.
+- **Downgrade-resistant verification.** A verifier that has pinned a peer's ML-DSA
+  key (learned from a signed announce) rejects an envelope carrying a *different*
+  ML-DSA key, or a stripped / invalid signature.
+- **Where it lands.** The capability ships in the `huddle-protocol` crate
+  (`crypto::mldsa`, `sign_message_hybrid_pq`, `verify_signed_mldsa`), additive on
+  the wire (two optional `mldsa_*` fields). Applying it across the app's authority
+  envelopes mirrors the existing ML-KEM pinning path.
 
 ## What's new in 2.0.5 — foundations: the SAS subsystem becomes an actor
 
