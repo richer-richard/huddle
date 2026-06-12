@@ -109,6 +109,13 @@ pub enum ServerMsg {
         payload_b64: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mailbox_id: Option<i64>,
+        /// huddle 2.0.8 (WS2 foundations #5): the relay-assigned **per-room
+        /// monotonic sequence number** for total-ordered delivery — the
+        /// foundation MLS commit ordering needs. `None` for non-room deliveries
+        /// (`SendDirect`), offline-mailbox replays in this first slice, and
+        /// pre-2.0.8 relays; additive, so older clients ignore it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seq: Option<i64>,
     },
     Sent {
         id: String,

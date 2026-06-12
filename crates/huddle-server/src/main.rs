@@ -828,10 +828,13 @@ async fn handle_client_msg(
                 return Ok(());
             }
             // The sender is, by definition, a member of the room.
-            let members = {
+            let (members, seq) = {
                 let db = shared.db.lock().await;
                 add_membership(&db, &fp, &room)?;
-                room_members(&db, &room)?
+                // huddle 2.0.8 (WS2 #5): one per-room sequence number for this
+                // publish, delivered to every live member for total ordering.
+                let seq = next_room_seq(&db, &room)?;
+                (room_members(&db, &room)?, seq)
             };
             let mut delivered = 0usize;
             let mut queued = 0usize;
@@ -854,6 +857,7 @@ async fn handle_client_msg(
                                 payload_b64: payload_b64.clone(),
                                 // Live fan-out is never mailboxed, so no row id.
                                 mailbox_id: None,
+                                seq: Some(seq),
                             };
                             fan_out(senders, &out, &shared.metrics)
                         }
@@ -928,6 +932,9 @@ async fn handle_client_msg(
                             payload_b64: payload_b64.clone(),
                             // Live direct delivery is never mailboxed.
                             mailbox_id: None,
+                            // SendDirect is 1:1 (DMs / friend requests), not a
+                            // room broadcast, so it carries no per-room sequence.
+                            seq: None,
                         };
                         fan_out(senders, &out, &shared.metrics)
                     }
@@ -1115,6 +1122,10 @@ async fn flush_mailbox(fp: &str, tx: &Tx, shared: &Arc<Shared>, acks: bool) -> R
                 id: msg_id,
                 payload_b64,
                 mailbox_id,
+                // huddle 2.0.8 (WS2 #5): offline-mailbox replays don't carry the
+                // per-room sequence in this first slice (the documented
+                // follow-up persists it alongside the queued row).
+                seq: None,
             }))
             .await
             .is_err()
@@ -1268,7 +1279,13 @@ fn migrate(c: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_mailbox_sender ON mailbox(sender);
         -- huddle 2.0.3 (audit N-L5): index memberships by room so the
         -- per-Publish fan-out lookup isn't a full table scan.
-        CREATE INDEX IF NOT EXISTS idx_memberships_room ON memberships(room);",
+        CREATE INDEX IF NOT EXISTS idx_memberships_room ON memberships(room);
+        -- huddle 2.0.8 (WS2 foundations #5): durable per-room monotonic sequence
+        -- for total-ordered delivery (the foundation MLS commit ordering needs).
+        CREATE TABLE IF NOT EXISTS room_seq (
+            room TEXT PRIMARY KEY,
+            next INTEGER NOT NULL
+        );",
     )?;
     // huddle 2.0.3 (audit N-H1): add the `sender` column to a pre-2.0.3 mailbox
     // table. SQLite has no "ADD COLUMN IF NOT EXISTS", so guard on table_info.
@@ -1314,6 +1331,20 @@ fn room_members(c: &Connection, room: &str) -> Result<Vec<String>> {
     let mut stmt = c.prepare("SELECT fingerprint FROM memberships WHERE room = ?1")?;
     let rows = stmt.query_map(params![room], |r| r.get::<_, String>(0))?;
     Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
+/// huddle 2.0.8 (WS2 foundations #5): atomically assign the next per-room
+/// monotonic sequence number. Durable across relay restarts (a table, not an
+/// in-memory counter), so the total order MLS commits need survives a reboot.
+fn next_room_seq(c: &Connection, room: &str) -> Result<i64> {
+    let seq: i64 = c.query_row(
+        "INSERT INTO room_seq(room, next) VALUES(?1, 1)
+         ON CONFLICT(room) DO UPDATE SET next = next + 1
+         RETURNING next",
+        params![room],
+        |r| r.get(0),
+    )?;
+    Ok(seq)
 }
 
 /// Returns `Ok(true)` if the message was queued, `Ok(false)` if it was shed
@@ -1396,8 +1427,8 @@ fn delete_mailbox_ids(c: &Connection, ids: &[i64]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        enqueue, flush_mailbox, migrate, peek_mailbox, request_target, ClientMsg, ConnectTokens,
-        Connection, Metrics, OutEvent, ServerMsg, Shared, OUTBOUND_CAP,
+        enqueue, flush_mailbox, migrate, next_room_seq, peek_mailbox, request_target, ClientMsg,
+        ConnectTokens, Connection, Metrics, OutEvent, ServerMsg, Shared, OUTBOUND_CAP,
     };
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -1432,6 +1463,7 @@ mod tests {
             id: "i".into(),
             payload_b64: "p".into(),
             mailbox_id: None,
+            seq: None,
         };
         let s = serde_json::to_string(&live).unwrap();
         assert!(
@@ -1444,12 +1476,27 @@ mod tests {
             id: "i".into(),
             payload_b64: "p".into(),
             mailbox_id: Some(42),
+            seq: None,
         };
         let s = serde_json::to_string(&queued).unwrap();
         assert!(
             s.contains("\"mailbox_id\":42"),
             "queued message must carry its mailbox_id: {s}"
         );
+    }
+
+    #[test]
+    fn room_seq_is_per_room_and_monotonic() {
+        // huddle 2.0.8 (WS2 #5): each room gets its own durable monotonic
+        // sequence — the total order MLS commit delivery needs.
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        assert_eq!(next_room_seq(&conn, "room-a").unwrap(), 1);
+        assert_eq!(next_room_seq(&conn, "room-a").unwrap(), 2);
+        assert_eq!(next_room_seq(&conn, "room-a").unwrap(), 3);
+        // A different room sequences independently.
+        assert_eq!(next_room_seq(&conn, "room-b").unwrap(), 1);
+        assert_eq!(next_room_seq(&conn, "room-a").unwrap(), 4);
     }
 
     #[test]

@@ -390,6 +390,9 @@ impl ServerClient {
                         id,
                         payload_b64,
                         mailbox_id,
+                        // huddle 2.0.8 (WS2 #5): the relay-assigned per-room seq is
+                        // not yet consumed client-side (ordering lands with MLS).
+                        ..
                     }) => {
                         if payload_b64.len() > MAX_PAYLOAD_B64 {
                             warn!(

@@ -100,17 +100,23 @@ fn relay_server_message_omits_mailbox_id_when_none() {
         id: "i".into(),
         payload_b64: "p".into(),
         mailbox_id: None,
+        seq: None,
     });
     assert_eq!(live["type"], json!("message"));
     assert!(live.get("mailbox_id").is_none());
+    // huddle 2.0.8 (WS2 #5): the per-room `seq` is also additive — absent on the
+    // wire when None, so older clients/relays see byte-identical messages.
+    assert!(live.get("seq").is_none());
 
     let queued = to_value(&ServerMsg::Message {
         room: "r".into(),
         id: "i".into(),
         payload_b64: "p".into(),
         mailbox_id: Some(7),
+        seq: Some(42),
     });
     assert_eq!(queued["mailbox_id"], json!(7));
+    assert_eq!(queued["seq"], json!(42));
 }
 
 #[test]
