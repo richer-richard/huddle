@@ -920,11 +920,16 @@ impl Ready {
             UiAction::SetClearnetRelay(url) => {
                 match self.handle.set_clearnet_relay(url.as_deref()) {
                     Ok(()) => {
+                        // huddle 2.1.1: applies live — the relay loop re-dials
+                        // clearnet-first now. Mirror the new order into the vm.
                         self.vm.clearnet_relay = self.handle.clearnet_relay();
+                        self.vm.transport_order = self.handle.current_transport_order();
                         self.vm.modal = Modal::None;
                         self.vm.set_status(match &self.vm.clearnet_relay {
-                            Some(u) => format!("relay set to {u} — restart to connect through it"),
-                            None => "clearnet relay cleared — restart to apply".to_string(),
+                            Some(u) => format!("relay set to {u} — connecting clearnet-first now"),
+                            None => {
+                                "clearnet relay cleared — restored most-private-first".to_string()
+                            }
                         });
                     }
                     Err(e) => {
@@ -932,6 +937,22 @@ impl Ready {
                             s.error = Some(format!("could not save: {e}"));
                         }
                     }
+                }
+            }
+            UiAction::SetTransportPriority(order) => {
+                // huddle 2.1.1: apply a connection-priority preset live.
+                match self.handle.set_transport_order(&order) {
+                    Ok(()) => {
+                        self.vm.transport_order = self.handle.current_transport_order();
+                        self.vm.clearnet_relay = self.handle.clearnet_relay();
+                        let label = huddle_core::network::transport::priority_presets()
+                            .into_iter()
+                            .find(|p| p.order == self.vm.transport_order)
+                            .map(|p| p.label)
+                            .unwrap_or("custom");
+                        self.vm.set_status(format!("connection priority: {label}"));
+                    }
+                    Err(e) => self.vm.set_status(format!("could not set priority: {e}")),
                 }
             }
             UiAction::ToggleVerifiedOnlyInbound(on) => {

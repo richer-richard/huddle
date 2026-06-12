@@ -180,7 +180,7 @@ fn network(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
     });
 
     // huddle 1.0: clearnet relay (e.g. a cloudflared tunnel) — a no-Tor door
-    // onto the relay backend. Editable here; applies on next launch.
+    // onto the relay backend. Editable here; huddle 2.1.1: applies immediately.
     ui.horizontal(|ui| {
         ui.label(RichText::new("Clearnet relay").strong());
         match &vm.clearnet_relay {
@@ -198,11 +198,43 @@ fn network(ui: &mut egui::Ui, vm: &ViewModel, actions: &mut Vec<UiAction>) {
     ui.label(
         RichText::new(
             "Paste a wss:// URL (e.g. a cloudflared tunnel) to connect without Tor. \
-             Tried first; the onion stays as fallback. Applies on next launch.",
+             Selecting one switches priority to clearnet-first and connects now.",
         )
         .small()
         .color(palette().text_dim),
     );
+
+    // huddle 2.1.1: connection priority — which transport family huddle dials
+    // first. Applies live (the relay loop re-dials), so a user on a Tor-hostile
+    // network can flip to clearnet without relaunching.
+    ui.add_space(10.0);
+    ui.label(RichText::new("Connection priority").strong());
+    ui.label(
+        RichText::new("which transport huddle tries first — applies immediately:")
+            .small()
+            .color(palette().text_dim),
+    );
+    ui.add_space(2.0);
+    let current_preset =
+        huddle_core::network::transport::match_priority_preset(&vm.transport_order);
+    for preset in huddle_core::network::transport::priority_presets() {
+        let selected = preset.key == current_preset;
+        if ui.radio(selected, preset.label).clicked() && !selected {
+            actions.push(UiAction::SetTransportPriority(preset.order.clone()));
+        }
+        ui.label(
+            RichText::new(preset.detail)
+                .small()
+                .color(palette().text_dim),
+        );
+    }
+    if current_preset == "custom" {
+        ui.label(
+            RichText::new("Custom order — set via --transport-order; pick a preset to change it.")
+                .small()
+                .color(palette().warn),
+        );
+    }
 
     // LAN status — runs alongside, never instead of, the relay.
     ui.horizontal(|ui| {

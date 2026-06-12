@@ -191,6 +191,42 @@ fn render_network<'a>(app: &TuiApp, theme: &Theme) -> Vec<Line<'a>> {
     }
     lines.push(Line::raw(""));
 
+    // huddle 2.1.1: connection priority — which door family is tried first.
+    // Applies live (the relay loop re-dials); `O` cycles the preset.
+    let order = app.handle.current_transport_order();
+    let active_key = huddle_core::network::transport::match_priority_preset(&order);
+    lines.push(Line::from(vec![Span::styled(
+        "  connection priority  (O to cycle — applies immediately):",
+        theme.dim(),
+    )]));
+    for preset in huddle_core::network::transport::priority_presets() {
+        let selected = preset.key == active_key;
+        let (mark, mstyle) = if selected {
+            ("◉ ", theme.ok())
+        } else {
+            ("○ ", theme.dim())
+        };
+        lines.push(Line::from(vec![
+            Span::styled("    ", theme.dim()),
+            Span::styled(mark, mstyle),
+            Span::styled(
+                preset.label,
+                if selected {
+                    theme.text_style()
+                } else {
+                    theme.dim()
+                },
+            ),
+        ]));
+    }
+    if active_key == "custom" {
+        lines.push(Line::from(vec![Span::styled(
+            "    ◉ Custom order (from --transport-order) — press O to pick a preset",
+            theme.ok(),
+        )]));
+    }
+    lines.push(Line::raw(""));
+
     // Override hint — repoint the relay without recompiling.
     lines.push(Line::from(vec![Span::styled(
         format!(

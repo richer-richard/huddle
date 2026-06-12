@@ -269,6 +269,9 @@ pub enum UiAction {
     OpenSetRelay,
     /// huddle 1.0: persist (Some) or clear (None) the clearnet relay URL.
     SetClearnetRelay(Option<String>),
+    /// huddle 2.1.1: apply a connection-priority door order live (from the
+    /// Settings → Network "Connection priority" selector).
+    SetTransportPriority(Vec<TransportId>),
     ToggleVerifiedOnlyInbound(bool),
     ToggleUpdateCheck(bool),
     GoToBlocked,
@@ -741,6 +744,9 @@ pub struct ViewModel {
     pub contact_requests: Vec<PendingContactRequest>,
     pub active_transport: Option<TransportId>,
     pub transport_profiles: Vec<TransportProfile>,
+    /// huddle 2.1.1: the live door priority order, for the "Connection
+    /// priority" selector (matched against `transport::priority_presets`).
+    pub transport_order: Vec<TransportId>,
     // settings snapshots
     pub notifications_enabled: bool,
     pub mdns_enabled: bool,
@@ -808,6 +814,7 @@ impl ViewModel {
             contact_requests: Vec::new(),
             active_transport: None,
             transport_profiles: Vec::new(),
+            transport_order: Vec::new(),
             notifications_enabled: true,
             mdns_enabled: false,
             attach_via_path: h.attach_via_path(),
@@ -872,6 +879,7 @@ impl ViewModel {
         self.contact_requests = h.list_pending_contact_requests();
         self.active_transport = h.active_transport();
         self.transport_profiles = h.transport_profiles();
+        self.transport_order = h.current_transport_order();
         for c in &self.contacts {
             let label = c
                 .alias
@@ -1498,6 +1506,7 @@ mod tests {
             contact_requests: Vec::new(),
             active_transport: None,
             transport_profiles: Vec::new(),
+            transport_order: Vec::new(),
             notifications_enabled: true,
             mdns_enabled: false,
             attach_via_path: false,

@@ -4820,6 +4820,26 @@ async fn handle_action(action: Action, app: &mut TuiApp) -> Result<bool> {
             });
             Ok(false)
         }
+        Action::SettingsCyclePriority => {
+            // huddle 2.1.1: advance to the next connection-priority preset and
+            // apply it live (the relay loop re-dials in the new door order).
+            use huddle_core::network::transport::{match_priority_preset, priority_presets};
+            let presets = priority_presets();
+            let current = match_priority_preset(&app.handle.current_transport_order());
+            // From a known preset, advance + wrap; from "custom", start at the top.
+            let idx = presets
+                .iter()
+                .position(|p| p.key == current)
+                .map(|i| (i + 1) % presets.len())
+                .unwrap_or(0);
+            let next = &presets[idx];
+            if let Err(e) = app.handle.set_transport_order(&next.order) {
+                app.modal = Modal::Error(format!("save failed: {e}"));
+                return Ok(false);
+            }
+            app.set_status(format!("connection priority: {}", next.label));
+            Ok(false)
+        }
         Action::SettingsToggleNotifications => {
             let now_on = app.handle.notifications_enabled();
             if let Err(e) = app.handle.set_notifications_enabled(!now_on) {

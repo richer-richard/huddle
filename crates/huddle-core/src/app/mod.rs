@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use libp2p::{Multiaddr, PeerId};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Notify};
 use tracing::{debug, error, info, warn};
 
 use crate::config;
@@ -460,6 +460,15 @@ pub struct AppHandle {
     /// huddle 1.0: the full set of transport doors resolved at startup (for
     /// the UI/CLI listing — includes unavailable ones with a reason).
     transport_profiles: Arc<Vec<TransportProfile>>,
+    /// huddle 2.1.1: the live door order the relay reconnect loop reads at the
+    /// top of every cycle. Seeded from the startup-resolved order;
+    /// `set_transport_order` / `set_clearnet_relay` swap it and poke
+    /// `relay_reconnect`, so a priority change applies immediately instead of
+    /// only on the next launch.
+    transport_order: Arc<Mutex<Vec<TransportId>>>,
+    /// huddle 2.1.1: notified to make the relay loop drop the current socket
+    /// and re-dial with the freshly-set `transport_order`.
+    relay_reconnect: Arc<Notify>,
     /// huddle 1.1.4: the resolved Tor SOCKS5 proxy address (CLI/config →
     /// `DEFAULT_TOR_SOCKS`). Stored so privacy-sensitive clearnet fetches
     /// (the opt-in update check) can be routed through Tor instead of
@@ -798,6 +807,8 @@ impl AppHandle {
             aux_subscriptions: Arc::new(Mutex::new(HashSet::new())),
             active_transport: Arc::new(Mutex::new(None)),
             transport_profiles: transport_profiles.clone(),
+            transport_order: Arc::new(Mutex::new(transport_order)),
+            relay_reconnect: Arc::new(Notify::new()),
             tor_socks,
         };
 
@@ -827,7 +838,7 @@ impl AppHandle {
         // means our `hello` carries the restored room ids + the inbox, so the
         // server registers our memberships and flushes any offline mailbox.
         if any_relay {
-            handle.spawn_server_connection(transport_order);
+            handle.spawn_server_connection();
         }
         // huddle 0.7.7: prune any friend requests that aged out while
         // we were offline. Best-effort — a DB failure here shouldn't
@@ -3526,8 +3537,12 @@ impl AppHandle {
         set.into_iter().collect()
     }
 
-    fn spawn_server_connection(&self, order: Vec<TransportId>) {
+    fn spawn_server_connection(&self) {
         let handle = self.clone();
+        // huddle 2.1.1: the reconnect signal — poked by set_transport_order /
+        // set_clearnet_relay so a live priority change drops the socket and
+        // re-dials with the new door order.
+        let reconnect = handle.relay_reconnect.clone();
         tokio::spawn(async move {
             let mut backoff = 1u64;
             loop {
@@ -3547,6 +3562,11 @@ impl AppHandle {
                 // re-registers inbox membership on every reconnect and flushes
                 // any queued contact requests.
                 let rooms: Vec<String> = handle.relay_membership_ids();
+
+                // huddle 2.1.1: re-read the door order each cycle so a live
+                // priority change (set_transport_order / set_clearnet_relay)
+                // takes effect on the very next reconnect, not just at launch.
+                let order = handle.transport_order.lock().unwrap().clone();
 
                 // Try each door in order until one connects. Unavailable
                 // doors (no URL / wrong build) are skipped.
@@ -3592,7 +3612,20 @@ impl AppHandle {
                     for rid in handle.relay_membership_ids() {
                         handle.network.subscribe_room(rid).await;
                     }
-                    while let Some(ev) = rx.recv().await {
+                    loop {
+                        // huddle 2.1.1: read the next relay event, but also wake
+                        // on a reconnect request so a priority change drops this
+                        // socket and re-dials with the new door order.
+                        let ev = tokio::select! {
+                            ev = rx.recv() => match ev {
+                                Some(ev) => ev,
+                                None => break,
+                            },
+                            _ = reconnect.notified() => {
+                                info!("transport priority changed; reconnecting to the relay");
+                                break;
+                            }
+                        };
                         match ev {
                             ServerEvent::Message {
                                 room,
@@ -3654,7 +3687,13 @@ impl AppHandle {
                     handle.network.detach_server();
                     return;
                 }
-                tokio::time::sleep(Duration::from_secs(backoff)).await;
+                // huddle 2.1.1: a reconnect request during backoff also wakes us
+                // (and resets the backoff) so a new priority applies promptly
+                // even while every door is failing.
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(backoff)) => {}
+                    _ = reconnect.notified() => { backoff = 1; }
+                }
                 backoff = (backoff * 2).min(30);
             }
         });
@@ -6385,26 +6424,55 @@ impl AppHandle {
     /// app connects straight to the clearnet relay without paying the onion
     /// connect timeout each reconnect cycle (the point of "my VPS, no Tor").
     /// `None` (or a blank url) clears both, restoring the default
-    /// most-private-first order. Takes effect on the next launch — mirrors the
-    /// mDNS toggle, since the door order is resolved once at startup.
+    /// most-private-first order. huddle 2.1.1: applies **immediately** — the
+    /// in-memory order is swapped and the relay loop re-dials with it, no
+    /// relaunch needed.
     pub fn set_clearnet_relay(&self, url: Option<&str>) -> Result<()> {
         match url.map(str::trim).filter(|s| !s.is_empty()) {
             Some(u) => {
                 repo::set_setting(&self.db, "clearnet_url", u)?;
                 // Clearnet doors first so a no-Tor user connects immediately;
                 // onion doors stay in the list as fallback.
-                repo::set_setting(
-                    &self.db,
-                    "transport_order",
-                    "clearnet-wss,clearnet-ws,onion-tor,onion-bridge,onion-arti",
-                )
+                self.set_transport_order(&transport::clearnet_first_order())
             }
             None => {
                 repo::set_setting(&self.db, "clearnet_url", "")?;
-                // Empty → resolution falls back to the default fallback order.
-                repo::set_setting(&self.db, "transport_order", "")
+                // Empty → restore the default most-private-first order.
+                self.set_transport_order(&transport::default_fallback_order())
             }
         }
+    }
+
+    /// huddle 2.1.1: the live transport door order the relay loop is using
+    /// (clearnet-first, Tor-first, or a custom/pinned order). Surfaced in the
+    /// GUI/TUI "Connection priority" selector.
+    pub fn current_transport_order(&self) -> Vec<TransportId> {
+        self.transport_order.lock().unwrap().clone()
+    }
+
+    /// huddle 2.1.1: set the door priority order and apply it live — persists
+    /// the `transport_order` setting, swaps the in-memory order, and pokes the
+    /// relay loop to reconnect with it. An empty list restores the default
+    /// most-private-first order. The "Connection priority" control passes a
+    /// [`transport::priority_presets`] order; an explicit CLI `--transport-order`
+    /// still wins at the next launch's startup resolution.
+    pub fn set_transport_order(&self, order: &[TransportId]) -> Result<()> {
+        let resolved = if order.is_empty() {
+            transport::default_fallback_order()
+        } else {
+            order.to_vec()
+        };
+        let csv = resolved
+            .iter()
+            .map(|id| id.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        repo::set_setting(&self.db, "transport_order", &csv)?;
+        *self.transport_order.lock().unwrap() = resolved;
+        // Wake the relay loop so it drops the current door and re-dials in the
+        // new order (no-op if the relay is disabled / no socket is open).
+        self.relay_reconnect.notify_one();
+        Ok(())
     }
 
     /// huddle 0.7.8: persisted desktop-notification opt-out. The

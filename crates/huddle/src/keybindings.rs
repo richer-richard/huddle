@@ -536,6 +536,7 @@ pub fn adaptive_hints(app: &TuiApp) -> Vec<(&'static str, &'static str)> {
                     }
                     crate::app::SettingsTab::Network => {
                         out.push(("M", "toggle mDNS"));
+                        out.push(("O", "priority"));
                     }
                     crate::app::SettingsTab::Appearance => {
                         out.push(("T", "toggle theme"));

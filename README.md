@@ -209,7 +209,7 @@ per-OS app directory:
 
 ```
 +----------------------------------------------------------------------+
-| huddle 2.1.0  ·  745e-fe8a-…  ·  relay ●               12:34 UTC     |
+| huddle 2.1.1  ·  745e-fe8a-…  ·  relay ●               12:34 UTC     |
 +------------------------+---------------------------------------------+
 | ▾ Profile              | # general                                   |
 |   alice  HD-AAAA-…  ●  |   4 members · encrypted                     |
@@ -660,6 +660,26 @@ native dialog for a path-entry box.
   rotates on a schedule + on membership change), bounding the exposure
   window; the full fix — a Double Ratchet seeded from the hybrid root key —
   is sequenced in `docs/ROADMAP-2.0-and-beyond.md`.
+
+## What's new in 2.1.1 — connection priority you can tune (and that applies live)
+
+A no-Tor user on a restricted network can now reach the relay **without waiting
+on, or fighting, the Tor doors** — and change which transport is tried first
+without relaunching.
+
+- **Setting a clearnet relay now applies immediately.** Settings → Network "Set
+  relay" switches the door priority to clearnet-first *and connects through it
+  now* — previously it only took effect on the next launch.
+- **A "Connection priority" control in the GUI and TUI.** Pick **Auto** (most
+  private first — Tor, then clearnet), **Prefer clearnet** (clearnet first, Tor
+  fallback), **Clearnet only** (never attempt Tor), or **Tor only**. The GUI has
+  a selector under Settings → Network; the TUI cycles presets with `O` on the
+  Network tab. The choice applies live and persists.
+- **Live re-dial under the hood.** The relay reconnect loop re-reads the door
+  order each cycle and is woken on a priority change, so a new preset drops the
+  current socket and re-dials in the new order — no restart, no waiting out the
+  backoff. Fully backward-compatible: transport order is a local client setting,
+  the wire is unchanged.
 
 ## What's new in 2.1.0 — the MLS group-messaging wire (post-quantum-ready groups, opt-in)
 

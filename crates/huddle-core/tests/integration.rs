@@ -612,11 +612,17 @@ async fn phase_f_code_join_round_trip() {
 // biases the door order toward it. No networking — pure settings round-trip.
 #[tokio::test]
 async fn clearnet_relay_setting_round_trips() {
+    use huddle_core::network::transport::{
+        clearnet_first_order, default_fallback_order, match_priority_preset, priority_presets,
+        TransportId,
+    };
+
     let db = storage::open_db_in_memory().unwrap();
     let handle = AppHandle::start_with_db(db).await.unwrap();
 
-    // Unset by default.
+    // Unset by default, and the door order starts most-private-first.
     assert_eq!(handle.clearnet_relay(), None);
+    assert_eq!(handle.current_transport_order(), default_fallback_order());
 
     // Setting a URL persists it and reads back.
     handle
@@ -626,10 +632,33 @@ async fn clearnet_relay_setting_round_trips() {
         handle.clearnet_relay().as_deref(),
         Some("wss://abc.trycloudflare.com/ws")
     );
+    // huddle 2.1.1: setting a clearnet relay flips the live order clearnet-first
+    // (the "Prefer clearnet" preset) — no relaunch needed.
+    assert_eq!(handle.current_transport_order(), clearnet_first_order());
+    assert_eq!(
+        match_priority_preset(&handle.current_transport_order()),
+        "prefer-clearnet"
+    );
 
-    // Clearing resets to None.
+    // huddle 2.1.1: an explicit priority preset applies live and persists.
+    let tor_only = priority_presets()
+        .into_iter()
+        .find(|p| p.key == "tor-only")
+        .unwrap();
+    handle.set_transport_order(&tor_only.order).unwrap();
+    assert_eq!(handle.current_transport_order(), tor_only.order);
+    assert_eq!(
+        match_priority_preset(&handle.current_transport_order()),
+        "tor-only"
+    );
+    // An empty order restores the default most-private-first fallback.
+    handle.set_transport_order(&[] as &[TransportId]).unwrap();
+    assert_eq!(handle.current_transport_order(), default_fallback_order());
+
+    // Clearing the relay resets the URL to None and the order to the default.
     handle.set_clearnet_relay(None).unwrap();
     assert_eq!(handle.clearnet_relay(), None);
+    assert_eq!(handle.current_transport_order(), default_fallback_order());
 
     // A blank/whitespace URL is treated as a clear, not a stored "".
     handle.set_clearnet_relay(Some("   ")).unwrap();

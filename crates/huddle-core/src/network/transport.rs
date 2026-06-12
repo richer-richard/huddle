@@ -291,10 +291,88 @@ pub fn default_fallback_order() -> Vec<TransportId> {
     ]
 }
 
+/// huddle 2.1.1: a clearnet-first order — the clearnet relay (cloudflared /
+/// Worker tunnel) tried before Tor, with the onion doors kept as fallback.
+/// What `set_clearnet_relay` pins and what the "Prefer clearnet" priority
+/// preset selects, so a no-Tor user connects without paying the onion timeout.
+pub fn clearnet_first_order() -> Vec<TransportId> {
+    vec![
+        TransportId::ClearnetWss,
+        TransportId::ClearnetWs,
+        TransportId::OnionSystemTor,
+        TransportId::OnionBridge,
+        TransportId::OnionArti,
+    ]
+}
+
 /// Parse a comma-separated id list (`--transport-order`) into ids, dropping
 /// unknown tokens.
 pub fn parse_order(csv: &str) -> Vec<TransportId> {
     csv.split(',').filter_map(TransportId::from_str).collect()
+}
+
+/// huddle 2.1.1: a connection-priority preset surfaced in the GUI/TUI Settings
+/// so the user can tune which door is tried first without hand-editing
+/// `--transport-order`. Each maps to a concrete door order the app applies
+/// live (see `AppHandle::set_transport_order`).
+pub struct PriorityPreset {
+    /// Stable key — persisted in the order CSV's shape and compared by
+    /// [`match_priority_preset`]; not shown to the user.
+    pub key: &'static str,
+    /// Short selector label.
+    pub label: &'static str,
+    /// One-line tradeoff note.
+    pub detail: &'static str,
+    /// The door order this preset applies, in priority order.
+    pub order: Vec<TransportId>,
+}
+
+/// The connection-priority presets, in display order. `auto` is the default
+/// most-private-first order; `prefer-clearnet` is clearnet-first with Tor
+/// fallback; the `*-only` presets drop the other family entirely so no connect
+/// attempts are wasted on a door the user has ruled out.
+pub fn priority_presets() -> Vec<PriorityPreset> {
+    vec![
+        PriorityPreset {
+            key: "auto",
+            label: "Auto — most private first",
+            detail: "Tor onion first, clearnet relay as fallback (default).",
+            order: default_fallback_order(),
+        },
+        PriorityPreset {
+            key: "prefer-clearnet",
+            label: "Prefer clearnet",
+            detail: "Clearnet relay first, Tor as fallback — fastest when Tor is blocked.",
+            order: clearnet_first_order(),
+        },
+        PriorityPreset {
+            key: "clearnet-only",
+            label: "Clearnet only",
+            detail: "Never attempt Tor — connect straight to the clearnet relay.",
+            order: vec![TransportId::ClearnetWss, TransportId::ClearnetWs],
+        },
+        PriorityPreset {
+            key: "tor-only",
+            label: "Tor only",
+            detail: "Never touch the clearnet relay — onion doors only.",
+            order: vec![
+                TransportId::OnionSystemTor,
+                TransportId::OnionBridge,
+                TransportId::OnionArti,
+            ],
+        },
+    ]
+}
+
+/// huddle 2.1.1: the preset `key` whose order matches `order` exactly, or
+/// `"custom"` for an order set some other way (e.g. an explicit
+/// `--transport-order`). Lets the settings UI highlight the active preset.
+pub fn match_priority_preset(order: &[TransportId]) -> &'static str {
+    priority_presets()
+        .into_iter()
+        .find(|p| p.order == order)
+        .map(|p| p.key)
+        .unwrap_or("custom")
 }
 
 #[cfg(test)]
@@ -306,6 +384,22 @@ mod tests {
         for id in default_fallback_order() {
             assert_eq!(TransportId::from_str(id.as_str()), Some(id));
         }
+    }
+
+    #[test]
+    fn priority_presets_round_trip_and_reject_custom() {
+        // Every preset's order maps back to its own key.
+        for p in priority_presets() {
+            assert_eq!(match_priority_preset(&p.order), p.key);
+        }
+        // The clearnet-first preset matches what set_clearnet_relay pins.
+        assert_eq!(
+            match_priority_preset(&clearnet_first_order()),
+            "prefer-clearnet"
+        );
+        // An order set some other way is "custom", not silently a preset.
+        assert_eq!(match_priority_preset(&[TransportId::OnionArti]), "custom");
+        assert_eq!(match_priority_preset(&[]), "custom");
     }
 
     #[test]

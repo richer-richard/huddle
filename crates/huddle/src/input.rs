@@ -173,6 +173,8 @@ pub enum Action {
     SettingsTabSelect(SettingsTab),
     /// huddle 0.7.8: Settings → Network row toggle (restart-required).
     SettingsToggleMdns,
+    /// huddle 2.1.1: cycle the relay connection-priority preset (Network tab).
+    SettingsCyclePriority,
     /// huddle 1.1.4: Settings → Appearance Dark ⇄ Light toggle (live + persisted).
     SettingsToggleTheme,
     /// huddle 0.7.8: Settings → Privacy row toggle.
@@ -757,6 +759,12 @@ fn map_sidebar(key: KeyEvent, app: &TuiApp) -> Action {
             KeyCode::Char('E') => return Action::OpenEditUsername,
             KeyCode::Char('W') => return Action::OpenWhatsNew,
             KeyCode::Char('M') => return Action::SettingsToggleMdns,
+            // huddle 2.1.1: cycle the relay connection priority. Gated to the
+            // Network tab (where it's shown) so the chord can't surprise you
+            // from another tab.
+            KeyCode::Char('O') if matches!(app.settings_tab, SettingsTab::Network) => {
+                return Action::SettingsCyclePriority
+            }
             KeyCode::Char('N') => return Action::SettingsToggleNotifications,
             // huddle 2.0.0 (F5): change master passphrase from Settings →
             // Account. Reachable from any Settings tab for muscle memory.
