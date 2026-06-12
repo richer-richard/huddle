@@ -21,7 +21,7 @@ path = "src/main.rs"
 # replacing the hand-duplicated copies the relay used to carry.
 huddle-protocol = { workspace = true }
 tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = "0.24"
+tokio-tungstenite = "0.29"
 futures-util = "0.3"
 # Same rusqlite feature as huddle-core so Cargo's feature unification across
 # the workspace stays consistent (SQLCipher-capable bundle).
@@ -44,7 +44,7 @@ rand = "0.8"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = "0.24"
+tokio-tungstenite = "0.29"
 futures-util = "0.3"
 serde_json = "1"
 # huddle 1.1.4: the raw-socket tests perform the auth handshake by hand
