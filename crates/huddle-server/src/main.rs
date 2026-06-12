@@ -32,7 +32,6 @@ use ed25519_dalek::{Signature, VerifyingKey};
 use futures_util::{SinkExt, StreamExt};
 use rand::RngCore;
 use rusqlite::{params, Connection};
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
@@ -41,8 +40,12 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::WebSocketStream;
 use tracing::{debug, info, warn};
 
-/// huddle 1.1.4: must match `huddle_core::identity::RELAY_AUTH_DOMAIN`.
-const RELAY_AUTH_DOMAIN: &[u8] = b"huddle-relay-auth-v1";
+// huddle 2.0.4 (WS1.1): the relay now shares the wire protocol + the identity
+// helpers (fingerprint derivation, the `RELAY_AUTH_DOMAIN || nonce` builder)
+// with the client via the lean, runtime-free `huddle-protocol` crate — instead
+// of the hand-duplicated copies the relay used to carry.
+use huddle_protocol::identity::{compute_fingerprint, relay_auth_msg};
+use huddle_protocol::relay::{ClientMsg, ServerMsg};
 /// huddle 1.1.4: drop queued mailbox ciphertext older than this so an offline
 /// recipient's queue can't grow without bound over time (count is already
 /// capped by `MAX_MAILBOX_PER_FP`; this adds an age bound).
@@ -149,132 +152,6 @@ impl RateLimiter {
             false
         }
     }
-}
-
-// ---- wire protocol (server level — cleartext routing only) ----
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum ClientMsg {
-    /// Announce identity and (re)assert room memberships, then drain the
-    /// mailbox. Must be the first message. huddle 1.1.4: it now authenticates
-    /// — `pubkey_b64` is the client's Ed25519 pubkey and `signature_b64` is a
-    /// signature over `RELAY_AUTH_DOMAIN || nonce` for the nonce we sent in
-    /// the opening `Challenge`. The server verifies both before registering.
-    Hello {
-        fingerprint: String,
-        #[serde(default)]
-        pubkey_b64: String,
-        #[serde(default)]
-        signature_b64: String,
-        #[serde(default)]
-        rooms: Vec<String>,
-        /// huddle 2.0: capability bit — the client implements at-least-once
-        /// mailbox ACKs (it answers each queued `Message` with a `ClientMsg::Ack`
-        /// carrying the row's `mailbox_id`). When `true` the relay tags each
-        /// mailbox delivery with its row id and keeps the row until the matching
-        /// `Ack` arrives. When `false` (pre-2.0 clients — the serde default) the
-        /// relay falls back to the classical delete-on-deliver behavior so an old
-        /// client that never ACKs can't wedge its queue into endless redelivery.
-        #[serde(default)]
-        acks: bool,
-    },
-    Subscribe {
-        room: String,
-    },
-    Unsubscribe {
-        room: String,
-    },
-    /// Send an opaque payload to every other member of `room`.
-    Publish {
-        room: String,
-        id: String,
-        payload_b64: String,
-    },
-    /// huddle 1.2: deliver an opaque payload to a SPECIFIC recipient
-    /// fingerprint, independent of room membership. This is how 1:1 DMs and
-    /// friend requests route reliably: the sender knows exactly who the
-    /// recipient is, so the server delivers to that fingerprint's live
-    /// connections (or queues it in their per-fingerprint mailbox when
-    /// offline) without requiring the fragile "both parties subscribed the
-    /// same room" convergence that room fan-out needs. `room` is an opaque
-    /// tag the recipient's client uses to file the message (the DM room id,
-    /// or the recipient's inbox id for a contact request); the server never
-    /// interprets it. The recipient need not be subscribed to `room` at all.
-    SendDirect {
-        to: String,
-        room: String,
-        id: String,
-        payload_b64: String,
-    },
-    /// huddle 1.2.1: mint a short-lived connect code bound to this
-    /// authenticated identity. The server replies with `ConnectToken`.
-    CreateConnectToken,
-    /// huddle 1.2.1: resolve a connect code to its owner's fingerprint+pubkey
-    /// so we can send them a contact request. The server replies with
-    /// `ConnectTokenResolved` (fingerprint = None when unknown/expired).
-    RedeemConnectToken {
-        token: String,
-    },
-    /// Re-drain the mailbox on demand.
-    Fetch,
-    /// huddle 2.0: client acknowledges durable receipt of a relay-delivered
-    /// mailbox message. The relay deletes the mailbox row only after receiving
-    /// this ACK (at-least-once delivery). `mailbox_id` is the server-assigned
-    /// row id from the `ServerMsg::Message` the client persisted. Scoped to the
-    /// authenticated fingerprint, so an identity can only drop its own queue.
-    Ack {
-        mailbox_id: i64,
-    },
-    Ping,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum ServerMsg {
-    /// huddle 1.1.4: sent immediately on connect. The client signs the nonce
-    /// to prove control of its identity key before it can do anything.
-    Challenge {
-        nonce_b64: String,
-    },
-    Ready {
-        fingerprint: String,
-    },
-    /// A room message delivered live or from the offline mailbox. huddle 2.0:
-    /// `mailbox_id` is `Some(row_id)` when the message came from the relay's
-    /// on-disk queue AND the recipient advertised ACK support in its `Hello`
-    /// (the client must `Ack` after persisting so the relay can delete the row);
-    /// it is `None` for live fan-out and for pre-2.0 clients that get classical
-    /// delete-on-deliver. `skip_serializing_if` keeps the field off the wire for
-    /// live/legacy messages so old clients see exactly the bytes they expect.
-    Message {
-        room: String,
-        id: String,
-        payload_b64: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        mailbox_id: Option<i64>,
-    },
-    Sent {
-        id: String,
-        delivered: usize,
-        queued: usize,
-    },
-    /// huddle 1.2.1: a freshly minted connect code + its lifetime (seconds).
-    ConnectToken {
-        token: String,
-        ttl_secs: u64,
-    },
-    /// huddle 1.2.1: result of redeeming a connect code. `fingerprint`/`pubkey_b64`
-    /// are `None` when the code is unknown or expired.
-    ConnectTokenResolved {
-        token: String,
-        fingerprint: Option<String>,
-        pubkey_b64: Option<String>,
-    },
-    Pong,
-    Error {
-        message: String,
-    },
 }
 
 /// huddle 2.0 (F7): what the per-connection writer pump consumes. Almost every
@@ -1269,19 +1146,8 @@ fn require_fp(fp: &Option<String>) -> Result<String> {
     fp.clone().ok_or_else(|| anyhow!("send hello first"))
 }
 
-/// huddle 1.1.4: re-derive the 24-hex fingerprint from an Ed25519 pubkey.
-/// Mirrors `huddle_core::identity::compute_fingerprint` byte-for-byte (first
-/// 12 bytes of SHA-256(pubkey), hex, grouped in 4s with '-').
-fn compute_fingerprint(public_key: &[u8; 32]) -> String {
-    let hash = Sha256::digest(public_key);
-    let hex_str = hex::encode(&hash[..12]);
-    hex_str
-        .as_bytes()
-        .chunks(4)
-        .map(|c| std::str::from_utf8(c).unwrap())
-        .collect::<Vec<&str>>()
-        .join("-")
-}
+// huddle 2.0.4 (WS1.1): `compute_fingerprint` now comes from `huddle-protocol`
+// (imported above) — the relay no longer open-codes it.
 
 /// huddle 1.1.4: verify a client's auth proof. The claimed fingerprint must
 /// equal `compute_fingerprint(pubkey)`, and the signature must verify (strict,
@@ -1315,10 +1181,10 @@ fn verify_client_auth(
         bail!("fingerprint does not match pubkey");
     }
     let vk = VerifyingKey::from_bytes(&pk).map_err(|e| anyhow!("bad ed25519 pubkey: {e}"))?;
-    let mut signed = Vec::with_capacity(RELAY_AUTH_DOMAIN.len() + nonce.len());
-    signed.extend_from_slice(RELAY_AUTH_DOMAIN);
-    signed.extend_from_slice(nonce);
-    vk.verify_strict(&signed, &Signature::from_bytes(&sig))
+    // huddle 2.0.4 (WS1.1): the `RELAY_AUTH_DOMAIN || nonce` bytes come from the
+    // shared `huddle_protocol::identity::relay_auth_msg`, byte-identical to the
+    // client's signer by construction.
+    vk.verify_strict(&relay_auth_msg(nonce), &Signature::from_bytes(&sig))
         .map_err(|e| anyhow!("signature verification failed: {e}"))?;
     Ok(proven_fp)
 }

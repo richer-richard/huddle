@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/huddle-protocol",
     "crates/huddle-core",
     "crates/huddle",
     "crates/huddle-server",
@@ -23,3 +24,8 @@ homepage = "https://github.com/richer-richard/huddle"
 # in lockstep with `workspace.package.version`.
 [workspace.dependencies]
 huddle-core = { path = "crates/huddle-core", version = "2.0.3" }
+# huddle 2.0.4 (WS1.1): single-source the runtime-free protocol crate too, WITH a
+# version requirement — the public crates (huddle-core / huddle-server) depend on
+# it, and crates.io / cargo-deny require a version on a path dependency of a
+# published crate (a bare path dep is a `*` wildcard the bans gate rejects).
+huddle-protocol = { path = "crates/huddle-protocol", version = "2.0.3" }

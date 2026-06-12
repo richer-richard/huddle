@@ -995,7 +995,7 @@ impl AppHandle {
         &self,
         invite: crate::invite::InviteLink,
     ) -> Result<crate::invite::InviteLink> {
-        crate::invite::sign_invite(&self.identity, invite)
+        crate::invite::sign_invite(&self.identity, invite).map_err(Into::into)
     }
 
     pub fn discovered_rooms(&self) -> Vec<DiscoveredRoom> {
@@ -2018,22 +2018,23 @@ impl AppHandle {
             // huddle 2.0.3 (audit N-M2): bind the room to this signed leave.
             room_id: Some(room_id.to_string()),
         };
-        let dispatched =
-            match crate::crypto::sign_message(&self.identity, &leave_msg).and_then(|env| {
+        let dispatched = match crate::crypto::sign_message(&self.identity, &leave_msg)
+            .map_err(HuddleError::from)
+            .and_then(|env| {
                 crate::network::protocol::encode_wire_signed(&env)
                     .map_err(|e| HuddleError::Session(format!("encode signed leave: {e}")))
             }) {
-                Ok(bytes) => {
-                    self.network
-                        .publish_room_message(room_id.to_string(), bytes)
-                        .await;
-                    true
-                }
-                Err(e) => {
-                    warn!(%e, %room_id, "failed to sign+encode MemberLeave notice");
-                    false
-                }
-            };
+            Ok(bytes) => {
+                self.network
+                    .publish_room_message(room_id.to_string(), bytes)
+                    .await;
+                true
+            }
+            Err(e) => {
+                warn!(%e, %room_id, "failed to sign+encode MemberLeave notice");
+                false
+            }
+        };
 
         self.active_rooms.lock().unwrap().remove(room_id);
         self.network.unsubscribe_room(room_id.to_string()).await;
@@ -4838,7 +4839,9 @@ impl AppHandle {
                                 }
                                 Err(e) => Err(HuddleError::Session(format!("utf8: {e}"))),
                             },
-                            Err(e) => Err(e),
+                            // huddle 2.0.4 (WS1.1): passphrase::unwrap now yields
+                            // a ProtocolError; coerce to HuddleError for this arm.
+                            Err(e) => Err(e.into()),
                         }
                     };
                     if let Err(e) = result {

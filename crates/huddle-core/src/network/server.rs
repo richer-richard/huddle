@@ -19,7 +19,6 @@ use std::sync::Arc;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use futures::{SinkExt, StreamExt};
-use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::WebSocketStream;
@@ -27,6 +26,10 @@ use tracing::warn;
 
 use crate::error::{HuddleError, Result};
 use crate::identity::{relay_auth_msg, Identity};
+// huddle 2.0.4 (WS1.1): the relay control messages are now the single shared
+// definition in `huddle_protocol::relay`, so the client and relay can't drift.
+// We serialize `ClientMsg` (send) and deserialize `ServerMsg` (receive).
+use huddle_protocol::relay::{ClientMsg, ServerMsg};
 
 /// huddle 1.3.4: WebSocket frame/message ceiling for the relay **client**.
 /// The relay was hardened in 1.3.1 to cap inbound frames at 512 KiB, but the
@@ -65,114 +68,11 @@ fn relay_ws_config() -> tokio_tungstenite::tungstenite::protocol::WebSocketConfi
     }
 }
 
-/// Messages we send to the server. Mirrors `huddle-server`'s `ClientMsg`.
-#[derive(Debug, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum ClientMsg {
-    /// huddle 1.1.4: `Hello` now authenticates. It carries our Ed25519
-    /// pubkey and a signature over `relay_auth_msg(nonce)` for the nonce the
-    /// server sent in its opening `Challenge`. The relay verifies the
-    /// signature and that the pubkey hashes to `fingerprint` before it lets
-    /// us touch any mailbox.
-    Hello {
-        fingerprint: String,
-        pubkey_b64: String,
-        signature_b64: String,
-        rooms: Vec<String>,
-        /// huddle 2.0: capability bit announcing that we implement at-least-once
-        /// mailbox ACKs — we always set this `true`. A 2.0 relay then tags each
-        /// mailbox delivery with its row id and keeps the row until we `Ack` it;
-        /// a pre-2.0 relay simply ignores the unknown field and keeps its
-        /// classical delete-on-deliver behavior. Either way we stay correct.
-        acks: bool,
-    },
-    Subscribe {
-        room: String,
-    },
-    Unsubscribe {
-        room: String,
-    },
-    Publish {
-        room: String,
-        id: String,
-        payload_b64: String,
-    },
-    /// huddle 1.2: deliver straight to a recipient fingerprint (`to`),
-    /// independent of room membership. Used for 1:1 DMs and friend requests,
-    /// where we know exactly who the recipient is. `room` is the opaque tag
-    /// the recipient files it under (DM room id, or their inbox id). Mirrors
-    /// `huddle-server`'s `ClientMsg::SendDirect`.
-    SendDirect {
-        to: String,
-        room: String,
-        id: String,
-        payload_b64: String,
-    },
-    /// huddle 1.2.1: mint a short-lived connect code bound to our identity.
-    CreateConnectToken,
-    /// huddle 1.2.1: resolve a connect code → owner fingerprint + pubkey.
-    RedeemConnectToken {
-        token: String,
-    },
-    Fetch,
-    /// huddle 2.0: acknowledge durable receipt of a mailbox-delivered message so
-    /// the relay can delete that row (at-least-once delivery). `mailbox_id` is
-    /// the row id the relay attached to the `ServerMsg::Message` we persisted.
-    /// Mirrors `huddle-server`'s `ClientMsg::Ack`.
-    Ack {
-        mailbox_id: i64,
-    },
-    Ping,
-}
-
-/// Messages the server sends back. Mirrors `huddle-server`'s `ServerMsg`.
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum ServerMsg {
-    /// huddle 1.1.4: the relay opens the connection with a random challenge
-    /// nonce. We sign it and answer with an authenticated `Hello`.
-    Challenge {
-        nonce_b64: String,
-    },
-    // The server echoes our fingerprint on `ready`, but we already know
-    // our own identity, so we keep only the tag and let serde ignore the
-    // extra field.
-    Ready,
-    /// A room message delivered live or from the offline mailbox. huddle 2.0:
-    /// `mailbox_id` is `Some(row_id)` when a 2.0 relay used at-least-once
-    /// delivery (we must `Ack` it after durably handling the message); `None`
-    /// for live fan-out or a pre-2.0 relay (serde default — old relays omit it).
-    Message {
-        room: String,
-        id: String,
-        payload_b64: String,
-        #[serde(default)]
-        mailbox_id: Option<i64>,
-    },
-    Sent {
-        id: String,
-        delivered: usize,
-        queued: usize,
-    },
-    /// huddle 1.2.1: a freshly minted connect code + its lifetime in seconds.
-    ConnectToken {
-        token: String,
-        ttl_secs: u64,
-    },
-    /// huddle 1.2.1: result of redeeming a connect code. `fingerprint`/`pubkey_b64`
-    /// are `None` when the code was unknown or expired. (The relay also echoes
-    /// the `token`, but we don't need it client-side — serde ignores it.)
-    ConnectTokenResolved {
-        #[serde(default)]
-        fingerprint: Option<String>,
-        #[serde(default)]
-        pubkey_b64: Option<String>,
-    },
-    Pong,
-    Error {
-        message: String,
-    },
-}
+// huddle 2.0.4 (WS1.1): `ClientMsg` / `ServerMsg` are now the single shared
+// definition in `huddle_protocol::relay` (imported above), so the client and
+// relay can never drift. We serialize `ClientMsg` (send) and deserialize
+// `ServerMsg` (receive); the unified types are byte-compatible with every prior
+// client and relay (the relay's historical serde attributes are authoritative).
 
 /// What the connector surfaces to the rest of huddle-core. The caller
 /// drives these into the same path that handles a received gossipsub
@@ -454,7 +354,9 @@ impl ServerClient {
                         // `tx` dropped here — the reader no longer pins the
                         // outgoing channel open.
                     }
-                    Ok(ServerMsg::Ready) => {
+                    // huddle 2.0.4: the unified `Ready` carries the relay-echoed
+                    // fingerprint; we already know our own identity, so ignore it.
+                    Ok(ServerMsg::Ready { .. }) => {
                         let _ = ev_tx.send(ServerEvent::Ready);
                     }
                     Ok(ServerMsg::Sent {
@@ -474,6 +376,9 @@ impl ServerClient {
                     Ok(ServerMsg::ConnectTokenResolved {
                         fingerprint,
                         pubkey_b64,
+                        // huddle 2.0.4: the unified variant also carries the
+                        // echoed `token`; the client doesn't need it.
+                        ..
                     }) => {
                         let _ = ev_tx.send(ServerEvent::ConnectTokenResolved {
                             fingerprint,

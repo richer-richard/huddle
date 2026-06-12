@@ -48,7 +48,7 @@ use ml_kem::{Decapsulate, DecapsulationKey, EncapsulationKey, KeyExport, MlKem76
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
-use crate::error::{HuddleError, Result};
+use crate::error::{ProtocolError, Result};
 
 /// Serialized length of an ML-KEM-768 encapsulation (public) key.
 pub const MLKEM_EK_LEN: usize = 1184;
@@ -112,13 +112,13 @@ impl PqKeypair {
     /// ciphertext.
     pub fn decapsulate(&self, ciphertext: &[u8]) -> Result<Zeroizing<[u8; SS_LEN]>> {
         if ciphertext.len() != MLKEM_CT_LEN {
-            return Err(HuddleError::Session(format!(
+            return Err(ProtocolError::Session(format!(
                 "ML-KEM ciphertext is {} bytes, expected {MLKEM_CT_LEN}",
                 ciphertext.len()
             )));
         }
         let ct = Array::try_from(ciphertext)
-            .map_err(|_| HuddleError::Session("ML-KEM ciphertext decode failed".into()))?;
+            .map_err(|_| ProtocolError::Session("ML-KEM ciphertext decode failed".into()))?;
         let ss = self.dk.decapsulate(&ct);
         let mut out = Zeroizing::new([0u8; SS_LEN]);
         out.copy_from_slice(&ss);
@@ -139,15 +139,15 @@ pub fn encapsulate_deterministic(
     m: &[u8; SS_LEN],
 ) -> Result<(Vec<u8>, Zeroizing<[u8; SS_LEN]>)> {
     if partner_ek_bytes.len() != MLKEM_EK_LEN {
-        return Err(HuddleError::Session(format!(
+        return Err(ProtocolError::Session(format!(
             "ML-KEM encapsulation key is {} bytes, expected {MLKEM_EK_LEN}",
             partner_ek_bytes.len()
         )));
     }
     let ek_arr = Array::try_from(partner_ek_bytes)
-        .map_err(|_| HuddleError::Session("ML-KEM encapsulation key decode failed".into()))?;
+        .map_err(|_| ProtocolError::Session("ML-KEM encapsulation key decode failed".into()))?;
     let ek = EncapsulationKey::<MlKem768>::new(&ek_arr)
-        .map_err(|_| HuddleError::Session("invalid ML-KEM encapsulation key".into()))?;
+        .map_err(|_| ProtocolError::Session("invalid ML-KEM encapsulation key".into()))?;
     let m_arr: ml_kem::B32 =
         Array::try_from(&m[..]).expect("encapsulation message is exactly 32 bytes");
     let (ct, ss) = ek.encapsulate_deterministic(&m_arr);

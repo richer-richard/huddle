@@ -31,7 +31,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::crypto::passphrase::KEY_LEN;
 use crate::crypto::pqc::{self, PqKeypair, SS_LEN};
-use crate::error::{HuddleError, Result};
+use crate::error::{ProtocolError, Result};
 
 /// Compute the classical X25519 shared secret half of a DM: our Ed25519 seed
 /// against the partner's Ed25519 pubkey, with the 1.1.4 small-order
@@ -52,7 +52,7 @@ fn x25519_shared(
     // such a "pubkey" could derive the room key. Two honest peers always
     // produce a contributory secret, so this never rejects a real DM.
     if !shared.was_contributory() {
-        return Err(HuddleError::Session(
+        return Err(ProtocolError::Session(
             "DM key agreement rejected: partner X25519 pubkey is non-contributory \
              (small-order point)"
                 .into(),
@@ -83,7 +83,7 @@ pub fn derive_dm_key(
     let h = Hkdf::<Sha256>::new(Some(salt), shared.as_slice());
     let mut out = [0u8; KEY_LEN];
     h.expand(canonical_room_id.as_bytes(), &mut out)
-        .map_err(|e| HuddleError::Session(format!("hkdf expand: {e}")))?;
+        .map_err(|e| ProtocolError::Session(format!("hkdf expand: {e}")))?;
     Ok(out)
 }
 
@@ -198,19 +198,19 @@ fn ed25519_seed_to_x25519_secret(seed: &[u8; 32]) -> StaticSecret {
 
 fn ed25519_pubkey_to_x25519(pubkey_bytes: &[u8; 32]) -> Result<PublicKey> {
     let vk = VerifyingKey::from_bytes(pubkey_bytes)
-        .map_err(|e| HuddleError::Session(format!("bad ed25519 pubkey: {e}")))?;
+        .map_err(|e| ProtocolError::Session(format!("bad ed25519 pubkey: {e}")))?;
     Ok(PublicKey::from(vk.to_montgomery().to_bytes()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::identity::Identity;
+    use crate::identity::IdentityKeys;
 
     #[test]
     fn dm_key_is_commutative() {
-        let alice = Identity::generate().unwrap();
-        let bob = Identity::generate().unwrap();
+        let alice = IdentityKeys::generate().unwrap();
+        let bob = IdentityKeys::generate().unwrap();
         let room_id = "deadbeefcafef00d1234567890abcdef";
         let k_a = derive_dm_key(&alice.secret_bytes(), &bob.public_bytes(), room_id).unwrap();
         let k_b = derive_dm_key(&bob.secret_bytes(), &alice.public_bytes(), room_id).unwrap();
@@ -219,8 +219,8 @@ mod tests {
 
     #[test]
     fn dm_key_is_deterministic() {
-        let alice = Identity::generate().unwrap();
-        let bob = Identity::generate().unwrap();
+        let alice = IdentityKeys::generate().unwrap();
+        let bob = IdentityKeys::generate().unwrap();
         let room_id = "room-1";
         let k1 = derive_dm_key(&alice.secret_bytes(), &bob.public_bytes(), room_id).unwrap();
         let k2 = derive_dm_key(&alice.secret_bytes(), &bob.public_bytes(), room_id).unwrap();
@@ -229,8 +229,8 @@ mod tests {
 
     #[test]
     fn dm_key_binds_to_room_id() {
-        let alice = Identity::generate().unwrap();
-        let bob = Identity::generate().unwrap();
+        let alice = IdentityKeys::generate().unwrap();
+        let bob = IdentityKeys::generate().unwrap();
         let k1 = derive_dm_key(&alice.secret_bytes(), &bob.public_bytes(), "room-1").unwrap();
         let k2 = derive_dm_key(&alice.secret_bytes(), &bob.public_bytes(), "room-2").unwrap();
         assert_ne!(
@@ -241,9 +241,9 @@ mod tests {
 
     #[test]
     fn dm_key_differs_per_pair() {
-        let alice = Identity::generate().unwrap();
-        let bob = Identity::generate().unwrap();
-        let carol = Identity::generate().unwrap();
+        let alice = IdentityKeys::generate().unwrap();
+        let bob = IdentityKeys::generate().unwrap();
+        let carol = IdentityKeys::generate().unwrap();
         let room = "room";
         let k_ab = derive_dm_key(&alice.secret_bytes(), &bob.public_bytes(), room).unwrap();
         let k_ac = derive_dm_key(&alice.secret_bytes(), &carol.public_bytes(), room).unwrap();
@@ -252,7 +252,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_ed25519_pubkey() {
-        let alice = Identity::generate().unwrap();
+        let alice = IdentityKeys::generate().unwrap();
         // 32 bytes that aren't a valid Edwards point.
         let mut bad = [0u8; 32];
         bad[31] = 0xff;
@@ -269,7 +269,7 @@ mod tests {
         // small-order Montgomery point, so the ECDH is non-contributory.
         // The contributory check must reject it (either VerifyingKey decode
         // fails or was_contributory() is false — both surface as Err).
-        let alice = Identity::generate().unwrap();
+        let alice = IdentityKeys::generate().unwrap();
         let mut id_point = [0u8; 32];
         id_point[0] = 1;
         let r = derive_dm_key(&alice.secret_bytes(), &id_point, "room");
@@ -281,8 +281,8 @@ mod tests {
     #[test]
     fn hybrid_initiator_and_responder_agree() {
         // alice = initiator (encapsulates to bob's ek), bob = responder.
-        let alice = Identity::generate().unwrap();
-        let bob = Identity::generate().unwrap();
+        let alice = IdentityKeys::generate().unwrap();
+        let bob = IdentityKeys::generate().unwrap();
         let room = "deadbeefcafef00d1234567890abcdef";
 
         let (k_init, ct) = derive_dm_key_hybrid_initiator(
@@ -310,8 +310,8 @@ mod tests {
 
     #[test]
     fn hybrid_key_differs_from_classical() {
-        let alice = Identity::generate().unwrap();
-        let bob = Identity::generate().unwrap();
+        let alice = IdentityKeys::generate().unwrap();
+        let bob = IdentityKeys::generate().unwrap();
         let room = "room-x";
 
         let classical = derive_dm_key(&alice.secret_bytes(), &bob.public_bytes(), room).unwrap();
@@ -332,8 +332,8 @@ mod tests {
     fn hybrid_is_reproducible_by_initiator() {
         // Deterministic encapsulation: the initiator re-derives the identical
         // key + ciphertext with no stored per-DM state (survives a restart).
-        let alice = Identity::generate().unwrap();
-        let bob = Identity::generate().unwrap();
+        let alice = IdentityKeys::generate().unwrap();
+        let bob = IdentityKeys::generate().unwrap();
         let room = "room-determinism";
         let (k1, ct1) = derive_dm_key_hybrid_initiator(
             &alice.secret_bytes(),
@@ -355,8 +355,8 @@ mod tests {
 
     #[test]
     fn hybrid_binds_to_room_id() {
-        let alice = Identity::generate().unwrap();
-        let bob = Identity::generate().unwrap();
+        let alice = IdentityKeys::generate().unwrap();
+        let bob = IdentityKeys::generate().unwrap();
         let (k1, _) = derive_dm_key_hybrid_initiator(
             &alice.secret_bytes(),
             &bob.public_bytes(),
@@ -380,8 +380,8 @@ mod tests {
         // (implicit rejection), so the responder derives a DIFFERENT key than
         // the initiator — the wrapped session key then fails to unwrap, which
         // is the desired fail-closed behaviour.
-        let alice = Identity::generate().unwrap();
-        let bob = Identity::generate().unwrap();
+        let alice = IdentityKeys::generate().unwrap();
+        let bob = IdentityKeys::generate().unwrap();
         let room = "room-tamper";
         let (k_init, mut ct) = derive_dm_key_hybrid_initiator(
             &alice.secret_bytes(),
@@ -404,8 +404,8 @@ mod tests {
 
     #[test]
     fn hybrid_initiator_rejects_bad_ek_length() {
-        let alice = Identity::generate().unwrap();
-        let bob = Identity::generate().unwrap();
+        let alice = IdentityKeys::generate().unwrap();
+        let bob = IdentityKeys::generate().unwrap();
         let r = derive_dm_key_hybrid_initiator(
             &alice.secret_bytes(),
             &bob.public_bytes(),

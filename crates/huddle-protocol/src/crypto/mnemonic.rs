@@ -8,13 +8,13 @@
 //! ML-KEM-768 keypair, and every DM key — on a fresh install, without ever
 //! touching the database (the DB only ever stores the raw 32 bytes). There is
 //! no passphrase / PBKDF2 stretching and no RNG here: we use only bip39's
-//! entropy <-> word mapping. See `crate::identity::Identity::{seed, from_seed}`
+//! entropy <-> word mapping. See `crate::identity::IdentityKeys::{seed, from_seed}`
 //! for the identity-level export/import that sits on top of this.
 
 use bip39::{Language, Mnemonic};
 use zeroize::Zeroizing;
 
-use crate::error::{HuddleError, Result};
+use crate::error::{ProtocolError, Result};
 
 /// Encode a 32-byte Ed25519 identity seed as a 24-word BIP39 English
 /// mnemonic. 256 bits of entropy → 24 words, where the last word folds in an
@@ -38,14 +38,14 @@ pub fn seed_to_phrase(seed: &[u8; 32]) -> String {
 ///
 /// Errors if any word is off the wordlist, the word count is wrong, or the
 /// checksum doesn't match — i.e. a corrupted or mistyped phrase. The returned
-/// seed is the sole input to `Identity::from_seed`, so a successful decode
+/// seed is the sole input to `IdentityKeys::from_seed`, so a successful decode
 /// reproduces the original identity byte-for-byte. Handed back in `Zeroizing`
 /// (F6) so the crown-jewel seed never lands as an un-scrubbed `[u8; 32]` on the
 /// caller's stack — every recovery caller already wants it wrapped.
 pub fn phrase_to_seed(phrase: &str) -> Result<Zeroizing<[u8; 32]>> {
     let normalized = phrase.trim().to_lowercase();
     let mnemonic = Mnemonic::parse_in(Language::English, normalized)
-        .map_err(|e| HuddleError::Identity(format!("invalid seed phrase: {e}")))?;
+        .map_err(|e| ProtocolError::Identity(format!("invalid seed phrase: {e}")))?;
 
     // `to_entropy_array` writes the entropy into a fixed 33-byte buffer and
     // reports its real length; for a checksum-valid 24-word phrase that length
@@ -55,7 +55,7 @@ pub fn phrase_to_seed(phrase: &str) -> Result<Zeroizing<[u8; 32]>> {
     let (raw, len) = mnemonic.to_entropy_array();
     let raw = Zeroizing::new(raw);
     if len != 32 {
-        return Err(HuddleError::Identity(format!(
+        return Err(ProtocolError::Identity(format!(
             "seed phrase decodes to {len} bytes; expected a 24-word (32-byte) phrase"
         )));
     }
@@ -129,7 +129,7 @@ mod tests {
     #[test]
     fn decode_returns_zeroizing_seed() {
         // F6: `phrase_to_seed` hands the seed back already wrapped in
-        // `Zeroizing`, so callers can move it straight into `Identity::from_seed`
+        // `Zeroizing`, so callers can move it straight into `IdentityKeys::from_seed`
         // without ever materializing a bare `[u8; 32]`. The wrapper derefs to the
         // expected bytes; this also pins the return type at compile time.
         let seed = [9u8; 32];

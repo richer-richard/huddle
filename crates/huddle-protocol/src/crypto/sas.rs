@@ -66,7 +66,7 @@ use rand::RngCore;
 use sha2::{Digest, Sha256};
 use x25519_dalek::{PublicKey, StaticSecret};
 
-use crate::error::{HuddleError, Result};
+use crate::error::{ProtocolError, Result};
 
 /// Length of the transaction id used as HKDF salt. 16 bytes (128 bits)
 /// is plenty of unforgeability; sized to be base64-friendly.
@@ -164,7 +164,7 @@ pub fn derive_sas_code(
     // MITM steer both sides to a derivable SAS code and defeat the OOB
     // comparison. Honest peers always produce a contributory secret.
     if !shared.was_contributory() {
-        return Err(HuddleError::Session(
+        return Err(ProtocolError::Session(
             "SAS rejected: peer X25519 ephemeral is non-contributory (small-order point)".into(),
         ));
     }
@@ -372,9 +372,9 @@ pub fn parse_pubkey(b64: &str) -> Result<PublicKey> {
     use base64::Engine;
     let bytes = B64
         .decode(b64)
-        .map_err(|e| HuddleError::Session(format!("bad x25519 pubkey b64: {e}")))?;
+        .map_err(|e| ProtocolError::Session(format!("bad x25519 pubkey b64: {e}")))?;
     if bytes.len() != 32 {
-        return Err(HuddleError::Session(format!(
+        return Err(ProtocolError::Session(format!(
             "x25519 pubkey is {} bytes, expected 32",
             bytes.len()
         )));

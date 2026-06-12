@@ -1,5 +1,4 @@
 use rusqlite::{params, OptionalExtension};
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::warn;
 
@@ -117,34 +116,10 @@ pub fn set_member_display_name(
 // Rooms
 // =========================================================================
 
-/// huddle 0.7: explicit room kind. `Direct` = 1-1 DM (encrypted, no name,
-/// no member-list chrome, no kick/grant). `Group` = N-way room (full
-/// moderation, named, optionally encrypted). Persisted on `rooms.kind` and
-/// echoed on `RoomAnnouncement.kind` (with `#[serde(default)]` so pre-0.7
-/// peers' announcements deserialize as `Group`).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RoomKind {
-    Direct,
-    #[default]
-    Group,
-}
-
-impl RoomKind {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            RoomKind::Direct => "direct",
-            RoomKind::Group => "group",
-        }
-    }
-
-    pub fn from_str(s: &str) -> Self {
-        match s {
-            "direct" => RoomKind::Direct,
-            _ => RoomKind::Group,
-        }
-    }
-}
+// huddle 2.0.4 (WS1.1): `RoomKind` is a wire type (`RoomAnnouncement.kind`), so
+// it moved to `huddle-protocol`; re-exported here so `repo::RoomKind` call sites
+// and the `rooms.kind` persistence below are unchanged.
+pub use huddle_protocol::RoomKind;
 
 #[derive(Debug, Clone)]
 pub struct StoredRoom {

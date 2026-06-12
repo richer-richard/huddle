@@ -18,6 +18,10 @@ default = []
 arti = ["dep:arti-client", "dep:tor-rtcompat"]
 
 [dependencies]
+# huddle 2.0.4 (WS1.1): the runtime-free wire-protocol + crypto core. huddle-core
+# re-exports its types at their original module paths (crypto / identity / invite /
+# network::protocol) so call sites are unchanged; the heavy graph below stays here.
+huddle-protocol = { workspace = true }
 libp2p = { version = "0.56", features = [
     "mdns", "identify", "ping", "request-response",
     "tcp", "noise", "yamux", "tokio", "ed25519", "macros", "gossipsub",

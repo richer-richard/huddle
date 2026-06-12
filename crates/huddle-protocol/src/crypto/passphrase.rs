@@ -17,7 +17,7 @@ use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use rand::RngCore;
 use zeroize::Zeroizing;
 
-use crate::error::{HuddleError, Result};
+use crate::error::{ProtocolError, Result};
 
 pub const SALT_LEN: usize = 16;
 pub const KEY_LEN: usize = 32;
@@ -47,12 +47,12 @@ pub fn derive_key(passphrase: &str, salt: &[u8]) -> Result<[u8; KEY_LEN]> {
 /// heap-residency leaks should prefer this over `derive_key`.
 pub fn derive_key_zeroizing(passphrase: &str, salt: &[u8]) -> Result<Zeroizing<[u8; KEY_LEN]>> {
     let params = Params::new(65_536, 3, 4, Some(KEY_LEN))
-        .map_err(|e| HuddleError::Session(format!("argon2 params: {e}")))?;
+        .map_err(|e| ProtocolError::Session(format!("argon2 params: {e}")))?;
     let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut out = Zeroizing::new([0u8; KEY_LEN]);
     argon
         .hash_password_into(passphrase.as_bytes(), salt, out.as_mut_slice())
-        .map_err(|e| HuddleError::Session(format!("argon2 derive: {e}")))?;
+        .map_err(|e| ProtocolError::Session(format!("argon2 derive: {e}")))?;
     Ok(out)
 }
 
@@ -63,7 +63,7 @@ pub fn wrap(plaintext: &[u8], passphrase_key: &[u8; KEY_LEN]) -> Result<String> 
     let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
     let ciphertext = cipher
         .encrypt(&nonce, plaintext)
-        .map_err(|e| HuddleError::Session(format!("wrap failed: {e}")))?;
+        .map_err(|e| ProtocolError::Session(format!("wrap failed: {e}")))?;
     let mut combined = Vec::with_capacity(NONCE_LEN + ciphertext.len());
     combined.extend_from_slice(&nonce);
     combined.extend_from_slice(&ciphertext);
@@ -74,16 +74,16 @@ pub fn wrap(plaintext: &[u8], passphrase_key: &[u8; KEY_LEN]) -> Result<String> 
 pub fn unwrap(encoded: &str, passphrase_key: &[u8; KEY_LEN]) -> Result<Vec<u8>> {
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(encoded)
-        .map_err(|e| HuddleError::Session(format!("bad base64: {e}")))?;
+        .map_err(|e| ProtocolError::Session(format!("bad base64: {e}")))?;
     if bytes.len() < NONCE_LEN + 16 {
-        return Err(HuddleError::Session("wrapped key too short".into()));
+        return Err(ProtocolError::Session("wrapped key too short".into()));
     }
     let (nonce_bytes, ciphertext) = bytes.split_at(NONCE_LEN);
     let cipher = ChaCha20Poly1305::new(Key::from_slice(passphrase_key));
     let nonce = Nonce::from_slice(nonce_bytes);
     cipher
         .decrypt(nonce, ciphertext)
-        .map_err(|e| HuddleError::Session(format!("unwrap failed (wrong passphrase?): {e}")))
+        .map_err(|e| ProtocolError::Session(format!("unwrap failed (wrong passphrase?): {e}")))
 }
 
 #[cfg(test)]

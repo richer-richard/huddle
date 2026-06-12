@@ -10,24 +10,15 @@ use base64::Engine;
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use rand::RngCore;
-use serde::{Deserialize, Serialize};
 
 use crate::crypto::RoomCrypto;
 use crate::error::{HuddleError, Result};
 
-/// Metadata that lets the receiver decrypt an encrypted file: the
-/// Megolm session id used to wrap the file key, the wrapped file key
-/// itself, and the ChaCha20-Poly1305 nonce. All bytes base64-encoded.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct EncryptedFileMeta {
-    pub megolm_session_id: String,
-    pub wrapped_key_b64: String,
-    pub nonce_b64: String,
-    /// SHA-256 of the plaintext, hex-encoded. Bound as AEAD associated
-    /// data so the (key, nonce, ciphertext) triple can't be replayed
-    /// against different content, and verified after decryption.
-    pub content_hash: String,
-}
+// huddle 2.0.4 (WS1.1): `EncryptedFileMeta` is a wire type (it rides in
+// `FileOffer`), so it moved to `huddle-protocol`; re-exported here so
+// `files::encryption::EncryptedFileMeta` call sites are unchanged. The
+// `encrypt_file` / `decrypt_file` helpers below stay (they drive `RoomCrypto`).
+pub use huddle_protocol::EncryptedFileMeta;
 
 /// Encrypt `plaintext` with a fresh ChaCha20-Poly1305 key, then Megolm-
 /// wrap that key via the room's outbound session. The returned bytes
