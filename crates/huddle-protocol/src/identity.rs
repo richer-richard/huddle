@@ -73,6 +73,23 @@ impl IdentityKeys {
         self.pq_keypair().encapsulation_key_bytes()
     }
 
+    /// huddle 2.0.6 (WS2-a): our serialized ML-DSA-65 verifying (public) key,
+    /// published in signed announces so peers can **pin** it for hybrid
+    /// post-quantum authentication. Deterministically derived from the Ed25519
+    /// seed (see [`crate::crypto::mldsa`]); stable across restarts, no storage.
+    pub fn mldsa_public_bytes(&self) -> [u8; crate::crypto::mldsa::MLDSA_PK_LEN] {
+        let seed = Zeroizing::new(self.signing_key.to_bytes());
+        crate::crypto::mldsa::MlDsaKeypair::from_identity_seed(&seed).public_bytes()
+    }
+
+    /// huddle 2.0.6 (WS2-a): ML-DSA-65-sign `msg` with our identity's
+    /// deterministically-derived post-quantum authentication key. Used for the
+    /// composite signature on identity/authority envelopes.
+    pub fn mldsa_sign(&self, msg: &[u8]) -> [u8; crate::crypto::mldsa::MLDSA_SIG_LEN] {
+        let seed = Zeroizing::new(self.signing_key.to_bytes());
+        crate::crypto::mldsa::MlDsaKeypair::from_identity_seed(&seed).sign(msg)
+    }
+
     /// huddle 2.0: export this identity's 32-byte Ed25519 seed — the **sole
     /// root secret** from which the PeerId, the ML-KEM-768 keypair, and every
     /// DM key deterministically derive. Returned in a `Zeroizing` wrapper so

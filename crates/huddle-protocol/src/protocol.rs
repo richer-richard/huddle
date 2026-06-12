@@ -134,6 +134,20 @@ pub struct SignedRoomMessage {
     /// no longer satisfy `verify_signed`.
     #[serde(default)]
     pub signed_at_ms: i64,
+    /// huddle 2.0.6 (WS2-a): optional **composite ML-DSA-65 post-quantum
+    /// signature**. When the hybrid path is used, the same `signed_bytes`
+    /// (payload || domain || timestamp) are signed with the sender's ML-DSA-65
+    /// key too; `mldsa_pubkey_b64` carries that key. A verifier that has
+    /// **pinned** the sender's ML-DSA key (learned from a prior signed announce,
+    /// like the ML-KEM pin) checks this signature via
+    /// [`crate::crypto::verify_signed_mldsa`], so a quantum adversary that forges
+    /// the Ed25519 signature still cannot forge the envelope. Both fields are
+    /// absent on classical envelopes — byte-identical to pre-2.0.6 — and ignored
+    /// by older peers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mldsa_pubkey_b64: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mldsa_signature_b64: Option<String>,
 }
 
 /// What actually gets serialized onto a per-room gossipsub topic. New

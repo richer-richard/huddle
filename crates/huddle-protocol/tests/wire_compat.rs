@@ -75,6 +75,8 @@ fn signed_envelope_shape_is_stable() {
         payload_b64: "pl".into(),
         signature_b64: "sig".into(),
         signed_at_ms: 1234,
+        mldsa_pubkey_b64: None,
+        mldsa_signature_b64: None,
     };
     let v = to_value(&env);
     for k in [

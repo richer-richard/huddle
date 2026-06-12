@@ -1,4 +1,5 @@
 pub mod dm;
+pub mod mldsa;
 pub mod mnemonic;
 pub mod passphrase;
 pub mod pqc;
@@ -168,7 +169,83 @@ pub fn sign_message_at(
         payload_b64: B64.encode(&payload),
         signature_b64: B64.encode(sig),
         signed_at_ms,
+        mldsa_pubkey_b64: None,
+        mldsa_signature_b64: None,
     })
+}
+
+/// huddle 2.0.6 (WS2-a): like `sign_message`, but ALSO attaches a composite
+/// ML-DSA-65 post-quantum signature over the same `signed_bytes`, plus the
+/// sender's ML-DSA public key. For **low-frequency identity/authority**
+/// envelopes (announces, owner/ban grants, invites) — the ML-DSA signature is
+/// ~3.3 KB, so it is not put on every chat line. Backward-compatible: a peer
+/// that doesn't pin the sender's ML-DSA key simply ignores the extra fields and
+/// verifies classically.
+pub fn sign_message_hybrid_pq(
+    identity: &crate::identity::IdentityKeys,
+    msg: &RoomMessage,
+) -> Result<SignedRoomMessage> {
+    sign_message_hybrid_pq_at(identity, msg, now_unix_ms())
+}
+
+/// Deterministic-timestamp variant of [`sign_message_hybrid_pq`] for tests.
+pub fn sign_message_hybrid_pq_at(
+    identity: &crate::identity::IdentityKeys,
+    msg: &RoomMessage,
+    signed_at_ms: i64,
+) -> Result<SignedRoomMessage> {
+    let mut env = sign_message_at(identity, msg, signed_at_ms)?;
+    // Sign the exact bytes the Ed25519 layer committed to, so both signatures
+    // cover the same payload + timestamp.
+    let payload = B64
+        .decode(&env.payload_b64)
+        .map_err(|e| ProtocolError::Session(format!("re-decode payload: {e}")))?;
+    let mldsa_sig = identity.mldsa_sign(&signed_bytes(&payload, signed_at_ms));
+    env.mldsa_pubkey_b64 = Some(B64.encode(identity.mldsa_public_bytes()));
+    env.mldsa_signature_b64 = Some(B64.encode(mldsa_sig));
+    Ok(env)
+}
+
+/// huddle 2.0.6 (WS2-a): verify an envelope's composite ML-DSA-65 signature
+/// against a **pinned** ML-DSA public key (the caller's durable record of this
+/// signer's PQ-auth key, learned from a prior signed announce). The Ed25519
+/// layer is checked separately by [`verify_signed`]; this is the additional
+/// post-quantum check, gated on having pinned the signer's key.
+///
+/// - `Ok(true)`  — a valid ML-DSA signature by the pinned key (PQ-auth confirmed).
+/// - `Ok(false)` — no ML-DSA signature present (a classical-only envelope).
+/// - `Err(..)`   — the envelope claims a **different** ML-DSA key than pinned, or
+///   carries a malformed/invalid ML-DSA signature: a downgrade/forgery the
+///   caller MUST reject. (A caller that has pinned this signer should also treat
+///   `Ok(false)` — a stripped signature — as a downgrade and reject it.)
+pub fn verify_signed_mldsa(env: &SignedRoomMessage, pinned_mldsa_pubkey: &[u8]) -> Result<bool> {
+    let (pk_b64, sig_b64) = match (&env.mldsa_pubkey_b64, &env.mldsa_signature_b64) {
+        (Some(p), Some(s)) => (p, s),
+        _ => return Ok(false),
+    };
+    let pk = B64
+        .decode(pk_b64)
+        .map_err(|e| ProtocolError::Session(format!("bad mldsa_pubkey_b64: {e}")))?;
+    if pk.as_slice() != pinned_mldsa_pubkey {
+        return Err(ProtocolError::Session(
+            "ML-DSA key in envelope does not match the pinned key for this signer \
+             (post-quantum downgrade or forgery) — rejecting"
+                .into(),
+        ));
+    }
+    let sig = B64
+        .decode(sig_b64)
+        .map_err(|e| ProtocolError::Session(format!("bad mldsa_signature_b64: {e}")))?;
+    let payload = B64
+        .decode(&env.payload_b64)
+        .map_err(|e| ProtocolError::Session(format!("bad payload_b64: {e}")))?;
+    if crate::crypto::mldsa::verify(&pk, &signed_bytes(&payload, env.signed_at_ms), &sig) {
+        Ok(true)
+    } else {
+        Err(ProtocolError::Session(
+            "ML-DSA signature failed to verify over the envelope's signed bytes".into(),
+        ))
+    }
 }
 
 /// Canonical bytes the signature commits to: the raw RoomMessage JSON followed
@@ -278,6 +355,36 @@ mod tests {
         // Inside the window: ok.
         let now = signed_at + 4 * 60 * 1000;
         assert!(verify_signed_at(&env, now, SIGNED_ENVELOPE_WINDOW_MS).is_ok());
+    }
+
+    #[test]
+    fn hybrid_pq_sign_verify_round_trip() {
+        let id = IdentityKeys::generate().unwrap();
+        // A classical envelope carries no composite signature.
+        let env = sign_message(&id, &sample_msg()).unwrap();
+        assert!(!verify_signed_mldsa(&env, &id.mldsa_public_bytes()).unwrap());
+        // A hybrid envelope still verifies classically (backward-compat) AND its
+        // composite ML-DSA signature verifies against the pinned key.
+        let henv = sign_message_hybrid_pq(&id, &sample_msg()).unwrap();
+        assert!(verify_signed(&henv).is_ok());
+        assert!(verify_signed_mldsa(&henv, &id.mldsa_public_bytes()).unwrap());
+    }
+
+    #[test]
+    fn hybrid_pq_downgrade_and_forgery_rejected() {
+        let id = IdentityKeys::generate().unwrap();
+        let other = IdentityKeys::generate().unwrap();
+        let henv = sign_message_hybrid_pq(&id, &sample_msg()).unwrap();
+        // A different pinned key (substitution / wrong signer) is rejected.
+        assert!(verify_signed_mldsa(&henv, &other.mldsa_public_bytes()).is_err());
+        // A tampered ML-DSA signature is rejected.
+        let mut bad = henv.clone();
+        let mut sig = B64
+            .decode(bad.mldsa_signature_b64.as_ref().unwrap())
+            .unwrap();
+        sig[0] ^= 1;
+        bad.mldsa_signature_b64 = Some(B64.encode(&sig));
+        assert!(verify_signed_mldsa(&bad, &id.mldsa_public_bytes()).is_err());
     }
 
     #[test]

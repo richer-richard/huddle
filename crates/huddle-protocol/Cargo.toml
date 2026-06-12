@@ -21,6 +21,11 @@ thiserror = "2"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 ml-kem = { version = "0.3.2", features = ["zeroize"] }
+# huddle 2.0.6 (WS2-a): ML-DSA-65 (FIPS 204) for hybrid post-quantum
+# authentication — a composite Ed25519 + ML-DSA signature on identity/authority
+# envelopes. Pure-Rust RustCrypto crate; deterministic keygen from the identity
+# seed (no new on-disk material), same as ml-kem.
+ml-dsa = "0.1.1"
 sha2 = "0.11"
 hkdf = "0.13"
 hex = "0.4"
