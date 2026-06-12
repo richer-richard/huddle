@@ -540,11 +540,16 @@ fresh identity from scratch.
 
 ```
 huddle/
-  huddle-core    shared library: rooms, crypto, network, storage
-  huddle         terminal UI (ratatui TUI)
-  huddle-gui     native desktop app (egui/eframe)
-  huddle-server  WebSocket relay + offline mailbox (SQLite)
+  huddle-protocol  runtime-free wire format + crypto — "the spec, as code" (see PROTOCOL.md)
+  huddle-core      shared library: rooms, network, storage, Megolm sessions, the AppHandle
+  huddle           terminal UI (ratatui TUI)
+  huddle-gui       native desktop app (egui/eframe)
+  huddle-server    WebSocket relay + offline mailbox (SQLite)
 ```
+
+The wire format and cryptographic constructions are specified in
+[`PROTOCOL.md`](PROTOCOL.md) — a citable spec precise enough to build a second
+interoperable implementation against the published `huddle-protocol` crate.
 
 **Networking** — libp2p 0.56 with TCP+Noise+Yamux transport, mDNS for
 LAN discovery, gossipsub for both global room advertisement and
