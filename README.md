@@ -209,7 +209,7 @@ per-OS app directory:
 
 ```
 +----------------------------------------------------------------------+
-| huddle 2.0.4  ·  745e-fe8a-…  ·  relay ●               12:34 UTC     |
+| huddle 2.0.5  ·  745e-fe8a-…  ·  relay ●               12:34 UTC     |
 +------------------------+---------------------------------------------+
 | ▾ Profile              | # general                                   |
 |   alice  HD-AAAA-…  ●  |   4 members · encrypted                     |
@@ -660,6 +660,23 @@ native dialog for a path-entry box.
   rotates on a schedule + on membership change), bounding the exposure
   window; the full fix — a Double Ratchet seeded from the hybrid root key —
   is sequenced in `docs/ROADMAP-2.0-and-beyond.md`.
+
+## What's new in 2.0.5 — foundations: the SAS subsystem becomes an actor
+
+An internal refactor with **no wire or behaviour change** (fully compatible with
+1.3.x / 2.0.x peers and relays) — the first step of decomposing huddle-core's
+~8.3k-line `AppHandle` god-object into focused, independently-testable actors
+behind a typed command seam.
+
+- **SAS verification is now its own I/O-free actor.** The handshake state machine
+  and crypto move into `app::sas_actor::SasActor`, which returns
+  publish / emit / finalize *intents* the `AppHandle` facade carries out (signing,
+  network send, the durable verification writes, events). The public surface is
+  unchanged, so the TUI and GUI are untouched — and the state machine is now
+  unit-testable without spinning up the whole app.
+- **Why it matters.** This is the template for extracting the rest of the
+  god-object (files, contacts, rooms) and the foundation the durable event journal
+  and MLS group ordering will build on. See `docs/ROADMAP-ecosystem-importance.md`.
 
 ## What's new in 2.0.4 — `huddle-protocol`: a runtime-free protocol crate
 
