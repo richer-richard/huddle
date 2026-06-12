@@ -2094,6 +2094,64 @@ pub fn delete_attachment(db: &Db, room_id: &str, file_id: &str) -> Result<()> {
     Ok(())
 }
 
+// huddle 2.0.7 (WS2 foundations #3): durable, append-only event journal.
+
+#[derive(Debug, Clone)]
+pub struct JournalEntry {
+    pub id: i64,
+    pub created_at: i64,
+    pub kind: String,
+    pub detail: String,
+}
+
+/// Append a durable record of a notable (esp. security-relevant) event. The
+/// live `broadcast` channel stays authoritative for the UI; this is the durable
+/// backbone that survives a dropped broadcast and feeds the future multi-device
+/// cursor.
+pub fn journal_append(db: &Db, created_at: i64, kind: &str, detail: &str) -> Result<i64> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "INSERT INTO event_journal (created_at, kind, detail) VALUES (?1, ?2, ?3)",
+        params![created_at, kind, detail],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Most-recent journal entries, newest first, capped at `limit`.
+pub fn journal_recent(db: &Db, limit: usize) -> Result<Vec<JournalEntry>> {
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare(
+        "SELECT id, created_at, kind, detail FROM event_journal ORDER BY id DESC LIMIT ?1",
+    )?;
+    let rows = stmt
+        .query_map(params![limit as i64], journal_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// Entries with `id` strictly greater than `after_id`, oldest first — the
+/// per-consumer cursor a future multi-device sync replays from.
+pub fn journal_since(db: &Db, after_id: i64, limit: usize) -> Result<Vec<JournalEntry>> {
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare(
+        "SELECT id, created_at, kind, detail FROM event_journal
+         WHERE id > ?1 ORDER BY id ASC LIMIT ?2",
+    )?;
+    let rows = stmt
+        .query_map(params![after_id, limit as i64], journal_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+fn journal_row(row: &rusqlite::Row) -> rusqlite::Result<JournalEntry> {
+    Ok(JournalEntry {
+        id: row.get(0)?,
+        created_at: row.get(1)?,
+        kind: row.get(2)?,
+        detail: row.get(3)?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3072,5 +3130,23 @@ mod tests {
             get_megolm_rotation_state(&db, &room.id, "me-fp").unwrap(),
             Some((0, 2000))
         );
+    }
+
+    #[test]
+    fn event_journal_append_recent_and_cursor() {
+        let db = open_db_in_memory().unwrap();
+        let a = journal_append(&db, 100, "sas_verified", "room=r peer=p").unwrap();
+        let b = journal_append(&db, 200, "inbound_dial", "peer=x").unwrap();
+        assert!(b > a, "ids are monotonic");
+        // recent: newest first.
+        let recent = journal_recent(&db, 10).unwrap();
+        assert_eq!(recent.len(), 2);
+        assert_eq!(recent[0].kind, "inbound_dial");
+        assert_eq!(recent[1].kind, "sas_verified");
+        // cursor: only entries strictly after `a`, oldest first.
+        let since = journal_since(&db, a, 10).unwrap();
+        assert_eq!(since.len(), 1);
+        assert_eq!(since[0].id, b);
+        assert_eq!(since[0].detail, "peer=x");
     }
 }

@@ -4078,6 +4078,10 @@ impl AppHandle {
                                         );
                                         let display_name =
                                             repo::lookup_display_name(&self.db, &fp).ok().flatten();
+                                        self.journal_event(
+                                            "safety_number_changed",
+                                            &format!("room={room_id} peer={fp}"),
+                                        );
                                         let _ =
                                             self.app_event_tx.send(AppEvent::SafetyNumberChanged {
                                                 room_id: room_id.clone(),
@@ -4415,6 +4419,10 @@ impl AppHandle {
                     return;
                 }
                 // Unknown peer — surface the modal in the TUI.
+                self.journal_event(
+                    "inbound_dial",
+                    &format!("peer={peer_id} fp={fingerprint:?} addr={address}"),
+                );
                 let _ = self.app_event_tx.send(AppEvent::InboundDial {
                     peer_id,
                     fingerprint,
@@ -5643,6 +5651,7 @@ impl AppHandle {
                     warn!(%e, "upsert pending contact request failed");
                     return;
                 }
+                self.journal_event("contact_request", &format!("from={requester_fingerprint}"));
                 let _ = self.app_event_tx.send(AppEvent::ContactRequestReceived {
                     fingerprint: requester_fingerprint,
                     display_name,
@@ -6757,6 +6766,21 @@ impl AppHandle {
         self.sas.cancel(tx_id);
     }
 
+    /// huddle 2.0.7 (WS2 foundations #3): durably record a security-relevant
+    /// event in the append-only journal (best-effort; the live broadcast stays
+    /// authoritative for the UI). Survives a dropped broadcast and is the
+    /// backbone for future multi-device history sync.
+    fn journal_event(&self, kind: &str, detail: &str) {
+        if let Err(e) = repo::journal_append(&self.db, now_unix(), kind, detail) {
+            warn!(%e, kind, "failed to append to the event journal");
+        }
+    }
+
+    /// huddle 2.0.7: the most-recently journaled events, newest first.
+    pub fn recent_journal_events(&self, limit: usize) -> Result<Vec<repo::JournalEntry>> {
+        repo::journal_recent(&self.db, limit)
+    }
+
     /// huddle 2.0.5 (WS2 increment #1): carry out the I/O the `SasActor` decided
     /// on — sign + publish a message, emit an event, or finalize verification
     /// (the `room_members` + `verified_peers` writes and the `SasVerified`
@@ -6786,6 +6810,10 @@ impl AppHandle {
                         now_unix(),
                         pq_capable,
                     )?;
+                    self.journal_event(
+                        "sas_verified",
+                        &format!("room={room_id} peer={partner_fingerprint}"),
+                    );
                     let _ = self.app_event_tx.send(AppEvent::SasVerified {
                         room_id,
                         partner_fingerprint,

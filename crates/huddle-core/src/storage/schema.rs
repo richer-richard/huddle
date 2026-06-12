@@ -384,4 +384,15 @@ pub const MIGRATIONS: &[&str] = &[
         last_rotation_at INTEGER NOT NULL,
         PRIMARY KEY (room_id, fingerprint)
     );",
+    // huddle 2.0.7 (WS2 foundations #3): a durable, append-only event journal.
+    // Security-relevant events (verifications, safety-number changes, inbound
+    // dials, contact requests) are recorded here so they survive a dropped live
+    // broadcast (the lossy `broadcast::channel`), and as the backbone for future
+    // multi-device history sync (consumers replay by `id` cursor).
+    "CREATE TABLE IF NOT EXISTS event_journal (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at INTEGER NOT NULL,
+        kind TEXT NOT NULL,
+        detail TEXT NOT NULL DEFAULT ''
+    );",
 ];
