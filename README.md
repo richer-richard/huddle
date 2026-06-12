@@ -209,7 +209,7 @@ per-OS app directory:
 
 ```
 +----------------------------------------------------------------------+
-| huddle 2.0.3  ·  745e-fe8a-…  ·  relay ●               12:34 UTC     |
+| huddle 2.0.4  ·  745e-fe8a-…  ·  relay ●               12:34 UTC     |
 +------------------------+---------------------------------------------+
 | ▾ Profile              | # general                                   |
 |   alice  HD-AAAA-…  ●  |   4 members · encrypted                     |
@@ -655,6 +655,24 @@ native dialog for a path-entry box.
   rotates on a schedule + on membership change), bounding the exposure
   window; the full fix — a Double Ratchet seeded from the hybrid root key —
   is sequenced in `docs/ROADMAP-2.0-and-beyond.md`.
+
+## What's new in 2.0.4 — `huddle-protocol`: a runtime-free protocol crate
+
+An engineering release with **no wire or behaviour change** — fully compatible with 1.3.x /
+2.0.x peers and relays. The pure wire format and cryptographic constructions move out of
+`huddle-core` into a new standalone **`huddle-protocol`** crate that depends only on
+RustCrypto / serde (no `tokio`, `libp2p`, `rusqlite`, or `vodozemac`), so the client and the
+relay now speak from one shared definition instead of hand-duplicated copies.
+
+- **One source of truth for the wire.** `WireMessage` / `RoomMessage` / `SignedRoomMessage`, the
+  invite format, the signed-envelope + hybrid-PQ DM key agreement, SAS, and the relay control
+  messages all live in `huddle-protocol`. `huddle-core` re-exports them at their original module
+  paths, so nothing changes for the TUI / GUI.
+- **The relay drops its duplicated crypto.** `huddle-server` no longer open-codes the fingerprint
+  derivation and challenge verification — it shares them with the client, byte-for-byte.
+- **A foundation, not a feature.** This is the first step of making huddle a protocol others can
+  build on (see `docs/ROADMAP-ecosystem-importance.md`). Wire bytes are byte-identical, and a new
+  conformance test pins them.
 
 ## What's new in 2.0.3 — security audit hardening (round 2)
 

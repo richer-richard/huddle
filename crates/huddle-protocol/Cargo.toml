@@ -6,6 +6,9 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 description = "The Huddle wire protocol and pure cryptographic constructions — the runtime-free core that both the huddle client and relay speak."
+readme = "README.md"
+keywords = ["chat", "protocol", "encryption", "post-quantum", "wire-format"]
+categories = ["cryptography", "network-programming"]
 
 # huddle 2.0.4 (WS1.1): this crate is deliberately runtime-free. It must pull
 # ONLY RustCrypto-family + serde crates — NO tokio / libp2p / rusqlite /
