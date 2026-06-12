@@ -14,7 +14,7 @@ members = [
 # every release, and the documented "most error-prone manual step". Now the
 # version lives once here and every member inherits it via `version.workspace`.
 [workspace.package]
-version = "2.0.7"
+version = "2.0.8"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/richer-richard/huddle"
@@ -23,9 +23,9 @@ homepage = "https://github.com/richer-richard/huddle"
 # Internal path dependency, single-sourced so the version requirement bumps
 # in lockstep with `workspace.package.version`.
 [workspace.dependencies]
-huddle-core = { path = "crates/huddle-core", version = "2.0.7" }
-# huddle 2.0.7 (WS1.1): single-source the runtime-free protocol crate too, WITH a
+huddle-core = { path = "crates/huddle-core", version = "2.0.8" }
+# huddle 2.0.8 (WS1.1): single-source the runtime-free protocol crate too, WITH a
 # version requirement — the public crates (huddle-core / huddle-server) depend on
 # it, and crates.io / cargo-deny require a version on a path dependency of a
 # published crate (a bare path dep is a `*` wildcard the bans gate rejects).
-huddle-protocol = { path = "crates/huddle-protocol", version = "2.0.7" }
+huddle-protocol = { path = "crates/huddle-protocol", version = "2.0.8" }

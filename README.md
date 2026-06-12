@@ -209,7 +209,7 @@ per-OS app directory:
 
 ```
 +----------------------------------------------------------------------+
-| huddle 2.0.7  ·  745e-fe8a-…  ·  relay ●               12:34 UTC     |
+| huddle 2.0.8  ·  745e-fe8a-…  ·  relay ●               12:34 UTC     |
 +------------------------+---------------------------------------------+
 | ▾ Profile              | # general                                   |
 |   alice  HD-AAAA-…  ●  |   4 members · encrypted                     |
@@ -660,6 +660,19 @@ native dialog for a path-entry box.
   rotates on a schedule + on membership change), bounding the exposure
   window; the full fix — a Double Ratchet seeded from the hybrid root key —
   is sequenced in `docs/ROADMAP-2.0-and-beyond.md`.
+
+## What's new in 2.0.8 — foundations: per-room ordered delivery (the MLS ordering primitive)
+
+Internal foundations work with **no behaviour change** for existing peers —
+additive on the wire and on disk.
+
+- **Per-room sequence numbers.** The relay now assigns a durable, monotonic
+  sequence number per room on each publish (a `room_seq` table that survives a
+  restart) and delivers it to live members as an optional `seq` on the relay's
+  message. This is the **total-ordering primitive** that MLS group-commit
+  delivery requires. Backward-compatible — the field is omitted when absent, so
+  older clients and relays see byte-identical messages; offline-mailbox ordering
+  is the sequenced follow-up.
 
 ## What's new in 2.0.7 — foundations: a durable event journal + code-join cleanup
 
