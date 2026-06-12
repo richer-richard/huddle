@@ -209,7 +209,7 @@ per-OS app directory:
 
 ```
 +----------------------------------------------------------------------+
-| huddle 2.0.6  ·  745e-fe8a-…  ·  relay ●               12:34 UTC     |
+| huddle 2.0.7  ·  745e-fe8a-…  ·  relay ●               12:34 UTC     |
 +------------------------+---------------------------------------------+
 | ▾ Profile              | # general                                   |
 |   alice  HD-AAAA-…  ●  |   4 members · encrypted                     |
@@ -660,6 +660,21 @@ native dialog for a path-entry box.
   rotates on a schedule + on membership change), bounding the exposure
   window; the full fix — a Double Ratchet seeded from the hybrid root key —
   is sequenced in `docs/ROADMAP-2.0-and-beyond.md`.
+
+## What's new in 2.0.7 — foundations: a durable event journal + code-join cleanup
+
+Internal foundations work with **no wire or behaviour change** (an additive
+on-disk migration only; fully compatible with 1.3.x / 2.0.x peers).
+
+- **Durable event journal.** A new append-only `event_journal` table durably
+  records security-relevant events (verifications, safety-number changes, inbound
+  dials, contact requests) so they survive a dropped live broadcast, with a
+  per-`id` cursor API (`recent_journal_events`, `journal_since`) that is the
+  backbone for future multi-device history sync. The live broadcast channel is
+  unchanged, so the TUI and GUI are untouched.
+- **Code-join crypto extracted.** The ephemeral-ECDH + HKDF wrap-key derivation —
+  previously open-coded in both join-code handlers — is now one tested
+  `huddle-protocol::crypto::code_join` helper.
 
 ## What's new in 2.0.6 — hybrid post-quantum authentication (Ed25519 + ML-DSA-65)
 
