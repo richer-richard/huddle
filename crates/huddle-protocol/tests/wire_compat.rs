@@ -181,3 +181,39 @@ fn encrypted_file_meta_round_trips() {
     let back: EncryptedFileMeta = serde_json::from_str(&s).unwrap();
     assert_eq!(meta, back);
 }
+
+#[test]
+fn mls_wire_variants_round_trip() {
+    // huddle 2.1 (WS2-b): the MLS group-messaging variants are externally tagged
+    // (PascalCase) like every other RoomMessage; they round-trip and are additive
+    // (a pre-2.1 peer simply fails to decode the unknown variant and drops it).
+    let msgs = [
+        RoomMessage::MlsKeyPackage {
+            sender_fingerprint: "fp".into(),
+            key_package_b64: "kp".into(),
+        },
+        RoomMessage::MlsWelcome {
+            target_fingerprint: "fp".into(),
+            welcome_b64: "w".into(),
+        },
+        RoomMessage::MlsCommit {
+            sender_fingerprint: "fp".into(),
+            commit_b64: "c".into(),
+        },
+        RoomMessage::MlsApplication {
+            sender_fingerprint: "fp".into(),
+            ciphertext_b64: "ct".into(),
+        },
+    ];
+    for m in msgs {
+        let env = WireMessage::Plain(m);
+        let s = serde_json::to_string(&env).unwrap();
+        let back: WireMessage = serde_json::from_str(&s).unwrap();
+        assert_eq!(serde_json::to_string(&back).unwrap(), s);
+    }
+    let v = to_value(&WireMessage::Plain(RoomMessage::MlsCommit {
+        sender_fingerprint: "fp".into(),
+        commit_b64: "c".into(),
+    }));
+    assert_eq!(v["data"]["MlsCommit"]["commit_b64"], json!("c"));
+}

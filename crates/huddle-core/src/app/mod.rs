@@ -5942,6 +5942,21 @@ impl AppHandle {
                     ttl_secs: ttl,
                 });
             }
+            // huddle 2.1 (WS2-b): MLS group messages. The wire is defined in
+            // huddle-protocol; the MLS engine (openmls / mls-rs, behind
+            // huddle-core's `mls` feature) and the per-room-`seq`-ordered commit
+            // processing are the sequenced rollout. Until the engine is wired,
+            // drop with a trace so an MLS-room peer doesn't mistake silence for
+            // delivery — and so classical peers ignore MLS traffic cleanly.
+            RoomMessage::MlsKeyPackage { .. }
+            | RoomMessage::MlsWelcome { .. }
+            | RoomMessage::MlsCommit { .. }
+            | RoomMessage::MlsApplication { .. } => {
+                debug!(
+                    %room_id,
+                    "received an MLS message; the MLS engine is not yet enabled — dropping"
+                );
+            }
         }
     }
 

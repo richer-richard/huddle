@@ -499,6 +499,34 @@ the reference implementation of all of the above.
 
 ---
 
+## 11. MLS group messaging (huddle 2.1, opt-in)
+
+huddle 2.1 adds an opt-in **MLS (RFC 9420)** group layer alongside the classical
+Megolm path, for forward secrecy, post-compromise security, cryptographically-
+enforced removal, and a route to post-quantum groups. The wire is four additive
+`RoomMessage` variants carrying opaque TLS-serialized MLS objects (so this layer
+stays engine-agnostic — the MLS engine lives in `huddle-core`):
+
+- **`MlsKeyPackage`** `{ sender_fingerprint, key_package_b64 }` — publish a
+  `KeyPackage` so existing members can add you.
+- **`MlsWelcome`** *(signed)* `{ target_fingerprint, welcome_b64 }` — hand a newly
+  added member the group secrets.
+- **`MlsCommit`** *(signed)* `{ sender_fingerprint, commit_b64 }` — advance the
+  group epoch (add / remove / update). Commits MUST be applied in the relay's
+  **per-room `seq` order** (§7) so all members converge on one epoch sequence.
+- **`MlsApplication`** `{ sender_fingerprint, ciphertext_b64 }` — an MLS-encrypted
+  application message under the current epoch key.
+
+All are additive: a pre-2.1 peer fails to deserialize the unknown variant and
+drops it, so MLS rooms and classical Megolm rooms interoperate (each peer simply
+ignores the other's group traffic). MLS is opt-in per room; Megolm remains the
+default and is byte-unaffected. The total order MLS commits require is exactly the
+per-room `seq` the relay assigns (§7). Engine integration, app adoption, and the
+post-quantum ciphersuite are sequenced in
+`docs/superpowers/specs/2026-06-12-mls-rollout.md`.
+
+---
+
 *Changes to this document and to `huddle-protocol` are coordinated: a wire change
 is a protocol-version event, not a patch. File issues against the
 [repository](https://github.com/richer-richard/huddle).*

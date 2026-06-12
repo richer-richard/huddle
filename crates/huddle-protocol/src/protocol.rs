@@ -540,6 +540,45 @@ pub enum RoomMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         room_id: Option<String>,
     },
+
+    // huddle 2.1 (WS2-b): MLS (RFC 9420) group messaging — the post-quantum-ready
+    // group layer. These variants carry the MLS handshake + application traffic
+    // for rooms that opt into MLS, so classical Megolm rooms are unaffected. All
+    // are ADDITIVE: a pre-2.1 peer drops the unknown variant gracefully (the
+    // payload fails to deserialize and is logged + dropped), so MLS and classical
+    // peers coexist. Commit ordering rides the relay's per-room `seq` (huddle
+    // 2.0.8). Payloads are opaque TLS-serialized MLS objects, so this crate stays
+    // runtime-free — the MLS engine lives in `huddle-core` behind its `mls`
+    // feature; see PROTOCOL.md §11 and the rollout spec.
+    /// A member publishes its MLS `KeyPackage` so existing members can add it to
+    /// the group.
+    MlsKeyPackage {
+        sender_fingerprint: String,
+        /// base64 TLS-serialized MLS `KeyPackage`.
+        key_package_b64: String,
+    },
+    /// A `Welcome` hands a freshly-added member the group's secrets. MUST be
+    /// `WireMessage::Signed`; directed at one new member.
+    MlsWelcome {
+        target_fingerprint: String,
+        /// base64 TLS-serialized MLS `Welcome`.
+        welcome_b64: String,
+    },
+    /// A `Commit` advances the group's epoch (add / remove / update). MUST be
+    /// `WireMessage::Signed`; applied in the relay's per-room `seq` order so every
+    /// member converges on the same epoch sequence — TreeKEM forward secrecy,
+    /// post-compromise security, and cryptographically-enforced removal.
+    MlsCommit {
+        sender_fingerprint: String,
+        /// base64 TLS-serialized MLS handshake `MlsMessage` (a Commit).
+        commit_b64: String,
+    },
+    /// An MLS-encrypted application (chat) message under the current epoch key.
+    MlsApplication {
+        sender_fingerprint: String,
+        /// base64 TLS-serialized MLS application `MlsMessage`.
+        ciphertext_b64: String,
+    },
 }
 
 #[cfg(test)]
