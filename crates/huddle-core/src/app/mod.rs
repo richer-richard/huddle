@@ -1,4 +1,5 @@
 pub mod events;
+mod sas_actor;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -30,6 +31,7 @@ use crate::storage::repo::{
 use crate::storage::{self, Db};
 
 pub use self::events::{AppEvent, DiscoveredRoom};
+use self::sas_actor::{SasActor, SasError, SasOutcome};
 
 /// Lobby-facing view of a known dial peer: persisted address plus
 /// runtime "is the connection currently up?" status.
@@ -312,58 +314,10 @@ fn validate_passphrase_len(p: &str) -> Result<()> {
     Ok(())
 }
 
-/// huddle 1.3.1: bound the in-memory `sas_flows` map. Inbound `SasInit`
-/// inserts an entry keyed by the initiator-chosen `tx_id`, so without a sweep
-/// an authenticated peer streaming fresh tx_ids could grow it without limit.
-/// Abandoned flows are reaped after this TTL, a global hard cap bounds total
-/// memory, and a per-peer sub-cap stops one peer from starving everyone else.
-///
-/// huddle 1.3.3: the TTL is anchored to ~code-visible time, not flow start, so a
-/// slow out-of-band comparison won't reap a live handshake — a real SAS stalls on
-/// humans reading emoji/decimal to each other over voice, which can take minutes.
-/// The initiator's flow is refreshed when the `SasResponse` arrives (moving its
-/// clock off "SasInit sent" and onto "both keys known"); the responder's flow is
-/// created at the same instant it displays the code, so its clock already starts
-/// there and needs no refresh. The cap, not a tight TTL, is the real memory
-/// bound, so 15 min is safe.
-const SAS_FLOW_TTL_SECS: i64 = 900;
-const SAS_FLOWS_CAP: usize = 256;
-/// huddle 1.3.3: per-partner sub-cap. `sas_flows` is one global map keyed by the
-/// attacker-chosen `tx_id`, so without this a single authenticated co-member
-/// could fill all `SAS_FLOWS_CAP` slots with distinct tx_ids and block every
-/// other peer's SAS verification node-wide until the TTL sweep. Capping in-flight
-/// flows per partner fingerprint confines a flooder to its own share.
-const SAS_FLOWS_PER_PEER: usize = 8;
-
-/// Phase G: in-flight SAS verification state, keyed by tx_id. Held in
-/// memory only; survives just long enough for the two-message
-/// handshake + the user pressing Match on both sides.
-struct SasFlow {
-    room_id: String,
-    partner_fingerprint: String,
-    our_secret: x25519_dalek::StaticSecret,
-    /// Set once we know both sides' pubkeys → the derived SAS code.
-    sas_code: Option<crate::crypto::sas::SasCode>,
-    our_confirmed: bool,
-    their_confirmed: bool,
-    /// huddle 0.7.11: latch that flips true the first time `finish_sas`
-    /// runs for this flow. Prevents a race between `sas_match` and the
-    /// inbound `SasConfirm{matched:true}` handler both observing
-    /// `both_done = true` and each calling `finish_sas` — pre-0.7.11
-    /// that double-fired `SasVerified` and re-ran the DB writes.
-    finalized: bool,
-    /// huddle 1.3.1: unix insert time, so the discovered-room pruner can reap
-    /// abandoned flows (TTL) and bound this otherwise-unbounded map.
-    created_at: i64,
-    /// huddle 2.0.0 (F1): `true` iff we bound the partner's ML-KEM
-    /// encapsulation key into this SAS code (the partner is post-quantum
-    /// capable and we held their ek when we derived the code). Carried into
-    /// `add_verified_peer(.., pq_capable = …)` on success so the durable
-    /// `verified_peers.pq_capable` anchor records that this peer was verified
-    /// PQ-capable — `ensure_dm_key` then refuses any later classical-only DM
-    /// fallback for them, defeating a post-verification relay downgrade.
-    partner_pq_capable: bool,
-}
+// huddle 2.0.5 (WS2 foundations, increment #1): the SAS handshake state
+// (`SasFlow`), the flow-map caps/TTL constants, and the verification state
+// machine moved to `sas_actor::SasActor`. The `AppHandle` facade now delegates
+// to it and applies the returned outcomes. See `crate::app::sas_actor`.
 
 /// huddle 0.8: the canonical centralized server, reachable only as a Tor
 /// v3 onion. Baked in so the client connects to the operator's relay by
@@ -424,9 +378,9 @@ pub struct AppHandle {
     /// AppHandle (and every clone) keeps working without a rebuild. Read via
     /// `persist_key()`; all RoomCrypto construction goes through that accessor.
     session_persist_key: Arc<Mutex<[u8; 32]>>,
-    /// Phase G: active SAS verifications. Keyed by tx_id (the random
-    /// 16-byte salt picked by the initiator + base64'd).
-    sas_flows: Arc<Mutex<HashMap<String, SasFlow>>>,
+    /// Phase G: the SAS verification subsystem — owns the in-flight handshake
+    /// state. Extracted from this god-object in 2.0.5 (WS2 increment #1).
+    sas: Arc<SasActor>,
     /// Phase F: ephemeral X25519 secrets the joiner is holding while
     /// they wait for the owner's `CodeJoinResponse`. Keyed by
     /// `(room_id, joiner_fp)` so multiple joiners in the same room can
@@ -810,6 +764,13 @@ impl AppHandle {
         };
         let transport_profiles = Arc::new(transport_profiles);
 
+        // huddle 2.0.5 (WS2 increment #1): build the SAS actor from our identity
+        // (fingerprint + ML-KEM ek, both stable) before `identity` is moved into
+        // the struct below. The ek is now derived once and cached, vs. per-message.
+        let sas = Arc::new(SasActor::new(
+            identity.fingerprint().to_string(),
+            identity.mlkem_public_bytes(),
+        ));
         let handle = Self {
             identity,
             network,
@@ -822,7 +783,7 @@ impl AppHandle {
             file_manager,
             db,
             session_persist_key: Arc::new(Mutex::new(session_persist_key)),
-            sas_flows: Arc::new(Mutex::new(HashMap::new())),
+            sas,
             pending_code_secrets: Arc::new(Mutex::new(HashMap::new())),
             pending_invite_dials: Arc::new(Mutex::new(HashMap::new())),
             nat_reachable_addrs: Arc::new(Mutex::new(HashSet::new())),
@@ -3849,10 +3810,7 @@ impl AppHandle {
                 // without bound. Finalized flows are already removed promptly.
                 // huddle 1.3.3: `created_at` is refreshed on progress, so this is
                 // an idle-since-last-activity TTL — a slow but live handshake survives.
-                {
-                    let mut flows = handle.sas_flows.lock().unwrap();
-                    flows.retain(|_, f| now - f.created_at <= SAS_FLOW_TTL_SECS);
-                }
+                handle.sas.reap(now);
                 // huddle 2.0.0 (F9): disappearing-messages sweep. Physically
                 // delete every message past its room's TTL, against our own
                 // clock (best-effort + local). F2 interaction: a deleted
@@ -5349,207 +5307,41 @@ impl AppHandle {
                 ephemeral_x25519_pubkey_b64,
                 target_fingerprint,
             } => {
-                if target_fingerprint != our_fp {
-                    // Not addressed to us — ignore. Phase G is point-
-                    // to-point even though it travels over the room
-                    // topic, so members of the room who aren't the
-                    // target don't need to act.
-                    return;
-                }
-                let signer = match verified_signer {
-                    Some(fp) => fp,
-                    None => {
-                        warn!("SasInit arrived unsigned; dropping");
-                        return;
-                    }
-                };
-                let their_pub = match crate::crypto::sas::parse_pubkey(&ephemeral_x25519_pubkey_b64)
-                {
-                    Ok(pk) => pk,
-                    Err(e) => {
-                        warn!(%e, "SasInit: bad x25519 pubkey");
-                        return;
-                    }
-                };
-                let tx_id_bytes = match B64.decode(&tx_id) {
-                    Ok(b) if b.len() == crate::crypto::sas::TX_ID_LEN => {
-                        let mut arr = [0u8; crate::crypto::sas::TX_ID_LEN];
-                        arr.copy_from_slice(&b);
-                        arr
-                    }
-                    _ => {
-                        warn!(%tx_id, "SasInit: bad tx_id length");
-                        return;
-                    }
-                };
-                // huddle 1.3.1: bound sas_flows against an inbound SasInit flood
-                // (the tx_id key is attacker-chosen). Drop new flows once at cap;
-                // existing tx_ids still progress, and the TTL sweep reaps stale ones.
-                // huddle 1.3.3: also enforce a per-partner sub-cap so one peer
-                // streaming distinct tx_ids can't fill the global pool and starve
-                // everyone else's SAS verification node-wide.
-                {
-                    let flows = self.sas_flows.lock().unwrap();
-                    if !flows.contains_key(&tx_id) {
-                        if flows.len() >= SAS_FLOWS_CAP {
-                            warn!(%tx_id, "sas_flows at global cap; dropping inbound SasInit");
-                            return;
-                        }
-                        let from_peer = flows
-                            .values()
-                            .filter(|f| f.partner_fingerprint == signer)
-                            .count();
-                        if from_peer >= SAS_FLOWS_PER_PEER {
-                            warn!(%signer, "sas_flows per-peer cap; dropping inbound SasInit");
-                            return;
-                        }
-                    }
-                }
-                let (_, our_secret, our_pub) = crate::crypto::sas::new_session();
-                // huddle 2.0.0 (F1): bind the initiator's ML-KEM ek (if we hold
-                // their pin) into the transcript so their PQ capability is part of
-                // the OOB-compared code. A relay that strips it from one side
-                // drives that side to `None`, diverging the codes — the downgrade
-                // is then caught by the human comparison.
-                let partner_ek = self.partner_mlkem_ek_bytes(&signer);
-                let partner_pq_capable = partner_ek.is_some();
-                // huddle 2.0.0 (F1 fix): bind BOTH eks (sorted-canonical) so the
-                // two peers — who hold the keys in opposite roles — derive the
-                // same code. Gating stays on the partner's ek inside sas_info.
-                let our_ek = self.identity.mlkem_public_bytes();
-                let sas_code = match crate::crypto::sas::derive_sas_code(
-                    &our_secret,
-                    &their_pub,
-                    &tx_id_bytes,
-                    Some(&our_ek),
-                    partner_ek.as_deref(),
-                ) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        warn!(%e, "SasInit: rejecting non-contributory ephemeral; dropping");
-                        return;
-                    }
-                };
-                self.sas_flows.lock().unwrap().insert(
-                    tx_id.clone(),
-                    SasFlow {
-                        room_id: room_id.to_string(),
-                        partner_fingerprint: signer.clone(),
-                        our_secret,
-                        sas_code: Some(sas_code.clone()),
-                        our_confirmed: false,
-                        their_confirmed: false,
-                        finalized: false,
-                        created_at: now_unix(),
-                        partner_pq_capable,
-                    },
-                );
-                // Respond with our pubkey so the initiator can compute
-                // the same code.
-                let response = RoomMessage::SasResponse {
-                    tx_id: tx_id.clone(),
-                    ephemeral_x25519_pubkey_b64: B64.encode(our_pub.as_bytes()),
-                };
-                if let Ok(env) = crate::crypto::sign_message(&self.identity, &response) {
-                    if let Ok(bytes) = crate::network::protocol::encode_wire_signed(&env) {
-                        self.network
-                            .publish_room_message(room_id.to_string(), bytes)
-                            .await;
-                    }
-                }
-                let _ = self.app_event_tx.send(AppEvent::SasCodeReady {
-                    room_id: room_id.to_string(),
-                    partner_fingerprint: signer,
+                // huddle 2.0.5 (WS2 increment #1): delegate to the SAS actor; it
+                // owns the state machine + crypto and returns publish/emit intents
+                // (the partner's pinned ML-KEM ek is looked up here, the same point
+                // as before, and injected so the actor stays I/O-free).
+                let outcomes = self.sas.inbound_init(
+                    room_id,
                     tx_id,
-                    emoji_labels: sas_code.emoji_labels(),
-                    decimal: sas_code.decimal,
-                });
+                    &ephemeral_x25519_pubkey_b64,
+                    &target_fingerprint,
+                    verified_signer.clone(),
+                    now_unix(),
+                    |fp| self.partner_mlkem_ek_bytes(fp),
+                );
+                if let Err(e) = self.apply_sas_outcomes(outcomes).await {
+                    warn!(%e, "applying SasInit outcomes failed");
+                }
             }
             RoomMessage::SasResponse {
                 tx_id,
                 ephemeral_x25519_pubkey_b64,
             } => {
-                let signer = match verified_signer {
-                    Some(fp) => fp,
-                    None => {
-                        warn!("SasResponse arrived unsigned; dropping");
-                        return;
-                    }
-                };
-                let their_pub = match crate::crypto::sas::parse_pubkey(&ephemeral_x25519_pubkey_b64)
-                {
-                    Ok(pk) => pk,
-                    Err(e) => {
-                        warn!(%e, "SasResponse: bad x25519 pubkey");
-                        return;
-                    }
-                };
-                let tx_id_bytes = match B64.decode(&tx_id) {
-                    Ok(b) if b.len() == crate::crypto::sas::TX_ID_LEN => {
-                        let mut arr = [0u8; crate::crypto::sas::TX_ID_LEN];
-                        arr.copy_from_slice(&b);
-                        arr
-                    }
-                    _ => return,
-                };
-                // huddle 2.0.0 (F1): bind the responder's ML-KEM ek (if pinned)
-                // into the transcript, symmetric with the responder's SasInit
-                // binding — both sides must hold each other's ek for the codes to
-                // agree. Looked up outside the `sas_flows` lock (no DB access
-                // while the flows mutex is held).
-                let partner_ek = self.partner_mlkem_ek_bytes(&signer);
-                let partner_pq_capable = partner_ek.is_some();
-                // huddle 2.0.0 (F1 fix): our own ek, fetched outside the
-                // sas_flows lock; bound symmetrically with the partner's (see
-                // the SasInit handler).
-                let our_ek = self.identity.mlkem_public_bytes();
-                let emit = {
-                    let mut flows = self.sas_flows.lock().unwrap();
-                    let flow = match flows.get_mut(&tx_id) {
-                        Some(f) => f,
-                        None => {
-                            warn!(%tx_id, "SasResponse for unknown tx_id");
-                            return;
-                        }
-                    };
-                    if flow.partner_fingerprint != signer {
-                        warn!(
-                            expected = %flow.partner_fingerprint, got = %signer,
-                            "SasResponse signer doesn't match flow's partner; dropping"
-                        );
-                        return;
-                    }
-                    let code = match crate::crypto::sas::derive_sas_code(
-                        &flow.our_secret,
-                        &their_pub,
-                        &tx_id_bytes,
-                        Some(&our_ek),
-                        partner_ek.as_deref(),
-                    ) {
-                        Ok(c) => c,
-                        Err(e) => {
-                            warn!(%e, "SasResponse: rejecting non-contributory ephemeral; dropping");
-                            return;
-                        }
-                    };
-                    flow.sas_code = Some(code.clone());
-                    // huddle 2.0.0 (F1): record whether this code bound the
-                    // partner's ML-KEM ek, so `finish_sas` persists the durable
-                    // `verified_peers.pq_capable` anchor.
-                    flow.partner_pq_capable = partner_pq_capable;
-                    // huddle 1.3.3: refresh the TTL clock on real progress so the
-                    // reaper measures idle-since-last-activity, not age-since-start
-                    // — a live handshake mid out-of-band comparison won't be reaped.
-                    flow.created_at = now_unix();
-                    code
-                };
-                let _ = self.app_event_tx.send(AppEvent::SasCodeReady {
-                    room_id: room_id.to_string(),
-                    partner_fingerprint: signer,
+                // huddle 2.0.5 (WS2 increment #1): delegate to the SAS actor (the
+                // partner's pinned ML-KEM ek is injected via the closure, looked
+                // up at the same point as before, so the actor stays I/O-free).
+                let outcomes = self.sas.inbound_response(
+                    room_id,
                     tx_id,
-                    emoji_labels: emit.emoji_labels(),
-                    decimal: emit.decimal,
-                });
+                    &ephemeral_x25519_pubkey_b64,
+                    verified_signer.clone(),
+                    now_unix(),
+                    |fp| self.partner_mlkem_ek_bytes(fp),
+                );
+                if let Err(e) = self.apply_sas_outcomes(outcomes).await {
+                    warn!(%e, "applying SasResponse outcomes failed");
+                }
             }
             RoomMessage::CodeJoinRequest {
                 room_id: announced_room_id,
@@ -5750,49 +5542,14 @@ impl AppHandle {
                 });
             }
             RoomMessage::SasConfirm { tx_id, matched } => {
-                let signer = match verified_signer {
-                    Some(fp) => fp,
-                    None => return,
-                };
-                let (room_id_done, partner_fp_done, both_done) = {
-                    let mut flows = self.sas_flows.lock().unwrap();
-                    let flow = match flows.get_mut(&tx_id) {
-                        Some(f) => f,
-                        None => return,
-                    };
-                    if flow.partner_fingerprint != signer {
-                        return;
-                    }
-                    if !matched {
-                        // Partner declined / mismatch — drop the flow.
-                        let _ = flow;
-                        flows.remove(&tx_id);
-                        return;
-                    }
-                    flow.their_confirmed = true;
-                    // huddle 0.7.11: only fire finalize from this arm
-                    // when the flow hasn't already been finalized by
-                    // the local `sas_match` path. The `finalized`
-                    // latch is set inside `finish_sas` (taken under
-                    // this same Mutex), so the two paths can't both
-                    // observe it as `false`.
-                    if flow.our_confirmed && flow.their_confirmed && !flow.finalized {
-                        flow.finalized = true;
-                        (
-                            Some(flow.room_id.clone()),
-                            Some(flow.partner_fingerprint.clone()),
-                            true,
-                        )
-                    } else {
-                        (None, None, false)
-                    }
-                };
-                if both_done {
-                    if let (Some(rid), Some(pfp)) = (room_id_done, partner_fp_done) {
-                        if let Err(e) = self.finish_sas(&tx_id, &rid, &pfp).await {
-                            warn!(%e, "finish_sas failed");
-                        }
-                    }
+                // huddle 2.0.5 (WS2 increment #1): delegate to the SAS actor; on
+                // both-sides-confirmed it returns a Finalize the facade applies
+                // (the `room_members`/`verified_peers` writes + `SasVerified`).
+                let outcomes = self
+                    .sas
+                    .inbound_confirm(&tx_id, matched, verified_signer.clone());
+                if let Err(e) = self.apply_sas_outcomes(outcomes).await {
+                    warn!(%e, "applying SasConfirm outcomes failed");
                 }
             }
             RoomMessage::ProfileUpdate {
@@ -6978,129 +6735,70 @@ impl AppHandle {
     /// must accept on their end, both compute the ECDH-derived SAS
     /// code, OOB-compare it, and each press Match.
     pub async fn sas_start(&self, room_id: &str, target_fingerprint: &str) -> Result<String> {
-        let (tx_id_bytes, our_secret, our_pub) = crate::crypto::sas::new_session();
-        let tx_id = B64.encode(tx_id_bytes);
-        let msg = RoomMessage::SasInit {
-            tx_id: tx_id.clone(),
-            ephemeral_x25519_pubkey_b64: B64.encode(our_pub.as_bytes()),
-            target_fingerprint: target_fingerprint.to_string(),
-        };
-        let env = crate::crypto::sign_message(&self.identity, &msg)?;
-        let bytes = crate::network::protocol::encode_wire_signed(&env)?;
-        self.sas_flows.lock().unwrap().insert(
-            tx_id.clone(),
-            SasFlow {
-                room_id: room_id.to_string(),
-                partner_fingerprint: target_fingerprint.to_string(),
-                our_secret,
-                sas_code: None,
-                our_confirmed: false,
-                their_confirmed: false,
-                finalized: false,
-                created_at: now_unix(),
-                // huddle 2.0.0 (F1): set true once the SasResponse arrives and we
-                // bind the responder's ML-KEM ek into the derived code.
-                partner_pq_capable: false,
-            },
-        );
-        self.network
-            .publish_room_message(room_id.to_string(), bytes)
-            .await;
+        let (tx_id, outcomes) = self.sas.start(room_id, target_fingerprint, now_unix());
+        self.apply_sas_outcomes(outcomes).await?;
         Ok(tx_id)
     }
 
-    /// Phase G: user pressed Match on the SAS code modal — broadcast our
-    /// signed `SasConfirm{matched: true}`. If the partner has already
-    /// matched, this completes verification on both sides.
+    /// Phase G: user pressed Match on the SAS code modal — broadcast our signed
+    /// `SasConfirm{matched: true}`, completing verification on both sides if the
+    /// partner has already matched.
     pub async fn sas_match(&self, tx_id: &str) -> Result<()> {
-        let (room_id, partner_fp, both_done) = {
-            let mut flows = self.sas_flows.lock().unwrap();
-            let flow = flows
-                .get_mut(tx_id)
-                .ok_or_else(|| HuddleError::Other("unknown SAS tx_id".into()))?;
-            // huddle 1.3.4: never confirm a SAS before the code has actually
-            // been derived from the partner's ephemeral key. The initiator's
-            // flow starts with `sas_code = None` and only gets a code once the
-            // SasResponse arrives; an alternate codepath (e.g. a TUI keypress
-            // not gated on the handshake stage) could otherwise send
-            // SasConfirm{matched:true} while `sas_code` is still None — i.e. the
-            // user confirmed a match they never saw, defeating the whole
-            // out-of-band-comparison MITM defense.
-            if flow.sas_code.is_none() {
-                return Err(HuddleError::Other(
+        let outcomes = self
+            .sas
+            .user_match(tx_id, now_unix())
+            .map_err(|e| match e {
+                SasError::UnknownTx => HuddleError::Other("unknown SAS tx_id".into()),
+                SasError::CodeNotReady => HuddleError::Other(
                     "SAS code not computed yet — wait for the partner's response \
-                     before confirming a match"
+                 before confirming a match"
                         .into(),
-                ));
-            }
-            flow.our_confirmed = true;
-            // huddle 0.7.11: latch finalize so the inbound SasConfirm
-            // handler won't fire `finish_sas` a second time. See
-            // SasConfirm arm for the symmetric guard.
-            let do_finish = flow.our_confirmed && flow.their_confirmed && !flow.finalized;
-            if do_finish {
-                flow.finalized = true;
-            }
-            (
-                flow.room_id.clone(),
-                flow.partner_fingerprint.clone(),
-                do_finish,
-            )
-        };
-        let msg = RoomMessage::SasConfirm {
-            tx_id: tx_id.to_string(),
-            matched: true,
-        };
-        let env = crate::crypto::sign_message(&self.identity, &msg)?;
-        let bytes = crate::network::protocol::encode_wire_signed(&env)?;
-        self.network
-            .publish_room_message(room_id.clone(), bytes)
-            .await;
-        if both_done {
-            self.finish_sas(tx_id, &room_id, &partner_fp).await?;
-        }
-        Ok(())
+                ),
+            })?;
+        self.apply_sas_outcomes(outcomes).await
     }
 
-    /// Phase G: cancel an in-flight SAS — drop our local state. Doesn't
-    /// broadcast a "matched=false" notice in v1 (partner's flow stays
-    /// dangling; they can cancel their side too). Quiet teardown.
+    /// Phase G: cancel an in-flight SAS — drop our local state. Quiet teardown.
     pub fn sas_cancel(&self, tx_id: &str) {
-        self.sas_flows.lock().unwrap().remove(tx_id);
+        self.sas.cancel(tx_id);
     }
 
-    /// Phase G internal: both sides have confirmed — flip the partner's
-    /// fingerprint to verified (per-room AND global) and clean up.
-    async fn finish_sas(
-        &self,
-        tx_id: &str,
-        room_id: &str,
-        partner_fingerprint: &str,
-    ) -> Result<()> {
-        repo::set_member_verified(&self.db, room_id, partner_fingerprint, true)?;
-        // huddle 2.0.0 (F1): read whether this SAS bound the partner's ML-KEM ek
-        // BEFORE removing the flow, then persist it as the durable
-        // `verified_peers.pq_capable` anchor. The flag is sticky-once-true in
-        // `add_verified_peer`, so a later classical (group) re-verification of an
-        // already-PQ-verified peer can never clear it.
-        let partner_pq_capable = self
-            .sas_flows
-            .lock()
-            .unwrap()
-            .get(tx_id)
-            .map(|f| f.partner_pq_capable)
-            .unwrap_or(false);
-        repo::add_verified_peer(
-            &self.db,
-            partner_fingerprint,
-            now_unix(),
-            partner_pq_capable,
-        )?;
-        self.sas_flows.lock().unwrap().remove(tx_id);
-        let _ = self.app_event_tx.send(AppEvent::SasVerified {
-            room_id: room_id.to_string(),
-            partner_fingerprint: partner_fingerprint.to_string(),
-        });
+    /// huddle 2.0.5 (WS2 increment #1): carry out the I/O the `SasActor` decided
+    /// on — sign + publish a message, emit an event, or finalize verification
+    /// (the `room_members` + `verified_peers` writes and the `SasVerified`
+    /// event). The actor itself touches no DB, network, or signing key.
+    async fn apply_sas_outcomes(&self, outcomes: Vec<SasOutcome>) -> Result<()> {
+        for outcome in outcomes {
+            match outcome {
+                SasOutcome::Publish { room_id, msg } => {
+                    let env = crate::crypto::sign_message(&self.identity, &msg)?;
+                    let bytes = crate::network::protocol::encode_wire_signed(&env)?;
+                    self.network.publish_room_message(room_id, bytes).await;
+                }
+                SasOutcome::Emit(ev) => {
+                    let _ = self.app_event_tx.send(ev);
+                }
+                SasOutcome::Finalize {
+                    room_id,
+                    partner_fingerprint,
+                    pq_capable,
+                } => {
+                    repo::set_member_verified(&self.db, &room_id, &partner_fingerprint, true)?;
+                    // huddle 2.0.0 (F1): persist the durable `verified_peers.pq_capable`
+                    // anchor (sticky-once-true in `add_verified_peer`).
+                    repo::add_verified_peer(
+                        &self.db,
+                        &partner_fingerprint,
+                        now_unix(),
+                        pq_capable,
+                    )?;
+                    let _ = self.app_event_tx.send(AppEvent::SasVerified {
+                        room_id,
+                        partner_fingerprint,
+                    });
+                }
+            }
+        }
         Ok(())
     }
 
