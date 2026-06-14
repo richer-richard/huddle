@@ -1,6 +1,7 @@
 use rusqlite::{params, OptionalExtension};
 use sha2::{Digest, Sha256};
 use tracing::warn;
+use zeroize::Zeroizing;
 
 use crate::error::Result;
 use crate::storage::Db;
@@ -27,12 +28,16 @@ fn security_count(res: rusqlite::Result<i64>, check: &str, fail_secure_count: i6
 
 #[derive(Debug, Clone)]
 pub struct StoredIdentity {
-    pub ed25519_secret: Vec<u8>,
+    // huddle 2.1.3 (zeroization sweep): the Ed25519 identity seed — the crown
+    // jewel from which the X25519 DM scalar, PeerId, ML-KEM and ML-DSA keys all
+    // derive — is wiped on drop instead of lingering in a plain heap allocation
+    // on the everyday startup load path.
+    pub ed25519_secret: Zeroizing<Vec<u8>>,
     pub created_at: i64,
 }
 
 pub fn save_identity(db: &Db, secret: &[u8], created_at: i64) -> Result<()> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     // huddle 2.0.2 (audit L-13): UPSERT only the secret + created_at. The previous
     // `INSERT OR REPLACE` deleted and re-inserted the single identity row, which
     // silently wiped later-added columns (display_name, onboarding_seen) on any
@@ -49,11 +54,11 @@ pub fn save_identity(db: &Db, secret: &[u8], created_at: i64) -> Result<()> {
 }
 
 pub fn load_identity(db: &Db) -> Result<Option<StoredIdentity>> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let mut stmt = conn.prepare("SELECT ed25519_secret, created_at FROM identity WHERE id = 1")?;
     let mut rows = stmt.query_map([], |row| {
         Ok(StoredIdentity {
-            ed25519_secret: row.get(0)?,
+            ed25519_secret: Zeroizing::new(row.get(0)?),
             created_at: row.get(1)?,
         })
     })?;
@@ -64,14 +69,14 @@ pub fn load_identity(db: &Db) -> Result<Option<StoredIdentity>> {
 }
 
 pub fn get_display_name(db: &Db) -> Result<Option<String>> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let mut stmt = conn.prepare("SELECT display_name FROM identity WHERE id = 1")?;
     let mut rows = stmt.query_map([], |row| row.get::<_, Option<String>>(0))?;
     Ok(rows.next().and_then(|r| r.ok()).flatten())
 }
 
 pub fn set_display_name(db: &Db, name: Option<&str>) -> Result<()> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "UPDATE identity SET display_name = ?1 WHERE id = 1",
         params![name],
@@ -88,7 +93,7 @@ pub fn set_display_name(db: &Db, name: Option<&str>) -> Result<()> {
 /// Callers that need per-room scoping should use the room_members table
 /// directly with an explicit `room_id` filter.
 pub fn lookup_display_name(db: &Db, fingerprint: &str) -> Result<Option<String>> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let mut stmt = conn.prepare(
         "SELECT display_name FROM room_members
          WHERE fingerprint = ?1 AND display_name IS NOT NULL
@@ -104,7 +109,7 @@ pub fn set_member_display_name(
     fingerprint: &str,
     name: Option<&str>,
 ) -> Result<()> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "UPDATE room_members SET display_name = ?1 WHERE room_id = ?2 AND fingerprint = ?3",
         params![name, room_id, fingerprint],
@@ -153,7 +158,7 @@ pub fn derive_room_id(creator_fp: &str, name: &str, created_at: i64) -> String {
 /// `created_at`, `creator_fingerprint`, and `encrypted` are immutable
 /// once set and are deliberately not updated on conflict.
 pub fn insert_room(db: &Db, room: &StoredRoom) -> Result<()> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "INSERT INTO rooms (id, name, creator_fingerprint, encrypted, passphrase_salt, created_at, last_active, kind)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
@@ -176,7 +181,7 @@ pub fn insert_room(db: &Db, room: &StoredRoom) -> Result<()> {
 }
 
 pub fn get_room(db: &Db, room_id: &str) -> Result<Option<StoredRoom>> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let mut stmt = conn.prepare(
         "SELECT id, name, creator_fingerprint, encrypted, passphrase_salt, created_at, last_active, kind
          FROM rooms WHERE id = ?1",
@@ -200,7 +205,7 @@ pub fn get_room(db: &Db, room_id: &str) -> Result<Option<StoredRoom>> {
 }
 
 pub fn list_rooms(db: &Db) -> Result<Vec<StoredRoom>> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let mut stmt = conn.prepare(
         "SELECT id, name, creator_fingerprint, encrypted, passphrase_salt, created_at, last_active, kind
          FROM rooms ORDER BY last_active DESC NULLS LAST, created_at DESC",
@@ -225,7 +230,7 @@ pub fn list_rooms(db: &Db) -> Result<Vec<StoredRoom>> {
 /// when the DM already exists locally, so the call is idempotent across
 /// reopens.
 pub fn find_dm_with(db: &Db, our_fp: &str, partner_fp: &str) -> Result<Option<StoredRoom>> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let mut stmt = conn.prepare(
         "SELECT r.id, r.name, r.creator_fingerprint, r.encrypted, r.passphrase_salt,
                 r.created_at, r.last_active, r.kind
@@ -256,7 +261,7 @@ pub fn find_dm_with(db: &Db, our_fp: &str, partner_fp: &str) -> Result<Option<St
 }
 
 pub fn update_room_last_active(db: &Db, room_id: &str, ts: i64) -> Result<()> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "UPDATE rooms SET last_active = ?1 WHERE id = ?2",
         params![ts, room_id],
@@ -265,7 +270,7 @@ pub fn update_room_last_active(db: &Db, room_id: &str, ts: i64) -> Result<()> {
 }
 
 pub fn set_room_muted(db: &Db, room_id: &str, muted: bool) -> Result<()> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "UPDATE rooms SET muted = ?1 WHERE id = ?2",
         params![muted as i64, room_id],
@@ -274,7 +279,7 @@ pub fn set_room_muted(db: &Db, room_id: &str, muted: bool) -> Result<()> {
 }
 
 pub fn is_room_muted(db: &Db, room_id: &str) -> Result<bool> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let mut stmt = conn.prepare("SELECT muted FROM rooms WHERE id = ?1")?;
     let mut rows = stmt.query_map(params![room_id], |row| row.get::<_, i64>(0))?;
     Ok(rows.next().map(|r| r.unwrap_or(0) != 0).unwrap_or(false))
@@ -317,7 +322,7 @@ pub struct StoredRoomMember {
 /// value is non-null/non-empty — a re-announce that drops the pubkey
 /// field must not erase the one we already learned.
 pub fn upsert_room_member(db: &Db, member: &StoredRoomMember) -> Result<()> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "INSERT INTO room_members (room_id, peer_id, fingerprint, last_seen, verified, ed25519_pubkey, role, mlkem_pubkey)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
@@ -348,7 +353,7 @@ pub fn upsert_room_member(db: &Db, member: &StoredRoomMember) -> Result<()> {
 /// (not per-room), so any non-null row works. Used by DM E2E to derive
 /// the ECDH room key without re-asking the network.
 pub fn lookup_peer_ed25519_pubkey(db: &Db, fingerprint: &str) -> Result<Option<String>> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let mut stmt = conn.prepare(
         "SELECT ed25519_pubkey FROM room_members
          WHERE fingerprint = ?1 AND ed25519_pubkey IS NOT NULL
@@ -366,7 +371,7 @@ pub fn lookup_peer_ed25519_pubkey(db: &Db, fingerprint: &str) -> Result<Option<S
 /// classical fallback** for them, defeating a relay replaying a captured
 /// pre-1.3 (classical-only) announce to force a quantum-unsafe downgrade.
 pub fn lookup_peer_mlkem_pubkey(db: &Db, fingerprint: &str) -> Result<Option<String>> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let mut stmt = conn.prepare(
         "SELECT mlkem_pubkey FROM room_members
          WHERE fingerprint = ?1 AND mlkem_pubkey IS NOT NULL
@@ -377,7 +382,7 @@ pub fn lookup_peer_mlkem_pubkey(db: &Db, fingerprint: &str) -> Result<Option<Str
 }
 
 pub fn list_room_members(db: &Db, room_id: &str) -> Result<Vec<StoredRoomMember>> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let mut stmt = conn.prepare(
         "SELECT room_id, peer_id, fingerprint, last_seen, verified, ed25519_pubkey, role, mlkem_pubkey FROM room_members WHERE room_id = ?1",
     )?;
@@ -400,7 +405,7 @@ pub fn list_room_members(db: &Db, room_id: &str) -> Result<Vec<StoredRoomMember>
 /// handler. Callers must verify the grant signature came from an owner
 /// before invoking — the repo function trusts its inputs.
 pub fn set_member_role(db: &Db, room_id: &str, fingerprint: &str, role: &str) -> Result<()> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "UPDATE room_members SET role = ?1 WHERE room_id = ?2 AND fingerprint = ?3",
         params![role, room_id, fingerprint],
@@ -412,7 +417,7 @@ pub fn set_member_role(db: &Db, room_id: &str, fingerprint: &str, role: &str) ->
 /// Used for `RoomAnnouncement.owner_fingerprints` and for verifying
 /// that an incoming `OwnerGrant` / `BanMember` came from a current owner.
 pub fn list_room_owners(db: &Db, room_id: &str) -> Result<Vec<String>> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let mut stmt =
         conn.prepare("SELECT fingerprint FROM room_members WHERE room_id = ?1 AND role = 'owner'")?;
     let rows = stmt.query_map(params![room_id], |row| row.get::<_, String>(0))?;
@@ -430,7 +435,7 @@ pub fn add_room_ban(
     signature_b64: &str,
     banned_at: i64,
 ) -> Result<()> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "INSERT INTO room_bans (room_id, banned_fingerprint, banned_by_fingerprint, signature_b64, banned_at)
          VALUES (?1, ?2, ?3, ?4, ?5)
@@ -454,7 +459,7 @@ pub fn add_room_ban(
 /// from future `owner_fingerprints` announcements. Idempotent; no-op if they
 /// weren't an owner or aren't a member.
 pub fn revoke_owner_role(db: &Db, room_id: &str, fingerprint: &str) -> Result<()> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "UPDATE room_members SET role = 'member' WHERE room_id = ?1 AND fingerprint = ?2 AND role = 'owner'",
         params![room_id, fingerprint],
@@ -463,7 +468,7 @@ pub fn revoke_owner_role(db: &Db, room_id: &str, fingerprint: &str) -> Result<()
 }
 
 pub fn is_member_banned(db: &Db, room_id: &str, fingerprint: &str) -> Result<bool> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let count: i64 = security_count(
         conn.query_row(
             "SELECT COUNT(*) FROM room_bans WHERE room_id = ?1 AND banned_fingerprint = ?2",
@@ -480,7 +485,7 @@ pub fn is_member_banned(db: &Db, room_id: &str, fingerprint: &str) -> Result<boo
 /// by the `^B` in-room bans view (owners-only) so they can audit who's
 /// been kicked.
 pub fn list_room_bans(db: &Db, room_id: &str) -> Result<Vec<String>> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let mut stmt = conn.prepare(
         "SELECT banned_fingerprint FROM room_bans WHERE room_id = ?1 ORDER BY banned_at DESC",
     )?;
@@ -504,7 +509,7 @@ pub fn get_member_ed25519_pubkey(
     room_id: &str,
     fingerprint: &str,
 ) -> Result<Option<String>> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let mut stmt = conn.prepare(
         "SELECT ed25519_pubkey FROM room_members WHERE room_id = ?1 AND fingerprint = ?2",
     )?;
@@ -517,7 +522,7 @@ pub fn get_member_ed25519_pubkey(
 }
 
 pub fn remove_room_member(db: &Db, room_id: &str, fingerprint: &str) -> Result<()> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "DELETE FROM room_members WHERE room_id = ?1 AND fingerprint = ?2",
         params![room_id, fingerprint],
@@ -533,7 +538,7 @@ pub fn set_member_verified(
     fingerprint: &str,
     verified: bool,
 ) -> Result<()> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "UPDATE room_members SET verified = ?1 WHERE room_id = ?2 AND fingerprint = ?3",
         params![verified as i64, room_id, fingerprint],
@@ -542,7 +547,7 @@ pub fn set_member_verified(
 }
 
 pub fn list_verified_fingerprints(db: &Db, room_id: &str) -> Result<Vec<String>> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let mut stmt = conn.prepare(
         "SELECT DISTINCT fingerprint FROM room_members WHERE room_id = ?1 AND verified = 1",
     )?;
@@ -565,7 +570,7 @@ pub struct StoredMegolmSession {
 }
 
 pub fn save_megolm_session(db: &Db, session: &StoredMegolmSession) -> Result<()> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "INSERT OR REPLACE INTO room_megolm_sessions
             (room_id, sender_fingerprint, session_id, session_data, is_outbound, created_at)
@@ -594,7 +599,7 @@ pub fn delete_outbound_megolm_sessions(
     room_id: &str,
     our_fingerprint: &str,
 ) -> Result<()> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "DELETE FROM room_megolm_sessions
          WHERE room_id = ?1 AND sender_fingerprint = ?2 AND is_outbound = 1",
@@ -604,7 +609,7 @@ pub fn delete_outbound_megolm_sessions(
 }
 
 pub fn load_megolm_sessions_for_room(db: &Db, room_id: &str) -> Result<Vec<StoredMegolmSession>> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let mut stmt = conn.prepare(
         "SELECT room_id, sender_fingerprint, session_id, session_data, is_outbound, created_at
          FROM room_megolm_sessions WHERE room_id = ?1",
@@ -646,7 +651,7 @@ pub fn set_megolm_rotation_state(
     messages_since_rotation: u32,
     last_rotation_at: i64,
 ) -> Result<()> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "INSERT INTO room_megolm_rotation_state
             (room_id, fingerprint, messages_since_rotation, last_rotation_at)
@@ -675,7 +680,7 @@ pub fn get_megolm_rotation_state(
     room_id: &str,
     fingerprint: &str,
 ) -> Result<Option<(u32, i64)>> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let mut stmt = conn.prepare(
         "SELECT messages_since_rotation, last_rotation_at
          FROM room_megolm_rotation_state WHERE room_id = ?1 AND fingerprint = ?2",
@@ -725,7 +730,7 @@ pub fn check_content_replay_seen(
     session_id: &str,
     message_index: u32,
 ) -> Result<bool> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM content_replay_seen
          WHERE room_id = ?1 AND sender_fingerprint = ?2
@@ -753,7 +758,7 @@ pub fn record_content_seen(
     message_index: u32,
     created_at: i64,
 ) -> Result<()> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "INSERT OR IGNORE INTO content_replay_seen
             (room_id, sender_fingerprint, session_id, message_index, created_at)
@@ -774,7 +779,7 @@ pub fn record_content_seen(
 /// number of rows pruned. Backed by idx_content_replay_by_time so the sweep is
 /// cheap even on a large table.
 pub fn gc_content_replay_seen(db: &Db, cutoff_ts: i64) -> Result<usize> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let removed = conn.execute(
         "DELETE FROM content_replay_seen WHERE created_at < ?1",
         params![cutoff_ts],
@@ -792,7 +797,7 @@ pub fn content_seen_index_bounds(
     sender_fingerprint: &str,
     session_id: &str,
 ) -> Result<Option<(u32, u32)>> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     // COUNT/MIN/MAX always return one row; MIN/MAX are NULL on an empty set.
     let bounds = conn.query_row(
         "SELECT MIN(message_index), MAX(message_index) FROM content_replay_seen
@@ -882,7 +887,7 @@ pub fn insert_room_message(
     client_msg_id: Option<&str>,
     reply_to: Option<&str>,
 ) -> Result<i64> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "INSERT OR IGNORE INTO room_messages
             (room_id, sender_fingerprint, direction, body, sent_at, client_msg_id, reply_to)
@@ -932,7 +937,7 @@ pub fn search_room_messages(
         .replace('%', "\\%")
         .replace('_', "\\_");
     let pattern = format!("%{}%", escaped);
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let mut stmt = conn.prepare(
         "SELECT id, room_id, sender_fingerprint, direction, body, sent_at,
                 client_msg_id, reply_to, edited_at, deleted_at
@@ -969,7 +974,7 @@ pub fn search_room_messages_fts(
     }
 
     let fts_result: rusqlite::Result<Vec<StoredRoomMessage>> = (|| {
-        let conn = db.lock().unwrap();
+        let conn = db.lock();
         let mut stmt = conn.prepare(
             "SELECT m.id, m.room_id, m.sender_fingerprint, m.direction, m.body, m.sent_at,
                     m.client_msg_id, m.reply_to, m.edited_at, m.deleted_at
@@ -992,7 +997,7 @@ pub fn search_room_messages_fts(
 }
 
 pub fn get_room_messages(db: &Db, room_id: &str, limit: i64) -> Result<Vec<StoredRoomMessage>> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let mut stmt = conn.prepare(
         "SELECT id, room_id, sender_fingerprint, direction, body, sent_at,
                 client_msg_id, reply_to, edited_at, deleted_at
@@ -1014,7 +1019,7 @@ pub fn get_room_messages(db: &Db, room_id: &str, limit: i64) -> Result<Vec<Store
 /// passed. Defaults to `None` for unknown rooms and for any room that predates
 /// the F9 migration (`disappearing_ttl_secs DEFAULT 0`).
 pub fn get_room_disappearing_ttl(db: &Db, room_id: &str) -> Result<Option<u32>> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let secs: i64 = conn
         .query_row(
             "SELECT disappearing_ttl_secs FROM rooms WHERE id = ?1",
@@ -1030,7 +1035,7 @@ pub fn get_room_disappearing_ttl(db: &Db, room_id: &str) -> Result<Option<u32>> 
 /// `DisappearingMessagesUpdate` must verify the signer is a room owner first —
 /// this repo function trusts its inputs.
 pub fn set_room_disappearing_ttl(db: &Db, room_id: &str, ttl_secs: Option<u32>) -> Result<()> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "UPDATE rooms SET disappearing_ttl_secs = ?1 WHERE id = ?2",
         params![ttl_secs.unwrap_or(0) as i64, room_id],
@@ -1047,7 +1052,7 @@ pub fn set_room_disappearing_ttl(db: &Db, room_id: &str, ttl_secs: Option<u32>) 
 /// resolves) and age out with the room's FK cascade. Best-effort + local: each
 /// peer prunes against its own clock.
 pub fn delete_expired_messages(db: &Db, now_ts: i64) -> Result<usize> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let removed = conn.execute(
         "DELETE FROM room_messages
          WHERE id IN (
@@ -1092,7 +1097,7 @@ pub fn add_reaction(
     emoji: &str,
     reacted_at: i64,
 ) -> Result<()> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "INSERT INTO room_reactions
             (room_id, target_client_msg_id, sender_fingerprint, emoji, reacted_at)
@@ -1121,7 +1126,7 @@ pub fn remove_reaction(
     sender_fingerprint: &str,
     emoji: &str,
 ) -> Result<()> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "DELETE FROM room_reactions
          WHERE room_id = ?1 AND target_client_msg_id = ?2
@@ -1136,7 +1141,7 @@ pub fn remove_reaction(
 /// `idx_room_reactions_target` index keeps the per-message slice contiguous).
 /// Returns an empty `Vec` for a room with no reactions.
 pub fn list_room_reactions(db: &Db, room_id: &str) -> Result<Vec<StoredReaction>> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let mut stmt = conn.prepare(
         "SELECT id, room_id, target_client_msg_id, sender_fingerprint, emoji, reacted_at
          FROM room_reactions WHERE room_id = ?1 ORDER BY reacted_at ASC, id ASC",
@@ -1168,7 +1173,7 @@ pub fn apply_message_edit(
     new_body: &str,
     edited_at: i64,
 ) -> Result<bool> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let changed = conn.execute(
         "UPDATE room_messages
          SET body = ?3, edited_at = ?4
@@ -1192,7 +1197,7 @@ pub fn mark_message_deleted(
     client_msg_id: &str,
     deleted_at: i64,
 ) -> Result<bool> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let changed = conn.execute(
         "UPDATE room_messages
          SET body = '', deleted_at = ?3
@@ -1212,7 +1217,7 @@ pub fn find_message_by_client_id(
     room_id: &str,
     client_msg_id: &str,
 ) -> Result<Option<StoredRoomMessage>> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let mut stmt = conn.prepare(
         "SELECT id, room_id, sender_fingerprint, direction, body, sent_at,
                 client_msg_id, reply_to, edited_at, deleted_at
@@ -1248,7 +1253,7 @@ pub struct KnownPeer {
 }
 
 pub fn upsert_known_peer(db: &Db, peer: &KnownPeer) -> Result<()> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "INSERT INTO known_peers (address, label, last_connected_at, last_attempt_at, created_at, fingerprint, trusted)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
@@ -1278,7 +1283,7 @@ pub fn upsert_known_peer(db: &Db, peer: &KnownPeer) -> Result<()> {
 }
 
 pub fn list_known_peers(db: &Db) -> Result<Vec<KnownPeer>> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let mut stmt = conn.prepare(
         "SELECT address, label, last_connected_at, last_attempt_at, created_at, fingerprint, trusted
          FROM known_peers ORDER BY COALESCE(last_connected_at, 0) DESC, created_at DESC",
@@ -1298,7 +1303,7 @@ pub fn list_known_peers(db: &Db) -> Result<Vec<KnownPeer>> {
 }
 
 pub fn forget_known_peer(db: &Db, address: &str) -> Result<()> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "DELETE FROM known_peers WHERE address = ?1",
         params![address],
@@ -1310,7 +1315,7 @@ pub fn forget_known_peer(db: &Db, address: &str) -> Result<()> {
 /// Used by the network task when an inbound connection's Identify lands —
 /// trusted fingerprints bypass the user-prompt modal.
 pub fn is_fingerprint_trusted(db: &Db, fingerprint: &str) -> Result<bool> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let count: i64 = security_count(
         conn.query_row(
             "SELECT COUNT(*) FROM known_peers WHERE fingerprint = ?1 AND trusted = 1",
@@ -1358,7 +1363,7 @@ fn row_to_contact(row: &rusqlite::Row) -> rusqlite::Result<Contact> {
 /// only on first insert. Use `set_contact_alias` to deliberately change an
 /// alias.
 pub fn upsert_contact(db: &Db, c: &Contact) -> Result<()> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "INSERT INTO contacts (fingerprint, alias, ed25519_pubkey, dm_room_id, source, note, added_at, last_seen)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
@@ -1383,7 +1388,7 @@ pub fn upsert_contact(db: &Db, c: &Contact) -> Result<()> {
 }
 
 pub fn get_contact(db: &Db, fingerprint: &str) -> Result<Option<Contact>> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let mut stmt = conn.prepare(
         "SELECT fingerprint, alias, ed25519_pubkey, dm_room_id, source, note, added_at, last_seen
          FROM contacts WHERE fingerprint = ?1",
@@ -1396,7 +1401,7 @@ pub fn get_contact(db: &Db, fingerprint: &str) -> Result<Option<Contact>> {
 }
 
 pub fn list_contacts(db: &Db) -> Result<Vec<Contact>> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let mut stmt = conn.prepare(
         "SELECT fingerprint, alias, ed25519_pubkey, dm_room_id, source, note, added_at, last_seen
          FROM contacts ORDER BY COALESCE(last_seen, added_at) DESC",
@@ -1406,7 +1411,7 @@ pub fn list_contacts(db: &Db) -> Result<Vec<Contact>> {
 }
 
 pub fn delete_contact(db: &Db, fingerprint: &str) -> Result<()> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "DELETE FROM contacts WHERE fingerprint = ?1",
         params![fingerprint],
@@ -1415,7 +1420,7 @@ pub fn delete_contact(db: &Db, fingerprint: &str) -> Result<()> {
 }
 
 pub fn is_contact(db: &Db, fingerprint: &str) -> Result<bool> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let count: i64 = security_count(
         conn.query_row(
             "SELECT COUNT(*) FROM contacts WHERE fingerprint = ?1",
@@ -1431,7 +1436,7 @@ pub fn is_contact(db: &Db, fingerprint: &str) -> Result<bool> {
 /// Deliberately set (or clear, with None) a contact's user-chosen alias.
 /// Unlike `upsert_contact`, this overwrites — it's the explicit edit path.
 pub fn set_contact_alias(db: &Db, fingerprint: &str, alias: Option<&str>) -> Result<()> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "UPDATE contacts SET alias = ?2 WHERE fingerprint = ?1",
         params![fingerprint, alias],
@@ -1461,7 +1466,7 @@ pub struct PendingFriendRequest {
 pub const PENDING_FRIEND_REQUEST_TTL_SECS: i64 = 3 * 24 * 60 * 60;
 
 pub fn upsert_pending_friend_request(db: &Db, req: &PendingFriendRequest) -> Result<()> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "INSERT INTO pending_friend_requests (fingerprint, address, peer_id, received_at)
          VALUES (?1, ?2, ?3, ?4)
@@ -1474,7 +1479,7 @@ pub fn upsert_pending_friend_request(db: &Db, req: &PendingFriendRequest) -> Res
 }
 
 pub fn list_pending_friend_requests(db: &Db) -> Result<Vec<PendingFriendRequest>> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let mut stmt = conn.prepare(
         "SELECT fingerprint, address, peer_id, received_at
          FROM pending_friend_requests
@@ -1496,7 +1501,7 @@ pub fn list_pending_friend_requests(db: &Db) -> Result<Vec<PendingFriendRequest>
 /// implicitly accepts the peer, and we don't want a second row for the
 /// same fp to re-prompt later.
 pub fn delete_pending_friend_requests_for_fp(db: &Db, fingerprint: &str) -> Result<()> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "DELETE FROM pending_friend_requests WHERE fingerprint = ?1",
         params![fingerprint],
@@ -1512,7 +1517,7 @@ pub fn cleanup_expired_pending_friend_requests(db: &Db, now: i64) -> Result<usiz
     // in tests with hand-crafted timestamps and on freshly-reset clocks)
     // where a plain `now - TTL` would go negative and match every row.
     let cutoff = now.saturating_sub(PENDING_FRIEND_REQUEST_TTL_SECS);
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let removed = conn.execute(
         "DELETE FROM pending_friend_requests WHERE received_at < ?1",
         params![cutoff],
@@ -1537,7 +1542,7 @@ pub struct PendingContactRequest {
 }
 
 pub fn upsert_pending_contact_request(db: &Db, req: &PendingContactRequest) -> Result<()> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "INSERT INTO pending_contact_requests (fingerprint, display_name, note, received_at)
          VALUES (?1, ?2, ?3, ?4)
@@ -1551,7 +1556,7 @@ pub fn upsert_pending_contact_request(db: &Db, req: &PendingContactRequest) -> R
 }
 
 pub fn list_pending_contact_requests(db: &Db) -> Result<Vec<PendingContactRequest>> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let mut stmt = conn.prepare(
         "SELECT fingerprint, display_name, note, received_at
          FROM pending_contact_requests ORDER BY received_at DESC",
@@ -1568,7 +1573,7 @@ pub fn list_pending_contact_requests(db: &Db) -> Result<Vec<PendingContactReques
 }
 
 pub fn delete_pending_contact_request(db: &Db, fingerprint: &str) -> Result<()> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "DELETE FROM pending_contact_requests WHERE fingerprint = ?1",
         params![fingerprint],
@@ -1578,7 +1583,7 @@ pub fn delete_pending_contact_request(db: &Db, fingerprint: &str) -> Result<()> 
 
 pub fn cleanup_expired_pending_contact_requests(db: &Db, now: i64) -> Result<usize> {
     let cutoff = now.saturating_sub(PENDING_FRIEND_REQUEST_TTL_SECS);
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let removed = conn.execute(
         "DELETE FROM pending_contact_requests WHERE received_at < ?1",
         params![cutoff],
@@ -1590,7 +1595,7 @@ pub fn cleanup_expired_pending_contact_requests(db: &Db, now: i64) -> Result<usi
 /// rejected an inbound dial from this peer — every subsequent connection
 /// attempt is auto-disconnected without raising the modal.
 pub fn block_peer(db: &Db, fingerprint: &str, now: i64) -> Result<()> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "INSERT INTO blocked_peers (fingerprint, blocked_at) VALUES (?1, ?2)
          ON CONFLICT(fingerprint) DO UPDATE SET blocked_at = excluded.blocked_at",
@@ -1602,14 +1607,14 @@ pub fn block_peer(db: &Db, fingerprint: &str, now: i64) -> Result<()> {
 /// Phase E: simple app-wide KV. Used for the global
 /// 'verified_only_inbound' toggle and any other future flags.
 pub fn get_setting(db: &Db, key: &str) -> Result<Option<String>> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let mut stmt = conn.prepare("SELECT value FROM app_settings WHERE key = ?1")?;
     let row = stmt.query_row(params![key], |r| r.get::<_, String>(0)).ok();
     Ok(row)
 }
 
 pub fn set_setting(db: &Db, key: &str, value: &str) -> Result<()> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "INSERT INTO app_settings (key, value) VALUES (?1, ?2)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -1620,7 +1625,7 @@ pub fn set_setting(db: &Db, key: &str, value: &str) -> Result<()> {
 
 /// Phase E: per-room "only verified members may join" toggle.
 pub fn get_room_verified_only(db: &Db, room_id: &str) -> Result<bool> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let v: i64 = conn
         .query_row(
             "SELECT verified_only_join FROM rooms WHERE id = ?1",
@@ -1632,7 +1637,7 @@ pub fn get_room_verified_only(db: &Db, room_id: &str) -> Result<bool> {
 }
 
 pub fn set_room_verified_only(db: &Db, room_id: &str, on: bool) -> Result<()> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "UPDATE rooms SET verified_only_join = ?1 WHERE id = ?2",
         params![on as i64, room_id],
@@ -1659,7 +1664,7 @@ pub fn add_verified_peer(
     verified_at: i64,
     pq_capable: bool,
 ) -> Result<()> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "INSERT INTO verified_peers (fingerprint, verified_at, pq_capable) VALUES (?1, ?2, ?3)
          ON CONFLICT(fingerprint) DO UPDATE SET
@@ -1686,7 +1691,7 @@ pub fn add_verified_peer(
 /// downgrade by reporting `true` — a loud, safe failed-DM beats a silent
 /// downgrade, mirroring `security_count`'s deny-check default.
 pub fn get_verified_peer_pq_capable(db: &Db, fingerprint: &str) -> Result<bool> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     match conn.query_row(
         "SELECT pq_capable FROM verified_peers WHERE fingerprint = ?1",
         params![fingerprint],
@@ -1709,7 +1714,7 @@ pub fn get_verified_peer_pq_capable(db: &Db, fingerprint: &str) -> Result<bool> 
 /// Phase E's global inbound filter and by the per-room "verified_only"
 /// enforcement.
 pub fn is_globally_verified(db: &Db, fingerprint: &str) -> Result<bool> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let count: i64 = security_count(
         conn.query_row(
             "SELECT COUNT(*) FROM verified_peers WHERE fingerprint = ?1",
@@ -1725,7 +1730,7 @@ pub fn is_globally_verified(db: &Db, fingerprint: &str) -> Result<bool> {
 /// huddle 0.7: list every globally SAS-verified fingerprint. Used by
 /// the People pane to render the "Verified" sub-list.
 pub fn list_verified_peers(db: &Db) -> Result<Vec<String>> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let mut stmt =
         conn.prepare("SELECT fingerprint FROM verified_peers ORDER BY verified_at DESC")?;
     let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
@@ -1734,7 +1739,7 @@ pub fn list_verified_peers(db: &Db) -> Result<Vec<String>> {
 
 /// Phase H: has the first-launch onboarding card been dismissed?
 pub fn is_onboarding_seen(db: &Db) -> Result<bool> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let v: i64 = conn
         .query_row(
             "SELECT onboarding_seen FROM identity WHERE id = 1",
@@ -1746,7 +1751,7 @@ pub fn is_onboarding_seen(db: &Db) -> Result<bool> {
 }
 
 pub fn mark_onboarding_seen(db: &Db) -> Result<()> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     conn.execute("UPDATE identity SET onboarding_seen = 1 WHERE id = 1", [])?;
     Ok(())
 }
@@ -1779,7 +1784,7 @@ pub fn set_update_check_enabled(db: &Db, enabled: bool) -> Result<()> {
 }
 
 pub fn is_peer_blocked(db: &Db, fingerprint: &str) -> Result<bool> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let count: i64 = security_count(
         conn.query_row(
             "SELECT COUNT(*) FROM blocked_peers WHERE fingerprint = ?1",
@@ -1796,7 +1801,7 @@ pub fn is_peer_blocked(db: &Db, fingerprint: &str) -> Result<bool> {
 /// rejection from the inbound-dial modal), newest first. Used by the
 /// Settings modal's "blocked peers" pane to render the unblock action.
 pub fn list_blocked_peers(db: &Db) -> Result<Vec<String>> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let mut stmt =
         conn.prepare("SELECT fingerprint FROM blocked_peers ORDER BY blocked_at DESC")?;
     let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
@@ -1807,7 +1812,7 @@ pub fn list_blocked_peers(db: &Db) -> Result<Vec<String>> {
 /// modal's "unblock" action so a previously-rejected inbound dial can
 /// reach us again. Counterpart of `block_peer`.
 pub fn unblock_peer(db: &Db, fingerprint: &str) -> Result<()> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "DELETE FROM blocked_peers WHERE fingerprint = ?1",
         params![fingerprint],
@@ -1829,7 +1834,7 @@ pub fn upsert_peer_profile(
     username: Option<&str>,
     updated_at: i64,
 ) -> Result<()> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "INSERT INTO peer_profiles (fingerprint, username, updated_at)
          VALUES (?1, ?2, ?3)
@@ -1846,7 +1851,7 @@ pub fn upsert_peer_profile(
 /// from them. Returns None for unknown peers and for peers who set
 /// `username = None` (explicit anonymous) — caller renders `[anonymous]`.
 pub fn get_peer_username(db: &Db, fingerprint: &str) -> Result<Option<String>> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let mut stmt = conn.prepare("SELECT username FROM peer_profiles WHERE fingerprint = ?1")?;
     let mut rows = stmt.query(params![fingerprint])?;
     if let Some(row) = rows.next()? {
@@ -1861,7 +1866,7 @@ pub fn get_peer_username(db: &Db, fingerprint: &str) -> Result<Option<String>> {
 /// — usernames aren't unique — so the "add by username" flow asks
 /// the user to disambiguate via HD- ID when this returns > 1.
 pub fn find_peers_by_username(db: &Db, username: &str) -> Result<Vec<String>> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let mut stmt = conn.prepare("SELECT fingerprint FROM peer_profiles WHERE username = ?1")?;
     let rows = stmt.query_map(params![username], |row| row.get::<_, String>(0))?;
     let mut out = Vec::new();
@@ -1937,7 +1942,7 @@ pub struct StoredAttachment {
 
 /// Insert (or update on file_id collision within the same room).
 pub fn upsert_attachment(db: &Db, a: &StoredAttachment) -> Result<()> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "INSERT INTO room_attachments
             (room_id, message_id, sender_fingerprint, file_id, name, mime,
@@ -2012,7 +2017,7 @@ fn row_to_attachment(row: &rusqlite::Row) -> rusqlite::Result<StoredAttachment> 
 }
 
 pub fn get_attachment(db: &Db, room_id: &str, file_id: &str) -> Result<Option<StoredAttachment>> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let mut stmt = conn.prepare(
         "SELECT id, room_id, message_id, sender_fingerprint, file_id, name, mime,
                 size_bytes, status, cache_path, saved_path, error,
@@ -2033,7 +2038,7 @@ pub fn list_room_attachments(db: &Db, room_id: &str) -> Result<Vec<StoredAttachm
     // the room (this loads every row into memory). Return the most recent
     // MAX_ATTACHMENTS_PER_ROOM, still in ascending (display) order.
     const MAX_ATTACHMENTS_PER_ROOM: i64 = 2000;
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let mut stmt = conn.prepare(
         "SELECT id, room_id, message_id, sender_fingerprint, file_id, name, mime,
                 size_bytes, status, cache_path, saved_path, error,
@@ -2058,7 +2063,7 @@ pub fn update_attachment_status(
     status: AttachmentStatus,
     error: Option<&str>,
 ) -> Result<()> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "UPDATE room_attachments SET status = ?1, error = ?2
          WHERE room_id = ?3 AND file_id = ?4",
@@ -2074,7 +2079,7 @@ pub fn update_attachment_paths(
     cache_path: Option<&str>,
     saved_path: Option<&str>,
 ) -> Result<()> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "UPDATE room_attachments
          SET cache_path = COALESCE(?1, cache_path),
@@ -2086,7 +2091,7 @@ pub fn update_attachment_paths(
 }
 
 pub fn delete_attachment(db: &Db, room_id: &str, file_id: &str) -> Result<()> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "DELETE FROM room_attachments WHERE room_id = ?1 AND file_id = ?2",
         params![room_id, file_id],
@@ -2109,7 +2114,7 @@ pub struct JournalEntry {
 /// backbone that survives a dropped broadcast and feeds the future multi-device
 /// cursor.
 pub fn journal_append(db: &Db, created_at: i64, kind: &str, detail: &str) -> Result<i64> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "INSERT INTO event_journal (created_at, kind, detail) VALUES (?1, ?2, ?3)",
         params![created_at, kind, detail],
@@ -2119,7 +2124,7 @@ pub fn journal_append(db: &Db, created_at: i64, kind: &str, detail: &str) -> Res
 
 /// Most-recent journal entries, newest first, capped at `limit`.
 pub fn journal_recent(db: &Db, limit: usize) -> Result<Vec<JournalEntry>> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let mut stmt = conn.prepare(
         "SELECT id, created_at, kind, detail FROM event_journal ORDER BY id DESC LIMIT ?1",
     )?;
@@ -2132,7 +2137,7 @@ pub fn journal_recent(db: &Db, limit: usize) -> Result<Vec<JournalEntry>> {
 /// Entries with `id` strictly greater than `after_id`, oldest first — the
 /// per-consumer cursor a future multi-device sync replays from.
 pub fn journal_since(db: &Db, after_id: i64, limit: usize) -> Result<Vec<JournalEntry>> {
-    let conn = db.lock().unwrap();
+    let conn = db.lock();
     let mut stmt = conn.prepare(
         "SELECT id, created_at, kind, detail FROM event_journal
          WHERE id > ?1 ORDER BY id ASC LIMIT ?2",
@@ -2177,7 +2182,10 @@ mod tests {
         let db = open_db_in_memory().unwrap();
         save_identity(&db, b"secret-bytes-32-chars-long-xxxxx", 1000).unwrap();
         let loaded = load_identity(&db).unwrap().unwrap();
-        assert_eq!(loaded.ed25519_secret, b"secret-bytes-32-chars-long-xxxxx");
+        assert_eq!(
+            &loaded.ed25519_secret[..],
+            &b"secret-bytes-32-chars-long-xxxxx"[..]
+        );
         assert_eq!(loaded.created_at, 1000);
     }
 
@@ -2583,7 +2591,7 @@ mod tests {
         record_content_seen(&db, &room.id, "alice", "s", 7, 2000).unwrap();
         assert!(check_content_replay_seen(&db, &room.id, "alice", "s", 7).unwrap());
 
-        let conn = db.lock().unwrap();
+        let conn = db.lock();
         let count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM content_replay_seen WHERE room_id = ?1",
@@ -2644,11 +2652,11 @@ mod tests {
         assert!(check_content_replay_seen(&db, &room.id, "alice", "s", 0).unwrap());
 
         {
-            let conn = db.lock().unwrap();
+            let conn = db.lock();
             conn.execute("DELETE FROM rooms WHERE id = ?1", params![room.id])
                 .unwrap();
         }
-        let conn = db.lock().unwrap();
+        let conn = db.lock();
         let count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM content_replay_seen WHERE room_id = ?1",
@@ -2827,7 +2835,7 @@ mod tests {
         // Drop the FTS table + triggers to simulate a SQLCipher build without
         // FTS5; the function must transparently fall back to the LIKE path.
         {
-            let conn = db.lock().unwrap();
+            let conn = db.lock();
             conn.execute_batch(
                 "DROP TRIGGER IF EXISTS room_messages_ai;
                  DROP TRIGGER IF EXISTS room_messages_ad;
@@ -2917,7 +2925,6 @@ mod tests {
     // F2 dedup: count rows in room_messages for a (room, sender, client_msg_id).
     fn count_msgs_with_client_id(db: &Db, room_id: &str, sender: &str, cid: &str) -> i64 {
         db.lock()
-            .unwrap()
             .query_row(
                 "SELECT COUNT(*) FROM room_messages
                  WHERE room_id = ?1 AND sender_fingerprint = ?2 AND client_msg_id = ?3",

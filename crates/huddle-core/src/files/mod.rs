@@ -15,8 +15,9 @@ pub mod encryption;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::time::Instant;
+
+use parking_lot::Mutex;
 
 use sha2::{Digest, Sha256};
 
@@ -281,7 +282,7 @@ impl FileManager {
             }
         }
 
-        let mut map = self.incoming.lock().unwrap();
+        let mut map = self.incoming.lock();
 
         // huddle 1.3.4: bound the number of concurrent *incomplete* transfers.
         // A hostile peer can stream one chunk each for thousands of distinct
@@ -401,7 +402,7 @@ impl FileManager {
 
     /// Drop any partial state for an incoming transfer.
     pub fn cancel_incoming(&self, file_id: &str) {
-        self.incoming.lock().unwrap().remove(file_id);
+        self.incoming.lock().remove(file_id);
     }
 
     /// Record the authoritative total size for an in-progress transfer —
@@ -409,7 +410,7 @@ impl FileManager {
     /// so the progress denominator stops being a guess. No-op when there
     /// is no active transfer for `file_id`.
     pub fn set_expected_size(&self, file_id: &str, size: u64) {
-        if let Some(e) = self.incoming.lock().unwrap().get_mut(file_id) {
+        if let Some(e) = self.incoming.lock().get_mut(file_id) {
             e.expected_size = size;
         }
     }
@@ -417,7 +418,7 @@ impl FileManager {
     /// Bytes received so far and the expected total, for an in-progress
     /// transfer.
     pub fn progress(&self, file_id: &str) -> Option<(u64, u64)> {
-        let map = self.incoming.lock().unwrap();
+        let map = self.incoming.lock();
         let e = map.get(file_id)?;
         Some((e.bytes_received, e.expected_size))
     }
@@ -718,7 +719,7 @@ mod tests {
             let id = format!("{:064x}", i);
             let _ = mgr.accept_chunk(&id, 0, 2, vec![0u8; 16], 1024);
         }
-        let live = mgr.incoming.lock().unwrap().len();
+        let live = mgr.incoming.lock().len();
         assert!(
             live <= MAX_CONCURRENT_INCOMING,
             "incomplete-transfer map grew to {live}, cap is {MAX_CONCURRENT_INCOMING}"

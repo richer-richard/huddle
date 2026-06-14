@@ -116,6 +116,23 @@ impl TransportId {
             }
         }
     }
+
+    /// huddle 2.1.3: per-door connect-attempt budget (seconds). The relay
+    /// reconnect loop wraps `ServerClient::connect` in a timeout of this length
+    /// so a hung door can't starve the doors tried after it. Onion doors get a
+    /// longer budget — a Tor circuit build, and especially Arti's first-run
+    /// bootstrap, is legitimately slow — while a clearnet door either completes
+    /// quickly or not at all, so a short budget there fails fast to the next
+    /// fallback (the whole point: a no-Tor user must reach the clearnet door).
+    pub fn connect_timeout_secs(&self) -> u64 {
+        match self {
+            // Arti lazily bootstraps an embedded Tor client on first use, which
+            // can take tens of seconds; system/bridge Tor still pays circuit-build.
+            TransportId::OnionArti => 45,
+            TransportId::OnionSystemTor | TransportId::OnionBridge => 30,
+            TransportId::ClearnetWss | TransportId::ClearnetWs => 10,
+        }
+    }
 }
 
 /// A resolved door: identity/label/description (always present) plus, when

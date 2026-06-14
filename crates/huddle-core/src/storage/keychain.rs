@@ -13,7 +13,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use argon2::{Algorithm, Argon2, Params, Version};
+use argon2::{Algorithm, Argon2, Version};
 use hkdf::Hkdf;
 use rand::RngCore;
 use sha2::Sha256;
@@ -171,8 +171,9 @@ pub fn derive_master_key(
     passphrase: &str,
     salt: &[u8; KEYCHAIN_SALT_LEN],
 ) -> Result<[u8; MASTER_KEY_LEN]> {
-    let params = Params::new(65_536, 3, 4, Some(MASTER_KEY_LEN))
-        .map_err(|e| HuddleError::Other(format!("argon2 params: {e}")))?;
+    // huddle 2.1.3: build the Argon2id params from the single shared constructor
+    // so the master-key KDF can never drift from the room-passphrase KDF.
+    let params = crate::crypto::passphrase::argon2id_params(MASTER_KEY_LEN)?;
     let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut out = [0u8; MASTER_KEY_LEN];
     argon

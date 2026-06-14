@@ -134,7 +134,7 @@ pub struct NetworkHandle {
     /// every published wire message is mirrored to it, so peers we can't
     /// reach over libp2p still receive our traffic (and we theirs, via the
     /// server's offline mailbox). `None` until `attach_server` runs.
-    server: Arc<std::sync::Mutex<Option<server::ServerClient>>>,
+    server: Arc<parking_lot::Mutex<Option<server::ServerClient>>>,
     /// huddle 1.2: map of `room_id -> partner fingerprint` for 1:1 DM rooms.
     /// When a room is registered here, relay traffic for it is delivered by
     /// recipient fingerprint (`ServerClient::send_direct`) instead of by room
@@ -143,7 +143,7 @@ pub struct NetworkHandle {
     /// room on the relay. Group rooms are absent from this map and keep using
     /// membership fan-out (`publish`). Populated by the app from
     /// `start_direct` / `bootstrap_direct_room` / `add_contact`.
-    dm_partners: Arc<std::sync::Mutex<HashMap<String, String>>>,
+    dm_partners: Arc<parking_lot::Mutex<HashMap<String, String>>>,
 }
 
 /// Stable per-message id for the server mailbox/receipts: a short hash of
@@ -159,19 +159,19 @@ impl NetworkHandle {
     /// to it. Replaces any previous one. Called by the app's server
     /// connection task after each (re)connect.
     pub fn attach_server(&self, client: server::ServerClient) {
-        *self.server.lock().unwrap() = Some(client);
+        *self.server.lock() = Some(client);
     }
 
     /// Drop the server connection (e.g. after a disconnect) so we stop
     /// mirroring until it reconnects.
     pub fn detach_server(&self) {
-        *self.server.lock().unwrap() = None;
+        *self.server.lock() = None;
     }
 
     /// Snapshot the attached server client, if any. Cloned out so we never
     /// hold the lock across the (sync, non-blocking) mirror call.
     fn server_client(&self) -> Option<server::ServerClient> {
-        self.server.lock().unwrap().clone()
+        self.server.lock().clone()
     }
 
     pub async fn subscribe_room(&self, room_id: String) {
@@ -201,19 +201,16 @@ impl NetworkHandle {
         if partner_fingerprint.is_empty() {
             return;
         }
-        self.dm_partners
-            .lock()
-            .unwrap()
-            .insert(room_id, partner_fingerprint);
+        self.dm_partners.lock().insert(room_id, partner_fingerprint);
     }
 
     /// huddle 1.2: forget a DM room's direct-delivery mapping (e.g. on leave).
     pub fn forget_dm(&self, room_id: &str) {
-        self.dm_partners.lock().unwrap().remove(room_id);
+        self.dm_partners.lock().remove(room_id);
     }
 
     fn dm_partner(&self, room_id: &str) -> Option<String> {
-        self.dm_partners.lock().unwrap().get(room_id).cloned()
+        self.dm_partners.lock().get(room_id).cloned()
     }
 
     pub async fn publish_room_message(&self, room_id: String, payload: Vec<u8>) {
@@ -276,7 +273,7 @@ impl NetworkHandle {
 
     /// True when a server connection is currently attached.
     pub fn has_server(&self) -> bool {
-        self.server.lock().unwrap().is_some()
+        self.server.lock().is_some()
     }
 
     /// huddle 2.0 (F7): acknowledge durable receipt of a mailbox-delivered
@@ -453,8 +450,8 @@ pub fn start_network_disabled() -> NetworkHandle {
     });
     NetworkHandle {
         cmd_tx,
-        server: Arc::new(std::sync::Mutex::new(None)),
-        dm_partners: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        server: Arc::new(parking_lot::Mutex::new(None)),
+        dm_partners: Arc::new(parking_lot::Mutex::new(HashMap::new())),
     }
 }
 
@@ -600,8 +597,8 @@ pub fn start_network_with(
 
     Ok(NetworkHandle {
         cmd_tx,
-        server: Arc::new(std::sync::Mutex::new(None)),
-        dm_partners: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        server: Arc::new(parking_lot::Mutex::new(None)),
+        dm_partners: Arc::new(parking_lot::Mutex::new(HashMap::new())),
     })
 }
 

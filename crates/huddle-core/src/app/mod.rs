@@ -3,7 +3,9 @@ mod sas_actor;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::STANDARD as B64;
@@ -825,11 +827,7 @@ impl AppHandle {
         // gossipsub topic for the LAN path.
         {
             let inbox = crate::network::protocol::inbox_room_id(handle.identity.fingerprint());
-            handle
-                .aux_subscriptions
-                .lock()
-                .unwrap()
-                .insert(inbox.clone());
+            handle.aux_subscriptions.lock().insert(inbox.clone());
             handle.network.subscribe_room(inbox).await;
         }
         // huddle 0.8/1.0: now that active rooms are loaded, open the
@@ -885,7 +883,7 @@ impl AppHandle {
     /// huddle 1.0: the transport door the relay is currently connected
     /// through (`None` when not connected). For the UI/CLI status line.
     pub fn active_transport(&self) -> Option<TransportId> {
-        *self.active_transport.lock().unwrap()
+        *self.active_transport.lock()
     }
 
     /// Human label for the live transport door, e.g. "Tor onion (system Tor)".
@@ -905,7 +903,7 @@ impl AppHandle {
     pub fn room_transport(&self, room_id: &str) -> RoomTransport {
         let members = self.room_members(room_id);
         if !members.is_empty() {
-            let connected = self.connected_dial_addrs.lock().unwrap().clone();
+            let connected = self.connected_dial_addrs.lock().clone();
             if !connected.is_empty() {
                 if let Ok(known) = repo::list_known_peers(&self.db) {
                     let lan_live = known.iter().any(|p| {
@@ -973,13 +971,12 @@ impl AppHandle {
     pub fn discovered_rooms(&self) -> Vec<DiscoveredRoom> {
         let now = now_unix();
         let our_fp = self.identity.fingerprint().to_string();
-        let mut by_id: HashMap<String, DiscoveredRoom> =
-            self.discovered_rooms.lock().unwrap().clone();
+        let mut by_id: HashMap<String, DiscoveredRoom> = self.discovered_rooms.lock().clone();
 
         // Merge in rooms we're currently in — gossipsub doesn't echo our
         // own announcements back to us, so without this our own hosted
         // rooms wouldn't appear in the lobby.
-        for room in self.active_rooms.lock().unwrap().values() {
+        for room in self.active_rooms.lock().values() {
             let entry = DiscoveredRoom {
                 room_id: room.info.id.clone(),
                 name: room.info.name.clone(),
@@ -1007,7 +1004,7 @@ impl AppHandle {
         // Encrypted rooms we have on disk but haven't rejoined this
         // session. Only surface them when no fresh discovery / active
         // entry exists for the same room.
-        for (id, stored) in self.restorable_rooms.lock().unwrap().iter() {
+        for (id, stored) in self.restorable_rooms.lock().iter() {
             if by_id.contains_key(id) {
                 continue;
             }
@@ -1040,7 +1037,7 @@ impl AppHandle {
             }
             // Active rooms we host pass unconditionally — we always know
             // we're a member of our own DM.
-            if self.active_rooms.lock().unwrap().contains_key(room_id) {
+            if self.active_rooms.lock().contains_key(room_id) {
                 return true;
             }
             // Otherwise: the announcer must be the other partner, AND
@@ -1059,7 +1056,7 @@ impl AppHandle {
     /// partner's username + HD-ID.
     pub fn dm_partner_fingerprint(&self, room_id: &str) -> Option<String> {
         let our_fp = self.identity.fingerprint().to_string();
-        let rooms = self.active_rooms.lock().unwrap();
+        let rooms = self.active_rooms.lock();
         let room = rooms.get(room_id)?;
         if room.info.kind != RoomKind::Direct {
             return None;
@@ -1068,13 +1065,12 @@ impl AppHandle {
     }
 
     pub fn active_room_ids(&self) -> Vec<String> {
-        self.active_rooms.lock().unwrap().keys().cloned().collect()
+        self.active_rooms.lock().keys().cloned().collect()
     }
 
     pub fn active_room_info(&self, room_id: &str) -> Option<StoredRoom> {
         self.active_rooms
             .lock()
-            .unwrap()
             .get(room_id)
             .map(|r| r.info.clone())
     }
@@ -1082,7 +1078,6 @@ impl AppHandle {
     pub fn room_members(&self, room_id: &str) -> Vec<String> {
         self.active_rooms
             .lock()
-            .unwrap()
             .get(room_id)
             .map(|r| {
                 let mut m: Vec<String> = r.members.iter().cloned().collect();
@@ -1190,7 +1185,7 @@ impl AppHandle {
             },
         )?;
 
-        self.active_rooms.lock().unwrap().insert(
+        self.active_rooms.lock().insert(
             room_id.clone(),
             ActiveRoom {
                 info: info.clone(),
@@ -1270,7 +1265,7 @@ impl AppHandle {
         // memory, surface its id without creating a duplicate. This
         // handles both "I already DM'd them" and "they DM'd me first
         // and we auto-accepted" paths.
-        if self.active_rooms.lock().unwrap().contains_key(&room_id) {
+        if self.active_rooms.lock().contains_key(&room_id) {
             let _ = self.app_event_tx.send(AppEvent::RoomJoined {
                 room_id: room_id.clone(),
             });
@@ -1344,7 +1339,7 @@ impl AppHandle {
             self.persist_key(),
         )?);
 
-        self.active_rooms.lock().unwrap().insert(
+        self.active_rooms.lock().insert(
             room_id.clone(),
             ActiveRoom {
                 info: info.clone(),
@@ -1461,7 +1456,7 @@ impl AppHandle {
     ) -> DmKeyOutcome {
         // Phase 1: snapshot current key state.
         let (already_keyed, already_hybrid) = {
-            let rooms = self.active_rooms.lock().unwrap();
+            let rooms = self.active_rooms.lock();
             match rooms.get(room_id) {
                 Some(r) => (r.passphrase_key.is_some(), r.dm_is_hybrid),
                 None => return DmKeyOutcome::Noop,
@@ -1590,7 +1585,7 @@ impl AppHandle {
         };
 
         // Phase 2: commit under the lock, re-checking the LIVE state.
-        let mut rooms = self.active_rooms.lock().unwrap();
+        let mut rooms = self.active_rooms.lock();
         let room = match rooms.get_mut(room_id) {
             Some(r) => r,
             None => return DmKeyOutcome::Noop,
@@ -1699,7 +1694,7 @@ impl AppHandle {
             (None, None)
         };
 
-        self.active_rooms.lock().unwrap().insert(
+        self.active_rooms.lock().insert(
             room_id.to_string(),
             ActiveRoom {
                 info: info.clone(),
@@ -1739,11 +1734,10 @@ impl AppHandle {
     pub async fn join_room(&self, room_id: &str, passphrase: Option<&str>) -> Result<()> {
         // Resolve room metadata from the freshest available source.
         let (name, creator_fingerprint, encrypted, salt_opt) = {
-            if let Some(d) = self.discovered_rooms.lock().unwrap().get(room_id).cloned() {
+            if let Some(d) = self.discovered_rooms.lock().get(room_id).cloned() {
                 let salt = self.get_room_salt(room_id);
                 (d.name, d.creator_fingerprint, d.encrypted, salt)
-            } else if let Some(stored) = self.restorable_rooms.lock().unwrap().get(room_id).cloned()
-            {
+            } else if let Some(stored) = self.restorable_rooms.lock().get(room_id).cloned() {
                 (
                     stored.name,
                     stored.creator_fingerprint,
@@ -1784,7 +1778,6 @@ impl AppHandle {
         let kind = self
             .discovered_rooms
             .lock()
-            .unwrap()
             .get(room_id)
             .map(|d| d.kind)
             .or_else(|| {
@@ -1838,7 +1831,7 @@ impl AppHandle {
         let mut members = HashSet::new();
         members.insert(self.identity.fingerprint().to_string());
 
-        self.active_rooms.lock().unwrap().insert(
+        self.active_rooms.lock().insert(
             room_id.to_string(),
             ActiveRoom {
                 info: info.clone(),
@@ -1854,7 +1847,7 @@ impl AppHandle {
             },
         );
         // No longer "restorable" now that we've rejoined.
-        self.restorable_rooms.lock().unwrap().remove(room_id);
+        self.restorable_rooms.lock().remove(room_id);
 
         self.network.subscribe_room(room_id.to_string()).await;
 
@@ -1916,10 +1909,7 @@ impl AppHandle {
                     Some(partner_fp) => {
                         if let Err(e) = self.bootstrap_direct_room(&info.id, &partner_fp).await {
                             warn!(%e, room_id = %info.id, "restore: DM bootstrap failed; parking as restorable");
-                            self.restorable_rooms
-                                .lock()
-                                .unwrap()
-                                .insert(info.id.clone(), info);
+                            self.restorable_rooms.lock().insert(info.id.clone(), info);
                         } else {
                             info!(room_id = %info.id, "restored DM");
                         }
@@ -1928,10 +1918,7 @@ impl AppHandle {
                     // unknown, nothing to re-activate. Park it (no key, no
                     // history anyway).
                     None => {
-                        self.restorable_rooms
-                            .lock()
-                            .unwrap()
-                            .insert(info.id.clone(), info);
+                        self.restorable_rooms.lock().insert(info.id.clone(), info);
                     }
                 }
                 continue;
@@ -1939,10 +1926,7 @@ impl AppHandle {
             // Encrypted GROUP rooms need a passphrase held in memory to
             // decrypt — park them as restorable for the user to re-enter.
             if info.encrypted {
-                self.restorable_rooms
-                    .lock()
-                    .unwrap()
-                    .insert(info.id.clone(), info);
+                self.restorable_rooms.lock().insert(info.id.clone(), info);
                 continue;
             }
             let mut members = HashSet::new();
@@ -1953,7 +1937,7 @@ impl AppHandle {
                 }
             }
             let member_count = members.len() as u32;
-            self.active_rooms.lock().unwrap().insert(
+            self.active_rooms.lock().insert(
                 info.id.clone(),
                 ActiveRoom {
                     info: info.clone(),
@@ -2008,7 +1992,7 @@ impl AppHandle {
             }
         };
 
-        self.active_rooms.lock().unwrap().remove(room_id);
+        self.active_rooms.lock().remove(room_id);
         self.network.unsubscribe_room(room_id.to_string()).await;
 
         let _ = self.app_event_tx.send(AppEvent::RoomLeft {
@@ -2050,7 +2034,7 @@ impl AppHandle {
         // touches the DB) so we never nest the DB lock under active_rooms.
         let policy = self.megolm_rotation_policy();
         let (msg, needs_rotation) = {
-            let mut rooms = self.active_rooms.lock().unwrap();
+            let mut rooms = self.active_rooms.lock();
             let room = rooms
                 .get_mut(room_id)
                 .ok_or_else(|| HuddleError::Other(format!("not in room {room_id}")))?;
@@ -2307,7 +2291,7 @@ impl AppHandle {
             .map(|r| r.encrypted)
             .unwrap_or(false);
         let (new_ciphertext_b64, session_id, new_body_field) = if encrypted {
-            let mut rooms = self.active_rooms.lock().unwrap();
+            let mut rooms = self.active_rooms.lock();
             let room = rooms
                 .get_mut(room_id)
                 .ok_or_else(|| HuddleError::Other(format!("not in room {room_id}")))?;
@@ -2511,20 +2495,20 @@ impl AppHandle {
         //    Mutex across it is sound, and the lock order (active_rooms → db)
         //    matches every message handler — no deadlock.
         {
-            let mut rooms = self.active_rooms.lock().unwrap();
+            let mut rooms = self.active_rooms.lock();
             // 3. Re-encrypt all Megolm session pickles old → new persist key, so
             //    they survive the master-key rekey AND decrypt under the new key.
             self.reencrypt_megolm_sessions(&old_persist, &new_persist)?;
             // 4. PRAGMA rekey the SQLCipher DB (atomic, sentinel-verified). This
             //    is now the single commit point of the whole rotation.
             {
-                let conn = self.db.lock().unwrap();
+                let conn = self.db.lock();
                 storage::rekey_db(&conn, &new_master)?;
             }
             // 5. Swap the in-memory persist key and 6. reload the active rooms'
             //    cryptos under it — still inside the quiesce window so disk and
             //    in-memory session state stay consistent.
-            *self.session_persist_key.lock().unwrap() = new_persist;
+            *self.session_persist_key.lock() = new_persist;
             self.reload_active_room_cryptos_locked(&mut rooms, &new_persist);
         }
         let _ = self.app_event_tx.send(AppEvent::PassphraseChanged);
@@ -2733,7 +2717,7 @@ impl AppHandle {
         // canonical address so whichever wins the libp2p race triggers
         // the post-identify auto-DM. Reset & insert under one lock.
         {
-            let mut pending = self.pending_auto_dm_addrs.lock().unwrap();
+            let mut pending = self.pending_auto_dm_addrs.lock();
             for m in &multiaddrs {
                 pending.insert(m.to_string());
             }
@@ -2751,7 +2735,7 @@ impl AppHandle {
     /// win on a tie.
     fn resolve_dial_addrs(&self, fingerprint: &str) -> Vec<String> {
         let mut set: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for room in self.discovered_rooms.lock().unwrap().values() {
+        for room in self.discovered_rooms.lock().values() {
             if room.creator_fingerprint == fingerprint {
                 for addr in &room.host_addrs {
                     set.insert(addr.clone());
@@ -2777,10 +2761,7 @@ impl AppHandle {
         // so the post-Identify handler auto-opens a DM with the peer.
         // The auto-reconnector goes through `dial_internal` instead and
         // therefore does NOT trigger an auto-DM on every startup.
-        self.pending_auto_dm_addrs
-            .lock()
-            .unwrap()
-            .insert(canonical.clone());
+        self.pending_auto_dm_addrs.lock().insert(canonical.clone());
         self.dial_internal(canonical, multiaddr).await
     }
 
@@ -2823,12 +2804,7 @@ impl AppHandle {
     /// reachable in this session. The lobby renders an emoji badge
     /// from this — non-empty ⇒ 'reachable', empty ⇒ 'LAN only'.
     pub fn nat_reachable_addrs(&self) -> Vec<String> {
-        self.nat_reachable_addrs
-            .lock()
-            .unwrap()
-            .iter()
-            .cloned()
-            .collect()
+        self.nat_reachable_addrs.lock().iter().cloned().collect()
     }
 
     /// Phase D follow-up: addresses suitable for putting on the wire
@@ -2839,14 +2815,8 @@ impl AppHandle {
     /// Relay-circuit addresses are listed first (they're more likely
     /// to work for NAT'd peers).
     pub fn dialable_addrs(&self) -> Vec<String> {
-        let mut out: Vec<String> = self
-            .relay_circuit_addrs
-            .lock()
-            .unwrap()
-            .iter()
-            .cloned()
-            .collect();
-        for a in self.nat_reachable_addrs.lock().unwrap().iter() {
+        let mut out: Vec<String> = self.relay_circuit_addrs.lock().iter().cloned().collect();
+        for a in self.nat_reachable_addrs.lock().iter() {
             if !out.contains(a) {
                 out.push(a.clone());
             }
@@ -2872,7 +2842,6 @@ impl AppHandle {
         let canonical = multiaddr.to_string();
         self.pending_invite_dials
             .lock()
-            .unwrap()
             .insert(canonical.clone(), claimed_fp.to_string());
         // Re-use the standard dial path so KnownPeer rows + status
         // events look identical to a plain dial.
@@ -2909,12 +2878,11 @@ impl AppHandle {
         };
         self.discovered_rooms
             .lock()
-            .unwrap()
             .insert(room.id.clone(), discovered);
     }
 
     pub fn known_peers(&self) -> Vec<KnownPeerStatus> {
-        let connected = self.connected_dial_addrs.lock().unwrap().clone();
+        let connected = self.connected_dial_addrs.lock().clone();
         let stored = repo::list_known_peers(&self.db).unwrap_or_default();
         stored
             .into_iter()
@@ -2933,7 +2901,7 @@ impl AppHandle {
 
     pub async fn forget_peer(&self, address: &str) -> Result<()> {
         repo::forget_known_peer(&self.db, address)?;
-        self.connected_dial_addrs.lock().unwrap().remove(address);
+        self.connected_dial_addrs.lock().remove(address);
         Ok(())
     }
 
@@ -2998,7 +2966,7 @@ impl AppHandle {
             .collect();
         // A peer is "LAN-connected" when any known_peer row bearing its
         // fingerprint currently maps to a live libp2p connection.
-        let connected = self.connected_dial_addrs.lock().unwrap().clone();
+        let connected = self.connected_dial_addrs.lock().clone();
         let lan_fps: HashSet<String> = repo::list_known_peers(&self.db)
             .unwrap_or_default()
             .into_iter()
@@ -3209,7 +3177,6 @@ impl AppHandle {
         self.network.accept_inbound(peer_id).await;
         self.connected_dial_addrs
             .lock()
-            .unwrap()
             .insert(address.to_string(), peer_id);
     }
 
@@ -3234,7 +3201,6 @@ impl AppHandle {
         self.network.accept_inbound(peer_id).await;
         self.connected_dial_addrs
             .lock()
-            .unwrap()
             .insert(address.to_string(), peer_id);
         // Persist the row with trusted=true so future inbound from
         // this fingerprint short-circuits the modal in
@@ -3387,9 +3353,11 @@ impl AppHandle {
 
     fn load_or_create_identity(db: &Db) -> Result<Identity> {
         if let Some(stored) = repo::load_identity(db)? {
-            let mut bytes = [0u8; 32];
+            // huddle 2.1.3 (zeroization sweep): hold the seed copy in Zeroizing so
+            // this stack/heap copy of the crown-jewel secret is wiped on drop.
+            let mut bytes = zeroize::Zeroizing::new([0u8; 32]);
             bytes.copy_from_slice(&stored.ed25519_secret);
-            Identity::from_secret_bytes(bytes)
+            Identity::from_secret_bytes(*bytes)
         } else {
             let id = Identity::generate()?;
             repo::save_identity(db, &id.secret_bytes(), now_unix())?;
@@ -3400,12 +3368,11 @@ impl AppHandle {
     fn get_room_salt(&self, room_id: &str) -> Option<Vec<u8>> {
         self.active_rooms
             .lock()
-            .unwrap()
             .get(room_id)
             .and_then(|r| r.info.passphrase_salt.clone())
             .or_else(|| {
                 // Try the cached announcement salt
-                ROOM_SALT_CACHE.lock().unwrap().get(room_id).cloned()
+                ROOM_SALT_CACHE.lock().get(room_id).cloned()
             })
     }
 
@@ -3432,7 +3399,7 @@ impl AppHandle {
     async fn broadcast_member_announce(&self, room_id: &str) -> Result<()> {
         let our_fp = self.identity.fingerprint().to_string();
         let (wrapped, is_direct, dm_ct) = {
-            let mut rooms = self.active_rooms.lock().unwrap();
+            let mut rooms = self.active_rooms.lock();
             let room = rooms
                 .get_mut(room_id)
                 .ok_or_else(|| HuddleError::Other("not in room".into()))?;
@@ -3531,9 +3498,9 @@ impl AppHandle {
     /// we belong to a room even before we can decrypt it — otherwise its
     /// fan-out skips us and group messages silently never arrive.
     fn relay_membership_ids(&self) -> Vec<String> {
-        let mut set: HashSet<String> = self.active_rooms.lock().unwrap().keys().cloned().collect();
-        set.extend(self.restorable_rooms.lock().unwrap().keys().cloned());
-        set.extend(self.aux_subscriptions.lock().unwrap().iter().cloned());
+        let mut set: HashSet<String> = self.active_rooms.lock().keys().cloned().collect();
+        set.extend(self.restorable_rooms.lock().keys().cloned());
+        set.extend(self.aux_subscriptions.lock().iter().cloned());
         set.into_iter().collect()
     }
 
@@ -3566,7 +3533,7 @@ impl AppHandle {
                 // huddle 2.1.1: re-read the door order each cycle so a live
                 // priority change (set_transport_order / set_clearnet_relay)
                 // takes effect on the very next reconnect, not just at launch.
-                let order = handle.transport_order.lock().unwrap().clone();
+                let order = handle.transport_order.lock().clone();
 
                 // Try each door in order until one connects. Unavailable
                 // doors (no URL / wrong build) are skipped.
@@ -3582,16 +3549,27 @@ impl AppHandle {
                         }
                         _ => continue,
                     };
-                    match ServerClient::connect(&url, &dial, handle.identity.clone(), rooms.clone())
-                        .await
-                    {
-                        Ok((client, rx)) => {
+                    // huddle 2.1.3: bound each door's connect with a per-door
+                    // timeout so a hung door — especially the Arti path, which lazily
+                    // bootstraps an embedded Tor client and can stall for minutes on a
+                    // Tor-hostile network — is treated as a failed door and the loop
+                    // falls through to the next one (e.g. the clearnet fallback) rather
+                    // than starving it. Without this, a no-Tor user on the default
+                    // most-private-first order could appear permanently offline.
+                    let budget = std::time::Duration::from_secs(id.connect_timeout_secs());
+                    let connect =
+                        ServerClient::connect(&url, &dial, handle.identity.clone(), rooms.clone());
+                    match tokio::time::timeout(budget, connect).await {
+                        Ok(Ok((client, rx))) => {
                             info!(%url, transport = id.as_str(), "connected to relay");
                             connected = Some((client, rx, *id));
                             break;
                         }
-                        Err(e) => {
+                        Ok(Err(e)) => {
                             debug!(error = %e, transport = id.as_str(), %url, "relay door failed; trying next");
+                        }
+                        Err(_) => {
+                            debug!(transport = id.as_str(), %url, secs = budget.as_secs(), "relay door connect timed out; trying next");
                         }
                     }
                 }
@@ -3599,7 +3577,7 @@ impl AppHandle {
                 if let Some((client, mut rx, id)) = connected {
                     backoff = 1;
                     handle.network.attach_server(client);
-                    *handle.active_transport.lock().unwrap() = Some(id);
+                    *handle.active_transport.lock() = Some(id);
                     // huddle 1.2: re-assert membership for every active room
                     // over the freshly attached connection. Hello carried the
                     // room snapshot taken before we connected, so a room
@@ -3673,7 +3651,7 @@ impl AppHandle {
                         }
                     }
                     handle.network.detach_server();
-                    *handle.active_transport.lock().unwrap() = None;
+                    *handle.active_transport.lock() = None;
                     warn!("relay connection closed; reconnecting");
                 } else {
                     warn!("all relay doors failed; will retry");
@@ -3734,7 +3712,7 @@ impl AppHandle {
                     Vec<String>,
                     Vec<String>,
                 ) = {
-                    let mut active = handle.active_rooms.lock().unwrap();
+                    let mut active = handle.active_rooms.lock();
                     let snap: Vec<(StoredRoom, u32)> = active
                         .values()
                         .map(|r| (r.info.clone(), r.members.len() as u32))
@@ -3834,7 +3812,7 @@ impl AppHandle {
                 let now = now_unix();
                 let mut to_drop = Vec::new();
                 {
-                    let mut map = handle.discovered_rooms.lock().unwrap();
+                    let mut map = handle.discovered_rooms.lock();
                     map.retain(|id, r| {
                         if now - r.last_seen > DISCOVERED_TTL_SECS {
                             to_drop.push(id.clone());
@@ -3887,7 +3865,6 @@ impl AppHandle {
                 // explicit MemberLeave path and the discovered-room TTL.
                 self.connected_dial_addrs
                     .lock()
-                    .unwrap()
                     .retain(|_addr, pid| *pid != peer_id);
                 let _ = self.app_event_tx.send(AppEvent::PeerExpired { peer_id });
             }
@@ -3899,7 +3876,6 @@ impl AppHandle {
                 // dropped. Same cleanup shape as PeerExpired.
                 self.connected_dial_addrs
                     .lock()
-                    .unwrap()
                     .retain(|_addr, pid| *pid != peer_id);
                 let _ = self.app_event_tx.send(AppEvent::PeerExpired { peer_id });
             }
@@ -3927,7 +3903,7 @@ impl AppHandle {
                 if ann.creator_fingerprint != our_fp_for_dial && !ann.host_addrs.is_empty() {
                     let now = now_unix();
                     let should_dial = {
-                        let mut attempts = self.host_addr_dial_attempts.lock().unwrap();
+                        let mut attempts = self.host_addr_dial_attempts.lock();
                         // huddle 1.3.1: creator_fingerprint is unauthenticated, so
                         // drop entries past the backoff window (they no longer
                         // suppress a dial) and hard-cap inserts to bound a flood of
@@ -3989,10 +3965,9 @@ impl AppHandle {
                 // others can still discover it through us, but don't emit
                 // RoomDiscovered — it isn't "newly discovered" to us, and
                 // emitting it spuriously re-opens the lobby join prompt.
-                if self.active_rooms.lock().unwrap().contains_key(&ann.room_id) {
+                if self.active_rooms.lock().contains_key(&ann.room_id) {
                     self.discovered_rooms
                         .lock()
-                        .unwrap()
                         .insert(ann.room_id.clone(), discovered);
                     return;
                 }
@@ -4037,7 +4012,6 @@ impl AppHandle {
                     }
                     self.discovered_rooms
                         .lock()
-                        .unwrap()
                         .insert(ann.room_id.clone(), discovered.clone());
                     let _ = self
                         .app_event_tx
@@ -4053,7 +4027,7 @@ impl AppHandle {
                     return;
                 }
                 {
-                    let mut map = self.discovered_rooms.lock().unwrap();
+                    let mut map = self.discovered_rooms.lock();
                     // huddle 2.0.3 (audit L-15 residual): cap the map so a flood
                     // of distinct group room_ids can't grow it without bound
                     // between TTL prunes; evict the stalest entry to make room.
@@ -4149,7 +4123,6 @@ impl AppHandle {
                 let addr_s = address.to_string();
                 self.connected_dial_addrs
                     .lock()
-                    .unwrap()
                     .insert(addr_s.clone(), peer_id);
                 // Fingerprint isn't known yet (Identify hasn't landed);
                 // the PeerIdentified handler below upserts again to add
@@ -4188,7 +4161,7 @@ impl AppHandle {
                 // its trusted-is-sticky-once-true clause means we don't
                 // accidentally demote a row that was already trusted.
                 let matched_addrs: Vec<String> = {
-                    let map = self.connected_dial_addrs.lock().unwrap();
+                    let map = self.connected_dial_addrs.lock();
                     map.iter()
                         .filter_map(|(addr, pid)| {
                             if *pid == peer_id {
@@ -4209,7 +4182,7 @@ impl AppHandle {
                 // assert defends against future invite-format
                 // changes or hand-edited links.
                 let mismatch = {
-                    let mut map = self.pending_invite_dials.lock().unwrap();
+                    let mut map = self.pending_invite_dials.lock();
                     let mut found: Option<(String, String)> = None;
                     for addr in &matched_addrs {
                         if let Some(claimed) = map.remove(addr) {
@@ -4241,7 +4214,7 @@ impl AppHandle {
                 // start happens after the trust upsert below so the
                 // peer is already marked trusted by the time we fire.
                 let should_auto_dm = {
-                    let mut pending = self.pending_auto_dm_addrs.lock().unwrap();
+                    let mut pending = self.pending_auto_dm_addrs.lock();
                     let mut any_matched = false;
                     for addr in &matched_addrs {
                         if pending.remove(addr) {
@@ -4301,7 +4274,7 @@ impl AppHandle {
                 if our_username.is_some() {
                     let now_ms = now_unix_ms();
                     let should_send = {
-                        let mut last = self.last_profile_broadcast_at_ms.lock().unwrap();
+                        let mut last = self.last_profile_broadcast_at_ms.lock();
                         // huddle 1.3.4: evict entries older than the rebroadcast
                         // floor so this map can't grow without bound as distinct
                         // peer fingerprints churn through (e.g. an attacker
@@ -4325,7 +4298,7 @@ impl AppHandle {
                         if let Ok(env) = crate::crypto::sign_message(&self.identity, &msg) {
                             if let Ok(bytes) = crate::network::protocol::encode_wire_signed(&env) {
                                 let rooms: Vec<String> =
-                                    self.active_rooms.lock().unwrap().keys().cloned().collect();
+                                    self.active_rooms.lock().keys().cloned().collect();
                                 for room_id in rooms {
                                     self.network
                                         .publish_room_message(room_id, bytes.clone())
@@ -4342,10 +4315,7 @@ impl AppHandle {
                 // it to the addresses pane. Also emit a status hint via
                 // ListeningOn so the lobby's reachability line updates.
                 info!(addr = %address, "relay reservation established");
-                self.relay_circuit_addrs
-                    .lock()
-                    .unwrap()
-                    .insert(address.to_string());
+                self.relay_circuit_addrs.lock().insert(address.to_string());
                 let _ = self.app_event_tx.send(AppEvent::ListeningOn {
                     address: address.to_string(),
                 });
@@ -4356,7 +4326,7 @@ impl AppHandle {
             } => {
                 let addr_s = tested_addr.to_string();
                 let (transitioned, becomes_reachable) = {
-                    let mut set = self.nat_reachable_addrs.lock().unwrap();
+                    let mut set = self.nat_reachable_addrs.lock();
                     let was_empty = set.is_empty();
                     if reachable {
                         set.insert(addr_s.clone());
@@ -4440,7 +4410,6 @@ impl AppHandle {
                     // user-dial would, so the lobby's online dot lights up.
                     self.connected_dial_addrs
                         .lock()
-                        .unwrap()
                         .insert(address.to_string(), peer_id);
                     let _ = repo::upsert_known_peer(
                         &self.db,
@@ -4477,19 +4446,19 @@ impl AppHandle {
     /// `WireMessage::Plain`. Phase B's `OwnerGrant`/`BanMember` arms
     /// require it to be `Some` AND the signer to be a current owner.
     ///
-    /// INVARIANT (huddle 1.1.4): never hold a `std::sync::Mutex` guard
-    /// (`active_rooms`, `sas_flows`, the DB) across an `.await`. Always
-    /// scope the guard in its own block or `drop()` it before awaiting —
-    /// see the DM-key path below. This is also enforced mechanically:
-    /// this fn runs inside a `Send` task, so a `!Send` `MutexGuard` held
-    /// across `.await` would fail to compile.
+    /// INVARIANT (huddle 1.1.4): never hold a `Mutex` guard (`active_rooms`,
+    /// `sas_flows`, the DB) across an `.await`. Always scope the guard in its
+    /// own block or `drop()` it before awaiting — see the DM-key path below.
+    /// This is also enforced mechanically: this fn runs inside a `Send` task, so
+    /// a `!Send` `MutexGuard` held across `.await` would fail to compile.
+    /// (huddle 2.1.3: these are `parking_lot::Mutex` — non-poisoning, but the
+    /// guard is still `!Send`, so the across-await rule is unchanged.)
     /// huddle 2.0.2 (audit M-2): can we currently decrypt an `Encrypted` body
     /// tagged with `session_id` from `sender`? Returns false when the room,
     /// its crypto, or the inbound session isn't present yet.
     fn can_decrypt(&self, room_id: &str, sender: &str, session_id: &str) -> bool {
         self.active_rooms
             .lock()
-            .unwrap()
             .get(room_id)
             .and_then(|r| r.crypto.as_ref())
             .map(|c| c.has_inbound_session(sender, session_id))
@@ -4571,7 +4540,7 @@ impl AppHandle {
         // partner are auto-activated here; group rooms (which need a
         // passphrase) and unknown rooms are left untouched.
         {
-            let known_inactive = !self.active_rooms.lock().unwrap().contains_key(room_id);
+            let known_inactive = !self.active_rooms.lock().contains_key(room_id);
             if known_inactive {
                 if let Ok(Some(info)) = repo::get_room(&self.db, room_id) {
                     if info.kind == RoomKind::Direct {
@@ -4666,7 +4635,7 @@ impl AppHandle {
                     return;
                 }
                 let need_inbound = {
-                    let mut rooms = self.active_rooms.lock().unwrap();
+                    let mut rooms = self.active_rooms.lock();
                     let room = match rooms.get_mut(room_id) {
                         Some(r) => r,
                         None => return,
@@ -4743,11 +4712,7 @@ impl AppHandle {
                 // runs. `ensure_dm_key` is idempotent, pins PQ capability, and
                 // performs the one-way classical→hybrid upgrade.
                 let is_direct_room = matches!(
-                    self.active_rooms
-                        .lock()
-                        .unwrap()
-                        .get(room_id)
-                        .map(|r| r.info.kind),
+                    self.active_rooms.lock().get(room_id).map(|r| r.info.kind),
                     Some(RoomKind::Direct)
                 );
                 if is_direct_room {
@@ -4783,7 +4748,7 @@ impl AppHandle {
                             // ticker nudge still guarantees convergence.
                             let now = now_unix();
                             let due = {
-                                let mut cd = self.key_request_cooldown.lock().unwrap();
+                                let mut cd = self.key_request_cooldown.lock();
                                 // huddle 1.3.4: evict entries older than the
                                 // cooldown so this map stays bounded as room ids
                                 // churn; anything older than the window is "due"
@@ -4818,7 +4783,7 @@ impl AppHandle {
                 if need_inbound {
                     let wrapped = wrapped_session_key.unwrap();
                     let result = {
-                        let mut rooms = self.active_rooms.lock().unwrap();
+                        let mut rooms = self.active_rooms.lock();
                         // huddle 1.3.1: the active_rooms lock was released after
                         // `need_inbound` was computed, so the room may have been
                         // concurrently removed (e.g. a UI-thread `leave_room`)
@@ -4867,7 +4832,7 @@ impl AppHandle {
                 // joiner is still served on the next tick / their own re-announce.
                 {
                     let now = now_unix();
-                    let mut cd = self.announce_on_request_cooldown.lock().unwrap();
+                    let mut cd = self.announce_on_request_cooldown.lock();
                     if now - cd.get(room_id).copied().unwrap_or(0)
                         < ANNOUNCE_ON_REQUEST_COOLDOWN_SECS
                     {
@@ -4912,7 +4877,7 @@ impl AppHandle {
                     }
                 };
                 let plaintext = {
-                    let mut rooms = self.active_rooms.lock().unwrap();
+                    let mut rooms = self.active_rooms.lock();
                     let room = match rooms.get_mut(room_id) {
                         Some(r) => r,
                         None => return,
@@ -5019,7 +4984,7 @@ impl AppHandle {
                         {
                             let now = now_unix();
                             let due = {
-                                let mut cd = self.key_request_cooldown.lock().unwrap();
+                                let mut cd = self.key_request_cooldown.lock();
                                 // huddle 1.3.4: evict entries older than the
                                 // cooldown so this map stays bounded as room ids
                                 // churn; anything older than the window is "due"
@@ -5107,7 +5072,7 @@ impl AppHandle {
                     return;
                 }
                 let expiry = now_unix() + TYPING_TTL_SECS;
-                let mut rooms = self.active_rooms.lock().unwrap();
+                let mut rooms = self.active_rooms.lock();
                 if let Some(room) = rooms.get_mut(room_id) {
                     room.typers.insert(sender_fingerprint, expiry);
                 }
@@ -5187,7 +5152,7 @@ impl AppHandle {
                     return;
                 }
                 let removed = {
-                    let mut rooms = self.active_rooms.lock().unwrap();
+                    let mut rooms = self.active_rooms.lock();
                     if let Some(room) = rooms.get_mut(room_id) {
                         room.members.remove(&sender_fingerprint)
                     } else {
@@ -5323,7 +5288,7 @@ impl AppHandle {
                     // simply won't be able to decrypt the new key,
                     // matching the "soft kick" semantics.
                     info!(%room_id, %signer, "we were kicked from this room");
-                    self.active_rooms.lock().unwrap().remove(room_id);
+                    self.active_rooms.lock().remove(room_id);
                     let _ = self.app_event_tx.send(AppEvent::RoomLeft {
                         room_id: room_id.to_string(),
                     });
@@ -5415,7 +5380,7 @@ impl AppHandle {
                 // Match + consume the code. Single use.
                 let now = now_unix();
                 let (code_ok, our_session_id, wrap_input) = {
-                    let mut rooms = self.active_rooms.lock().unwrap();
+                    let mut rooms = self.active_rooms.lock();
                     let room = match rooms.get_mut(room_id) {
                         Some(r) => r,
                         None => return,
@@ -5516,7 +5481,6 @@ impl AppHandle {
                     let creator = self
                         .active_rooms
                         .lock()
-                        .unwrap()
                         .get(room_id)
                         .map(|r| r.info.creator_fingerprint.clone());
                     creator.as_deref() == Some(owner_fp.as_str())
@@ -5529,7 +5493,6 @@ impl AppHandle {
                 let our_secret = match self
                     .pending_code_secrets
                     .lock()
-                    .unwrap()
                     .remove(&(room_id.to_string(), our_fp.clone()))
                 {
                     Some(s) => s,
@@ -5569,7 +5532,7 @@ impl AppHandle {
                     }
                 };
                 // Install as an inbound session keyed by the owner's fp.
-                let mut rooms = self.active_rooms.lock().unwrap();
+                let mut rooms = self.active_rooms.lock();
                 if let Some(room) = rooms.get_mut(room_id) {
                     if let Some(crypto) = room.crypto.as_mut() {
                         if let Err(e) = crypto.add_inbound_session(&owner_fp, &session_key_str) {
@@ -5865,7 +5828,7 @@ impl AppHandle {
                             return;
                         }
                         let dec = {
-                            let mut rooms = self.active_rooms.lock().unwrap();
+                            let mut rooms = self.active_rooms.lock();
                             let room = match rooms.get_mut(room_id) {
                                 Some(r) => r,
                                 None => return,
@@ -6054,7 +6017,7 @@ impl AppHandle {
         let original_path = path.to_path_buf();
 
         let (room_encrypted, mut maybe_session_id, encrypted_meta_opt, wire_bytes) = {
-            let mut rooms = self.active_rooms.lock().unwrap();
+            let mut rooms = self.active_rooms.lock();
             let room = rooms
                 .get_mut(room_id)
                 .ok_or_else(|| HuddleError::Other(format!("not in room {room_id}")))?;
@@ -6361,7 +6324,7 @@ impl AppHandle {
     /// read (RoomCrypto construction, passphrase verification) goes through here
     /// so a swap is observed atomically by all clones of the handle.
     fn persist_key(&self) -> [u8; 32] {
-        *self.session_persist_key.lock().unwrap()
+        *self.session_persist_key.lock()
     }
 
     /// Phase E: global toggle — when true, inbound dials from
@@ -6485,7 +6448,7 @@ impl AppHandle {
     /// (clearnet-first, Tor-first, or a custom/pinned order). Surfaced in the
     /// GUI/TUI "Connection priority" selector.
     pub fn current_transport_order(&self) -> Vec<TransportId> {
-        self.transport_order.lock().unwrap().clone()
+        self.transport_order.lock().clone()
     }
 
     /// huddle 2.1.1: set the door priority order and apply it live — persists
@@ -6506,7 +6469,7 @@ impl AppHandle {
             .collect::<Vec<_>>()
             .join(",");
         repo::set_setting(&self.db, "transport_order", &csv)?;
-        *self.transport_order.lock().unwrap() = resolved;
+        *self.transport_order.lock() = resolved;
         // Wake the relay loop so it drops the current door and re-dials in the
         // new order (no-op if the relay is disabled / no socket is open).
         self.relay_reconnect.notify_one();
@@ -6653,7 +6616,6 @@ impl AppHandle {
         let info = self
             .active_rooms
             .lock()
-            .unwrap()
             .get(room_id)
             .map(|r| r.info.clone())
             .ok_or_else(|| HuddleError::Other(format!("not in room {room_id}")))?;
@@ -6722,7 +6684,7 @@ impl AppHandle {
         }
         let code = generate_alphanumeric_code(8);
         let expires_at = now_unix() + 10 * 60;
-        let mut rooms = self.active_rooms.lock().unwrap();
+        let mut rooms = self.active_rooms.lock();
         let room = rooms
             .get_mut(room_id)
             .ok_or_else(|| HuddleError::Other(format!("not in room {room_id}")))?;
@@ -6742,7 +6704,7 @@ impl AppHandle {
     pub async fn join_room_with_code(&self, room_id: &str, code: &str) -> Result<()> {
         // Resolve discovered metadata so we know name/encrypted/etc.
         let info = {
-            let d = self.discovered_rooms.lock().unwrap().get(room_id).cloned();
+            let d = self.discovered_rooms.lock().get(room_id).cloned();
             match d {
                 Some(d) => StoredRoom {
                     id: room_id.to_string(),
@@ -6781,7 +6743,6 @@ impl AppHandle {
         let key = (room_id.to_string(), our_fp.clone());
         self.pending_code_secrets
             .lock()
-            .unwrap()
             .insert(key.clone(), our_secret);
         // Code-join timeout: if no response in 30s, the entry will
         // still be in the map (the response handler removes it on
@@ -6792,7 +6753,7 @@ impl AppHandle {
         let timeout_room = room_id.to_string();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-            let still_pending = map.lock().unwrap().remove(&key).is_some();
+            let still_pending = map.lock().remove(&key).is_some();
             if still_pending {
                 let _ = tx.send(AppEvent::CodeJoinTimedOut {
                     room_id: timeout_room,
@@ -6809,7 +6770,7 @@ impl AppHandle {
         repo::insert_room(&self.db, &info)?;
         // Create a placeholder ActiveRoom with no crypto yet; we'll
         // fill in the inbound session in the response handler.
-        self.active_rooms.lock().unwrap().insert(
+        self.active_rooms.lock().insert(
             room_id.to_string(),
             ActiveRoom {
                 info: info.clone(),
@@ -6950,7 +6911,7 @@ impl AppHandle {
     /// `kick_member` (locally banning ourselves) and from the
     /// `RoomMessage::BanMember` receive arm (peer-initiated ban).
     fn evict_banned_member(&self, room_id: &str, fingerprint: &str) {
-        if let Some(room) = self.active_rooms.lock().unwrap().get_mut(room_id) {
+        if let Some(room) = self.active_rooms.lock().get_mut(room_id) {
             room.members.remove(fingerprint);
         }
         let _ = self.app_event_tx.send(AppEvent::MemberLeft {
@@ -6981,7 +6942,7 @@ impl AppHandle {
         };
         let env = crate::crypto::sign_message(&self.identity, &msg)?;
         let bytes = crate::network::protocol::encode_wire_signed(&env)?;
-        let rooms: Vec<String> = self.active_rooms.lock().unwrap().keys().cloned().collect();
+        let rooms: Vec<String> = self.active_rooms.lock().keys().cloned().collect();
         for room_id in rooms {
             self.network
                 .publish_room_message(room_id, bytes.clone())
@@ -7063,7 +7024,6 @@ impl AppHandle {
     pub fn is_room_read_only(&self, room_id: &str) -> bool {
         self.active_rooms
             .lock()
-            .unwrap()
             .get(room_id)
             .map(|r| r.read_only)
             .unwrap_or(false)
@@ -7076,7 +7036,7 @@ impl AppHandle {
     /// Broadcast a "I'm typing" pulse to the given room. Caller is
     /// responsible for debouncing (don't fire more than every ~500ms).
     pub async fn broadcast_typing(&self, room_id: &str) {
-        if !self.active_rooms.lock().unwrap().contains_key(room_id) {
+        if !self.active_rooms.lock().contains_key(room_id) {
             return;
         }
         let msg = RoomMessage::Typing {
@@ -7093,7 +7053,7 @@ impl AppHandle {
     /// pruning entries past their TTL.
     pub fn typers_in_room(&self, room_id: &str) -> Vec<String> {
         let now = now_unix();
-        let mut rooms = self.active_rooms.lock().unwrap();
+        let mut rooms = self.active_rooms.lock();
         let room = match rooms.get_mut(room_id) {
             Some(r) => r,
             None => return Vec::new(),
@@ -7121,7 +7081,7 @@ impl AppHandle {
         let new_key = passphrase::derive_key(new_passphrase, &new_salt)?;
 
         let info = {
-            let mut rooms = self.active_rooms.lock().unwrap();
+            let mut rooms = self.active_rooms.lock();
             let room = rooms
                 .get_mut(room_id)
                 .ok_or_else(|| HuddleError::Other(format!("not in room {room_id}")))?;
@@ -7153,10 +7113,7 @@ impl AppHandle {
         // announce cooldown for this room so that request is served — the cooldown
         // only exists to collapse request *storms*, never to suppress a re-share
         // after our key actually changed.
-        self.announce_on_request_cooldown
-            .lock()
-            .unwrap()
-            .remove(room_id);
+        self.announce_on_request_cooldown.lock().remove(room_id);
 
         // Broadcast before persisting: peers learn about the rotation even
         // if we crash before the DB write lands, and our own restore path
@@ -7200,7 +7157,7 @@ impl AppHandle {
     ) -> Result<()> {
         let new_key = passphrase::derive_key(new_passphrase, new_salt)?;
         let info = {
-            let mut rooms = self.active_rooms.lock().unwrap();
+            let mut rooms = self.active_rooms.lock();
             let room = rooms
                 .get_mut(room_id)
                 .ok_or_else(|| HuddleError::Other(format!("not in room {room_id}")))?;
@@ -7212,10 +7169,7 @@ impl AppHandle {
         // state just changed, so clear our announce cooldown for this room — we
         // must serve peers' post-rotation re-share requests rather than throttle
         // them.
-        self.announce_on_request_cooldown
-            .lock()
-            .unwrap()
-            .remove(room_id);
+        self.announce_on_request_cooldown.lock().remove(room_id);
         // Ask the rotator (and anyone) to re-share their session key
         // before persisting, so a crash before the DB write still leaves
         // peers aware we've moved to the new salt.
@@ -7432,7 +7386,7 @@ impl AppHandle {
         ciphertext: &[u8],
         meta: &EncryptedFileMeta,
     ) -> Result<Vec<u8>> {
-        let mut rooms = self.active_rooms.lock().unwrap();
+        let mut rooms = self.active_rooms.lock();
         let room = rooms
             .get_mut(room_id)
             .ok_or_else(|| HuddleError::Other("not in room".into()))?;
@@ -7473,7 +7427,7 @@ impl AppHandle {
             }
         }
 
-        let room_ids: Vec<String> = self.active_rooms.lock().unwrap().keys().cloned().collect();
+        let room_ids: Vec<String> = self.active_rooms.lock().keys().cloned().collect();
         let _ = tokio::time::timeout(Duration::from_secs(2), async {
             for room_id in &room_ids {
                 if let Err(e) = self.leave_room(room_id).await {
@@ -7958,7 +7912,7 @@ static ROOM_SALT_CACHE: std::sync::LazyLock<Mutex<HashMap<String, Vec<u8>>>> =
 const ROOM_SALT_CACHE_CAP: usize = 4096;
 
 fn remember_room_salt(room_id: &str, salt: Vec<u8>) {
-    let mut cache = ROOM_SALT_CACHE.lock().unwrap();
+    let mut cache = ROOM_SALT_CACHE.lock();
     if !cache.contains_key(room_id) && cache.len() >= ROOM_SALT_CACHE_CAP {
         if let Some(k) = cache.keys().next().cloned() {
             cache.remove(&k);

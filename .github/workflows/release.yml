@@ -69,7 +69,7 @@ jobs:
         if: runner.os == 'Windows'
         run: choco install nasm --no-progress -y
       - name: Build release binaries
-        run: cargo build --release --workspace --bins
+        run: cargo build --release --workspace --bins --locked
       - name: Package (unix)
         if: runner.os != 'Windows'
         shell: bash

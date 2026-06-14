@@ -4,7 +4,9 @@ pub mod schema;
 
 use rusqlite::Connection;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 use crate::error::{HuddleError, Result};
 
@@ -144,7 +146,7 @@ mod tests {
         // Create an encrypted DB under the old key, write a row, then rekey.
         {
             let db = open_db(&path, Some(&old_key)).unwrap();
-            let conn = db.lock().unwrap();
+            let conn = db.lock();
             conn.execute_batch("CREATE TABLE t (v TEXT); INSERT INTO t VALUES ('hi');")
                 .unwrap();
             rekey_db(&conn, &new_key).unwrap();
@@ -155,7 +157,7 @@ mod tests {
 
         // The new key opens it and the data survived the rekey intact.
         let db = open_db(&path, Some(&new_key)).unwrap();
-        let conn = db.lock().unwrap();
+        let conn = db.lock();
         let v: String = conn.query_row("SELECT v FROM t", [], |r| r.get(0)).unwrap();
         assert_eq!(v, "hi");
     }
@@ -190,7 +192,7 @@ mod tests {
 
         {
             let db = open_db(&path, Some(&old_master)).unwrap();
-            let conn = db.lock().unwrap();
+            let conn = db.lock();
             conn.execute_batch("CREATE TABLE t (v TEXT); INSERT INTO t VALUES ('keep');")
                 .unwrap();
             rekey_db(&conn, &new_master).unwrap();
@@ -200,7 +202,7 @@ mod tests {
         // row survived — all without ever touching the salt on disk.
         assert!(open_db(&path, Some(&old_master)).is_err());
         let db = open_db(&path, Some(&new_master)).unwrap();
-        let conn = db.lock().unwrap();
+        let conn = db.lock();
         let v: String = conn.query_row("SELECT v FROM t", [], |r| r.get(0)).unwrap();
         assert_eq!(v, "keep");
     }

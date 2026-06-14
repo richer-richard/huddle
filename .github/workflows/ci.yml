@@ -79,15 +79,15 @@ jobs:
           sudo apt-get install -y build-essential pkg-config perl \
             libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
       - name: Build (all targets)
-        run: cargo build --workspace --all-targets
+        run: cargo build --workspace --all-targets --locked
       # Deterministic suites only here (these never flake). The libp2p/mDNS
       # integration tests run serially in a dedicated job below.
       - name: Unit tests (lib)
-        run: cargo test --workspace --lib
+        run: cargo test --workspace --lib --locked
       - name: Hybrid DM e2e
-        run: cargo test -p huddle-core --test hybrid_dm
+        run: cargo test -p huddle-core --test hybrid_dm --locked
       - name: Property tests
-        run: cargo test -p huddle-core --test properties
+        run: cargo test -p huddle-core --test properties --locked
 
   # ---- flaky-under-parallel libp2p tests: single OS, SERIAL ----
   integration:
@@ -108,9 +108,9 @@ jobs:
       # flake under parallel port/mDNS contention; --test-threads=1 is required
       # and authoritative (see docs / the project's test-flakiness notes).
       - name: huddle-core integration (serial)
-        run: cargo test -p huddle-core --test integration -- --test-threads=1
+        run: cargo test -p huddle-core --test integration --locked -- --test-threads=1
       - name: app_over_server (serial)
-        run: cargo test -p huddle-server --test app_over_server -- --test-threads=1
+        run: cargo test -p huddle-server --test app_over_server --locked -- --test-threads=1
 
   # ---- supply chain ----
   deny:
@@ -169,7 +169,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config perl \
             libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
-      - run: cargo doc --workspace --no-deps --document-private-items
+      - run: cargo doc --workspace --no-deps --document-private-items --locked
 
   # ---- informational (don't block merges; surface platform/MSRV breakage) ----
   windows:
@@ -185,8 +185,8 @@ jobs:
       - name: Install nasm
         run: choco install nasm --no-progress -y
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - run: cargo build --workspace
-      - run: cargo test --workspace --lib
+      - run: cargo build --workspace --locked
+      - run: cargo test --workspace --lib --locked
 
   msrv:
     name: MSRV 1.75 (informational)
@@ -203,4 +203,4 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config perl \
             libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
-      - run: cargo check --workspace
+      - run: cargo check --workspace --locked

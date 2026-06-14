@@ -209,7 +209,7 @@ per-OS app directory:
 
 ```
 +----------------------------------------------------------------------+
-| huddle 2.1.2  ·  745e-fe8a-…  ·  relay ●               12:34 UTC     |
+| huddle 2.1.3  ·  745e-fe8a-…  ·  relay ●               12:34 UTC     |
 +------------------------+---------------------------------------------+
 | ▾ Profile              | # general                                   |
 |   alice  HD-AAAA-…  ●  |   4 members · encrypted                     |
@@ -660,6 +660,37 @@ native dialog for a path-entry box.
   rotates on a schedule + on membership change), bounding the exposure
   window; the full fix — a Double Ratchet seeded from the hybrid root key —
   is sequenced in `docs/ROADMAP-2.0-and-beyond.md`.
+
+## What's new in 2.1.3 — reliability & hardening quick-wins
+
+A focused follow-up to the 2.1.2 audit: small, additive, independently-verified
+fixes that remove two real footguns and tighten the build. All wire-compatible.
+
+- **No more "appears permanently offline" (per-door connect timeout).** The relay
+  reconnect loop now bounds each transport door with a timeout (longer for Tor /
+  Arti, short for clearnet), so a hung door — especially Arti's first-run Tor
+  bootstrap on a Tor-hostile network — is treated as failed and the loop falls
+  through to the clearnet fallback instead of starving it.
+- **A panic can no longer cascade into total DB failure.** All in-process shared
+  state (the DB connection + the AppHandle/network maps) moved from
+  `std::sync::Mutex` to `parking_lot::Mutex`, which is **not poisoned** by a
+  panic-while-locked — so one transient bug can't make every later `.lock()`
+  panic for the rest of the session. (Guards stay `!Send`, so the "never hold a
+  lock across `.await`" invariant is unchanged.)
+- **Faster relay writes.** The relay DB now runs in **WAL + `synchronous=NORMAL`**
+  (the client already did), dropping the per-commit double-fsync on the hot
+  mailbox-enqueue path under offline fan-out.
+- **The crown-jewel seed is wiped from memory on the load path.** The Ed25519
+  identity seed (from which every DM, PeerId, ML-KEM and ML-DSA key derives) is
+  now held in `Zeroizing` from the moment it leaves the DB, so it's scrubbed on
+  drop instead of lingering in a plain heap allocation.
+- **One source of truth for the Argon2id KDF.** The room-passphrase and master-key
+  KDFs now build their parameters from a single shared constructor, so they can
+  never silently drift (a desync would brick at-rest decryption).
+- **Stronger CI gates.** A frozen-byte wire golden-corpus test now pins the exact
+  serialized bytes of every wire variant (any non-additive rename/retype/reorder
+  fails CI); the NSR-1 mailbox shed-not-evict fix has a regression test; and every
+  CI/release `cargo build|test|check` is pinned to `Cargo.lock` with `--locked`.
 
 ## What's new in 2.1.2 — adversarial-audit hardening pass
 

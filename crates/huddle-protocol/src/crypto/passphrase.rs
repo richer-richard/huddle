@@ -30,6 +30,18 @@ pub fn random_salt() -> [u8; SALT_LEN] {
     salt
 }
 
+/// huddle 2.1.3: the single source of truth for huddle's Argon2id cost
+/// parameters — the strong RFC 9106 / OWASP profile (64 MiB memory, 3 iterations,
+/// 4 lanes). BOTH the room-passphrase KDF (`derive_key_zeroizing`) and the
+/// master-key KDF (`storage::keychain::derive_master_key`) build their `Params`
+/// here, so the two can never silently drift — a desync (e.g. a future memory-cost
+/// bump applied to only one) would brick at-rest decryption + room-key unwrap.
+/// `out_len` is the desired derived-key length in bytes.
+pub fn argon2id_params(out_len: usize) -> Result<Params> {
+    Params::new(65_536, 3, 4, Some(out_len))
+        .map_err(|e| ProtocolError::Session(format!("argon2 params: {e}")))
+}
+
 /// Derive a 32-byte symmetric key from a passphrase and salt using
 /// Argon2id. Parameters follow the strong RFC 9106 / OWASP profile
 /// (64 MiB memory, 3 iterations, 4 lanes) and must stay in sync with the
@@ -46,8 +58,7 @@ pub fn derive_key(passphrase: &str, salt: &[u8]) -> Result<[u8; KEY_LEN]> {
 /// zeroize-on-drop wrapper. Callers that want defense-in-depth against
 /// heap-residency leaks should prefer this over `derive_key`.
 pub fn derive_key_zeroizing(passphrase: &str, salt: &[u8]) -> Result<Zeroizing<[u8; KEY_LEN]>> {
-    let params = Params::new(65_536, 3, 4, Some(KEY_LEN))
-        .map_err(|e| ProtocolError::Session(format!("argon2 params: {e}")))?;
+    let params = argon2id_params(KEY_LEN)?;
     let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut out = Zeroizing::new([0u8; KEY_LEN]);
     argon

@@ -260,6 +260,17 @@ async fn main() -> Result<()> {
         std::env::var("HUDDLE_SERVER_DB").unwrap_or_else(|_| "huddle-server.db".to_string());
 
     let conn = Connection::open(&db_path)?;
+    // huddle 2.1.3 (perf): WAL + synchronous=NORMAL. The default rollback-journal
+    // + synchronous=FULL mode does ~2 fsyncs per autocommit, and every mailbox
+    // enqueue on the hot publish fan-out is its own autocommit INSERT — so a
+    // publish to a mostly-offline N-member room paid N fsync-bearing commits. WAL
+    // appends and defers fsync to checkpoint while preserving crash safety, and
+    // NORMAL drops the per-commit double-sync; busy_timeout avoids spurious
+    // SQLITE_BUSY under the (still single-writer) global lock. The client storage
+    // layer already runs WAL (huddle-core storage/mod.rs); the relay never did.
+    conn.execute_batch(
+        "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;",
+    )?;
     migrate(&conn)?;
     let shared = Arc::new(Shared {
         db: Mutex::new(conn),
@@ -1472,7 +1483,8 @@ fn delete_mailbox_ids(c: &Connection, ids: &[i64]) -> Result<()> {
 mod tests {
     use super::{
         enqueue, flush_mailbox, migrate, next_room_seq, peek_mailbox, request_target, ClientMsg,
-        ConnectTokens, Connection, Metrics, OutEvent, ServerMsg, Shared, OUTBOUND_CAP,
+        ConnectTokens, Connection, Metrics, OutEvent, ServerMsg, Shared, MAX_MAILBOX_PER_FP,
+        OUTBOUND_CAP,
     };
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -1711,6 +1723,48 @@ mod tests {
             mailbox_count(&shared, fp).await,
             2,
             "acks=true never deletes in flush; it waits for the client's Ack"
+        );
+    }
+
+    #[test]
+    fn enqueue_per_fp_cap_sheds_without_evicting_older_rows() {
+        // huddle 2.1.2 (audit NSR-1): when a recipient reaches MAX_MAILBOX_PER_FP
+        // the relay SHEDS the new row (enqueue returns Ok(false)) rather than the
+        // old newest-wins trim that kept the freshest 500 and deleted older rows.
+        // So a peer flooding an offline recipient can fill that mailbox but can NOT
+        // evict the recipient's already-queued messages from honest senders. This
+        // test would fail against the pre-2.1.2 trim, which deleted the oldest row.
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        let fp = "victim-fp";
+
+        // Honest sender queues the first (oldest) message.
+        assert!(enqueue(&conn, "honest", fp, "room", "honest-msg", "p").unwrap());
+        // An attacker floods the recipient right up to the cap.
+        for i in 1..MAX_MAILBOX_PER_FP {
+            assert!(enqueue(&conn, "attacker", fp, "room", &format!("flood-{i}"), "p").unwrap());
+        }
+        assert_eq!(
+            peek_mailbox(&conn, fp).unwrap().len(),
+            MAX_MAILBOX_PER_FP,
+            "mailbox is exactly at the per-recipient cap"
+        );
+
+        // The next message is SHED, not accepted-with-eviction.
+        assert!(
+            !enqueue(&conn, "attacker", fp, "room", "overflow", "p").unwrap(),
+            "an over-cap enqueue must shed (Ok(false))"
+        );
+
+        let rows = peek_mailbox(&conn, fp).unwrap();
+        assert_eq!(
+            rows.len(),
+            MAX_MAILBOX_PER_FP,
+            "shedding keeps the count at cap"
+        );
+        assert!(
+            rows.iter().any(|(_, _, msg_id, _)| msg_id == "honest-msg"),
+            "NSR-1: the oldest honest message must NOT be evicted by the flood"
         );
     }
 }

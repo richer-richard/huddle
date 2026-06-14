@@ -16,7 +16,8 @@
 //! exactly the same point (and only when needed) as before.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+
+use parking_lot::Mutex;
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
@@ -108,7 +109,6 @@ impl SasActor {
     pub fn reap(&self, now: i64) {
         self.flows
             .lock()
-            .unwrap()
             .retain(|_, f| now - f.created_at <= SAS_FLOW_TTL_SECS);
     }
 
@@ -122,7 +122,7 @@ impl SasActor {
     ) -> (String, Vec<SasOutcome>) {
         let (tx_id_bytes, our_secret, our_pub) = sas::new_session();
         let tx_id = B64.encode(tx_id_bytes);
-        self.flows.lock().unwrap().insert(
+        self.flows.lock().insert(
             tx_id.clone(),
             SasFlow {
                 room_id: room_id.to_string(),
@@ -154,7 +154,7 @@ impl SasActor {
     /// finalizing if the partner already matched.
     pub fn user_match(&self, tx_id: &str, _now: i64) -> Result<Vec<SasOutcome>, SasError> {
         let (room_id, partner_fp, do_finish, pq_capable) = {
-            let mut flows = self.flows.lock().unwrap();
+            let mut flows = self.flows.lock();
             let flow = flows.get_mut(tx_id).ok_or(SasError::UnknownTx)?;
             // huddle 1.3.4: never confirm before the code has actually been
             // derived from the partner's ephemeral key — otherwise a user could
@@ -183,7 +183,7 @@ impl SasActor {
             },
         }];
         if do_finish {
-            self.flows.lock().unwrap().remove(tx_id);
+            self.flows.lock().remove(tx_id);
             outcomes.push(SasOutcome::Finalize {
                 room_id,
                 partner_fingerprint: partner_fp,
@@ -195,7 +195,7 @@ impl SasActor {
 
     /// Phase G: cancel an in-flight SAS — drop our local state (quiet teardown).
     pub fn cancel(&self, tx_id: &str) {
-        self.flows.lock().unwrap().remove(tx_id);
+        self.flows.lock().remove(tx_id);
     }
 
     /// Inbound `SasInit` (post-`verify_signed`). `partner_ek_lookup` resolves the
@@ -244,7 +244,7 @@ impl SasActor {
         // global cap plus a per-partner sub-cap, so one peer streaming distinct
         // tx_ids can't starve everyone else.
         {
-            let flows = self.flows.lock().unwrap();
+            let flows = self.flows.lock();
             if !flows.contains_key(&tx_id) {
                 if flows.len() >= SAS_FLOWS_CAP {
                     warn!(%tx_id, "sas_flows at global cap; dropping inbound SasInit");
@@ -280,7 +280,7 @@ impl SasActor {
                 return vec![];
             }
         };
-        self.flows.lock().unwrap().insert(
+        self.flows.lock().insert(
             tx_id.clone(),
             SasFlow {
                 room_id: room_id.to_string(),
@@ -344,7 +344,7 @@ impl SasActor {
         let partner_ek = partner_ek_lookup(&signer);
         let partner_pq_capable = partner_ek.is_some();
         let code = {
-            let mut flows = self.flows.lock().unwrap();
+            let mut flows = self.flows.lock();
             let flow = match flows.get_mut(&tx_id) {
                 Some(f) => f,
                 None => {
@@ -398,7 +398,7 @@ impl SasActor {
             Some(fp) => fp,
             None => return vec![],
         };
-        let mut flows = self.flows.lock().unwrap();
+        let mut flows = self.flows.lock();
         let flow = match flows.get_mut(tx_id) {
             Some(f) => f,
             None => return vec![],
