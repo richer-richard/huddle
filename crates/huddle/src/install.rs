@@ -338,11 +338,16 @@ fn install_windows(bin: &Path) -> Result<PathBuf> {
         if let Some(parent) = lnk.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
+        // huddle 2.1.2 (audit SCB-5): these paths are interpolated into single-quoted
+        // PowerShell literals, so a `'` in %APPDATA%/%LOCALAPPDATA% would break out of
+        // the literal. Escape it the PowerShell way (`'` -> `''`). Impact was only
+        // local self-injection (the paths are env-derived, never peer/relay input),
+        // but quoting it correctly removes the foot-gun.
+        let lnk_lit = lnk.display().to_string().replace('\'', "''");
+        let target_lit = dest.display().to_string().replace('\'', "''");
         let script = format!(
-            "$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{lnk}');\
-             $s.TargetPath='{target}';$s.Save()",
-            lnk = lnk.display(),
-            target = dest.display()
+            "$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{lnk_lit}');\
+             $s.TargetPath='{target_lit}';$s.Save()"
         );
         let _ = Command::new("powershell")
             .args(["-NoProfile", "-NonInteractive", "-Command", &script])

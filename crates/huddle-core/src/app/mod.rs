@@ -3572,7 +3572,7 @@ impl AppHandle {
                 // doors (no URL / wrong build) are skipped.
                 let mut connected: Option<(
                     ServerClient,
-                    tokio::sync::mpsc::UnboundedReceiver<ServerEvent>,
+                    tokio::sync::mpsc::Receiver<ServerEvent>,
                     TransportId,
                 )> = None;
                 for id in &order {
@@ -5450,7 +5450,14 @@ impl AppHandle {
                 // huddle 2.0.7 (WS2 foundations): the ECDH+HKDF wrap-key derivation
                 // is one tested helper in huddle-protocol (was open-coded here and
                 // in the CodeJoinResponse handler).
-                let wrap_key = crate::crypto::code_join::derive_wrap_key(&our_secret, &their_pub);
+                let wrap_key =
+                    match crate::crypto::code_join::derive_wrap_key(&our_secret, &their_pub) {
+                        Ok(k) => k,
+                        Err(e) => {
+                            warn!(%e, "CodeJoinRequest: wrap-key derivation failed");
+                            return;
+                        }
+                    };
                 // Wrap our session key under the ECDH-derived key,
                 // reusing the existing AEAD primitives.
                 let wrapped = match passphrase::wrap(wrap_input.as_bytes(), &wrap_key) {
@@ -5495,6 +5502,30 @@ impl AppHandle {
                         return;
                     }
                 };
+                // huddle 2.1.2 (audit PA-2): authenticate the responder as a
+                // legitimate owner before installing its session/membership — and
+                // before consuming the pending code-join state. `creator_fingerprint`
+                // is bound into `room_id` via `derive_room_id`, so it is the one
+                // owner identity a fresh code-joiner can trust before it has learned
+                // the (signed) owner roster; we also accept any owner already pinned
+                // locally. Without this, ANY room-topic observer that saw the joiner's
+                // broadcast ephemeral pubkey could forge a signed response, install an
+                // attacker-keyed inbound session + phantom membership, and (by taking
+                // the pending secret first) DoS the genuine owner's response.
+                let authorized_owner = {
+                    let creator = self
+                        .active_rooms
+                        .lock()
+                        .unwrap()
+                        .get(room_id)
+                        .map(|r| r.info.creator_fingerprint.clone());
+                    creator.as_deref() == Some(owner_fp.as_str())
+                        || self.is_owner(room_id, &owner_fp)
+                };
+                if !authorized_owner {
+                    warn!(%owner_fp, %room_id, "CodeJoinResponse signer is not the room creator/owner; dropping");
+                    return;
+                }
                 let our_secret = match self
                     .pending_code_secrets
                     .lock()
@@ -5514,7 +5545,14 @@ impl AppHandle {
                         return;
                     }
                 };
-                let wrap_key = crate::crypto::code_join::derive_wrap_key(&our_secret, &owner_pub);
+                let wrap_key =
+                    match crate::crypto::code_join::derive_wrap_key(&our_secret, &owner_pub) {
+                        Ok(k) => k,
+                        Err(e) => {
+                            warn!(%e, "CodeJoinResponse: wrap-key derivation failed");
+                            return;
+                        }
+                    };
                 let session_key_bytes =
                     match passphrase::unwrap(&wrapped_session_key_b64, &wrap_key) {
                         Ok(b) => b,
@@ -7267,9 +7305,17 @@ impl AppHandle {
         // already failed — late chunks must not resurrect it.
         let expected_size = match repo::get_attachment(&self.db, room_id, &file_id) {
             Ok(Some(a)) => {
+                // huddle 2.1.2 (audit FILES-1): a terminal OR already-complete row
+                // means the transfer is done (cancelled, failed, ready, or saved).
+                // Late/duplicate chunks — including unauthenticated injected ones —
+                // must not resurrect it, nor (via the Err arm below) downgrade a
+                // completed attachment back to Failed.
                 if matches!(
                     a.status,
-                    AttachmentStatus::Cancelled | AttachmentStatus::Failed
+                    AttachmentStatus::Cancelled
+                        | AttachmentStatus::Failed
+                        | AttachmentStatus::Ready
+                        | AttachmentStatus::Saved
                 ) {
                     return;
                 }
@@ -7332,19 +7378,16 @@ impl AppHandle {
                 });
             }
             Err(e) => {
-                let msg = e.to_string();
-                warn!(%msg, "chunk processing failed");
-                let _ = repo::update_attachment_status(
-                    &self.db,
-                    room_id,
-                    &file_id,
-                    AttachmentStatus::Failed,
-                    Some(&msg),
-                );
-                let _ = self.app_event_tx.send(AppEvent::FileFailed {
-                    file_id: file_id.clone(),
-                    reason: msg,
-                });
+                // huddle 2.1.2 (audit FILES-1): FileChunk is unsigned by design —
+                // integrity comes from the SHA-256 assembly gate against `file_id`,
+                // so any peer/relay can inject a chunk for a public file_id. A
+                // rejected chunk (empty, oversize, index/total mismatch, …) must
+                // therefore NOT fail the whole transfer: that let one injected junk
+                // chunk cancel an in-flight transfer or downgrade a completed one to
+                // Failed. Drop the bad chunk and leave the attachment state intact;
+                // valid chunks from the real sender still drive it to completion (or
+                // it times out / is re-offered).
+                warn!(error = %e, %file_id, "dropping invalid file chunk (transfer state unchanged)");
             }
         }
     }

@@ -53,6 +53,14 @@ const MAX_NONCE_B64: usize = 256;
 /// (the server still closes it after its 20 s pre-auth timeout) can't make the
 /// writer's pre-auth `pending` queue grow without bound in the meantime.
 const MAX_PENDING_PREAUTH: usize = 1024;
+/// huddle 2.1.2 (audit NSR-3): bound the inbound `ServerEvent` channel so a
+/// malicious relay can't drive unbounded client memory growth (OOM) by injecting
+/// `Message` frames faster than the app consumer (decrypt + SQLite write) drains
+/// them. The reader awaits a full channel, so back-pressure flows to the WS read
+/// and closes the TCP window — the same memory-amplification defense the relay
+/// SERVER applies with `OUTBOUND_CAP`. 256 buffered events is ample for a healthy
+/// connection yet bounds worst-case buffered memory.
+const RELAY_EVENT_CAP: usize = 256;
 /// huddle 2.0.3 (audit N-M7): how often to send an application keepalive
 /// (`ClientMsg::Ping`) once authenticated. The relay reaps a socket that sends
 /// no frame for ~150 s, so a quiet-but-healthy connection must speak up well
@@ -135,7 +143,7 @@ impl ServerClient {
         dial: &crate::network::transport::DialMode,
         identity: Arc<Identity>,
         rooms: Vec<String>,
-    ) -> Result<(Self, mpsc::UnboundedReceiver<ServerEvent>)> {
+    ) -> Result<(Self, mpsc::Receiver<ServerEvent>)> {
         use crate::network::transport::DialMode;
         match dial {
             DialMode::Socks5 { proxy } => {
@@ -208,13 +216,17 @@ impl ServerClient {
         ws: WebSocketStream<S>,
         identity: Arc<Identity>,
         rooms: Vec<String>,
-    ) -> (Self, mpsc::UnboundedReceiver<ServerEvent>)
+    ) -> (Self, mpsc::Receiver<ServerEvent>)
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
         let (mut sink, mut stream) = ws.split();
         let (out_tx, mut out_rx) = mpsc::unbounded_channel::<ClientMsg>();
-        let (ev_tx, ev_rx) = mpsc::unbounded_channel::<ServerEvent>();
+        // huddle 2.1.2 (audit NSR-3): bounded so the reader back-pressures a
+        // flooding relay instead of buffering to OOM. (The outbound `out_tx` stays
+        // unbounded: its growth is bounded by the app's own publish rate, not by
+        // anything the untrusted relay controls.)
+        let (ev_tx, ev_rx) = mpsc::channel::<ServerEvent>(RELAY_EVENT_CAP);
 
         // huddle 1.1.4: we do NOT send `Hello` up front anymore. The relay
         // opens with a `Challenge`; the reader pump (below) signs that nonce
@@ -357,21 +369,25 @@ impl ServerClient {
                     // huddle 2.0.4: the unified `Ready` carries the relay-echoed
                     // fingerprint; we already know our own identity, so ignore it.
                     Ok(ServerMsg::Ready { .. }) => {
-                        let _ = ev_tx.send(ServerEvent::Ready);
+                        let _ = ev_tx.send(ServerEvent::Ready).await;
                     }
                     Ok(ServerMsg::Sent {
                         id,
                         delivered,
                         queued,
                     }) => {
-                        let _ = ev_tx.send(ServerEvent::Sent {
-                            id,
-                            delivered,
-                            queued,
-                        });
+                        let _ = ev_tx
+                            .send(ServerEvent::Sent {
+                                id,
+                                delivered,
+                                queued,
+                            })
+                            .await;
                     }
                     Ok(ServerMsg::ConnectToken { token, ttl_secs }) => {
-                        let _ = ev_tx.send(ServerEvent::ConnectToken { token, ttl_secs });
+                        let _ = ev_tx
+                            .send(ServerEvent::ConnectToken { token, ttl_secs })
+                            .await;
                     }
                     Ok(ServerMsg::ConnectTokenResolved {
                         fingerprint,
@@ -380,10 +396,12 @@ impl ServerClient {
                         // echoed `token`; the client doesn't need it.
                         ..
                     }) => {
-                        let _ = ev_tx.send(ServerEvent::ConnectTokenResolved {
-                            fingerprint,
-                            pubkey_b64,
-                        });
+                        let _ = ev_tx
+                            .send(ServerEvent::ConnectTokenResolved {
+                                fingerprint,
+                                pubkey_b64,
+                            })
+                            .await;
                     }
                     Ok(ServerMsg::Message {
                         room,
@@ -406,12 +424,14 @@ impl ServerClient {
                                 // huddle 2.0: pass the relay's mailbox row id (if
                                 // any) through so the consumer can ACK durable
                                 // receipt and let the relay delete the row.
-                                let _ = ev_tx.send(ServerEvent::Message {
-                                    room,
-                                    id,
-                                    payload,
-                                    mailbox_id,
-                                });
+                                let _ = ev_tx
+                                    .send(ServerEvent::Message {
+                                        room,
+                                        id,
+                                        payload,
+                                        mailbox_id,
+                                    })
+                                    .await;
                             }
                             Err(e) => warn!(error = %e, "server sent undecodable payload"),
                         }
@@ -421,7 +441,7 @@ impl ServerClient {
                     Err(e) => warn!(error = %e, "unparseable server message"),
                 }
             }
-            let _ = ev_tx.send(ServerEvent::Disconnected);
+            let _ = ev_tx.send(ServerEvent::Disconnected).await;
         });
 
         (Self { out_tx }, ev_rx)

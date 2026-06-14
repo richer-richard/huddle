@@ -19,6 +19,11 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
 
+# huddle 2.1.2 (audit SCB-1): every third-party action is pinned to a full commit
+# SHA (comment = the tag/branch it resolved to) so a silently repointed tag can't
+# run arbitrary code in jobs that hold the crates.io token or a contents:write
+# token. dtolnay/rust-toolchain is pinned to its `master` action commit with the
+# channel passed via the `toolchain:` input.
 jobs:
   # Build the three binaries per OS and attach them to the GitHub release.
   binaries:
@@ -26,6 +31,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
+      # huddle 2.1.2 (audit SCB-2): required to mint signed build-provenance
+      # attestations for the uploaded archives.
+      id-token: write
+      attestations: write
     strategy:
       fail-fast: false
       matrix:
@@ -40,14 +49,16 @@ jobs:
             target: x86_64-pc-windows-msvc
             ext: zip
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
           # huddle 2.0.3 (audit N-M8): don't leave the GITHUB_TOKEN in .git/config
           # where an untrusted dependency build script in this job could read it.
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Linux build/GUI system deps
         if: runner.os == 'Linux'
         run: |
@@ -62,8 +73,14 @@ jobs:
       - name: Package (unix)
         if: runner.os != 'Windows'
         shell: bash
+        # huddle 2.1.2 (audit SCB-3): pass the (attacker-influenceable) tag through
+        # an env var rather than interpolating ${{ }} straight into the script — the
+        # N-L11 pattern already used in fuzz.yml — so a crafted tag name can't inject
+        # shell commands. (matrix.target is a workflow-controlled constant.)
+        env:
+          REF_NAME: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
-          VER="${{ github.event.inputs.tag || github.ref_name }}"
+          VER="$REF_NAME"
           NAME="huddle-${VER}-${{ matrix.target }}"
           mkdir -p "dist/$NAME"
           cp target/release/huddle target/release/huddle-gui target/release/huddle-server "dist/$NAME/"
@@ -73,15 +90,28 @@ jobs:
       - name: Package (windows)
         if: runner.os == 'Windows'
         shell: pwsh
+        # huddle 2.1.2 (audit SCB-3): tag via env var, not inline ${{ }} (the bash
+        # job uses $REF_NAME; pwsh prefers $env:GITHUB_REF_NAME for tag pushes and
+        # falls back to the env-routed dispatch input).
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
         run: |
-          $VER = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { '${{ github.event.inputs.tag }}' }
+          $VER = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { $env:INPUT_TAG }
           $NAME = "huddle-$VER-${{ matrix.target }}"
           New-Item -ItemType Directory -Force -Path "dist/$NAME" | Out-Null
           Copy-Item target/release/huddle.exe,target/release/huddle-gui.exe,target/release/huddle-server.exe "dist/$NAME/"
           Compress-Archive -Path "dist/$NAME" -DestinationPath "dist/$NAME.zip"
           (Get-FileHash "dist/$NAME.zip" -Algorithm SHA256).Hash | Out-File "dist/$NAME.zip.sha256"
+      # huddle 2.1.2 (audit SCB-2): mint signed build provenance for the archive so
+      # a downstream user can cryptographically verify it was built by THIS workflow
+      # from this repo — `gh attestation verify <file> --repo <owner>/huddle` — which
+      # the co-located .sha256 (same trust domain as the artifact) cannot provide.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: dist/*.${{ matrix.ext }}
       - name: Attach to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           files: |
@@ -96,20 +126,23 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: stable
       - name: Generate CycloneDX SBOM
+        # huddle 2.1.2 (audit SCB-4): pin the tool version (not just --locked).
         run: |
-          cargo install cargo-cyclonedx --locked
+          cargo install cargo-cyclonedx --version 0.5.9 --locked
           cargo cyclonedx --format json --all
       - name: Collect SBOMs
         run: |
           mkdir -p sbom && find . -name '*.cdx.json' -exec cp {} sbom/ \; || true
       - name: Attach SBOM to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           files: sbom/*.json
@@ -122,11 +155,13 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ github.event_name == 'push' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Publish workspace to crates.io
         env:
           TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

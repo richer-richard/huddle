@@ -40,7 +40,7 @@ async fn wait_listening(port: u16) {
     panic!("server never started listening");
 }
 
-type Rx = tokio::sync::mpsc::UnboundedReceiver<ServerEvent>;
+type Rx = tokio::sync::mpsc::Receiver<ServerEvent>;
 
 /// Pull the next `Message` event, skipping handshake/receipt events.
 async fn next_message(rx: &mut Rx) -> (String, Vec<u8>) {

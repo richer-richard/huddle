@@ -21,15 +21,21 @@ jobs:
     name: cargo-fuzz smoke
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
-      - uses: Swatinem/rust-cache@v2
+      # huddle 2.1.2 (audit SCB-1): third-party actions pinned to commit SHAs;
+      # dtolnay/rust-toolchain pinned to its master commit with the channel passed
+      # via the `toolchain:` input.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: nightly
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Build deps
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config perl
+      # huddle 2.1.2 (audit SCB-4): pin the tool version (not just --locked).
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
       - name: Run each target briefly
         working-directory: crates/huddle-core
         # huddle 2.0.3 (audit N-L11): pass the workflow input through an env var

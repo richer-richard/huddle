@@ -209,7 +209,7 @@ per-OS app directory:
 
 ```
 +----------------------------------------------------------------------+
-| huddle 2.1.1  ·  745e-fe8a-…  ·  relay ●               12:34 UTC     |
+| huddle 2.1.2  ·  745e-fe8a-…  ·  relay ●               12:34 UTC     |
 +------------------------+---------------------------------------------+
 | ▾ Profile              | # general                                   |
 |   alice  HD-AAAA-…  ●  |   4 members · encrypted                     |
@@ -660,6 +660,44 @@ native dialog for a path-entry box.
   rotates on a schedule + on membership change), bounding the exposure
   window; the full fix — a Double Ratchet seeded from the hybrid root key —
   is sequenced in `docs/ROADMAP-2.0-and-beyond.md`.
+
+## What's new in 2.1.2 — adversarial-audit hardening pass
+
+A read-only adversarial review of the whole repo (7 surfaces, every finding
+independently verified) turned up a cluster of edge-case issues — none in the
+crypto or relay-server core, which held up — now fixed. All changes are
+**additive and wire-compatible** (1.x↔2.x interop is unchanged):
+
+- **Code-join membership injection closed (PA-2).** A `CodeJoinResponse` is now
+  accepted only from the room **creator** (whose fingerprint is bound into the
+  room id) or a locally-known owner, checked *before* the pending join state is
+  consumed. Previously any room-topic observer who saw a joiner's ephemeral
+  pubkey could inject an attacker-keyed session + phantom membership and stall
+  the real join.
+- **Relay can no longer evict your queued mail (NSR-1).** The offline mailbox's
+  per-recipient cap now **sheds** an over-cap message instead of trimming to the
+  newest rows, so a peer flooding `SendDirect` to an offline recipient can't
+  silently delete that recipient's already-queued messages from honest senders.
+- **Relay client is OOM-resistant (NSR-3).** The inbound event channel is now
+  bounded with back-pressure, so a malicious relay can't drive unbounded client
+  memory growth by flooding messages faster than they're processed.
+- **File transfers can't be griefed by injected chunks (FILES-1).** `FileChunk`
+  is unsigned by design (integrity comes from the SHA-256 assembly gate), so a
+  rejected/injected chunk now just drops — it can no longer fail an in-flight
+  transfer or downgrade a completed one.
+- **Relay storage hardening (NSR-4)** — global cap + GC for the membership and
+  per-room-sequence tables; **code-join ECDH** now rejects non-contributory
+  (small-order) peer keys, matching the DM/SAS paths (CR-1).
+- **Supply-chain / CI hardening** — every GitHub Action is pinned to a full
+  commit SHA (SCB-1), release archives now carry signed build-provenance
+  attestations (`gh attestation verify …`, SCB-2), the release tag is passed to
+  shell steps via env vars not inline interpolation (SCB-3), and the CI gate
+  tools are version-pinned (SCB-4).
+
+Two lower-severity items (a relay-visible `SHA-256(plaintext)` file-confirmation
+oracle, and the code-join code traveling in cleartext on the room topic) require
+a non-additive wire change and are deferred to a future version-negotiation
+window rather than breaking 1.x↔2.x compatibility in a patch.
 
 ## What's new in 2.1.1 — connection priority you can tune (and that applies live)
 

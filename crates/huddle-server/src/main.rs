@@ -92,6 +92,14 @@ const MAX_ROOMS_PER_HELLO: usize = 1000;
 /// the `memberships` table can't be grown without bound by re-Hello'ing fresh
 /// room ids. Far above any real user's room count.
 const MAX_ROOMS_PER_FP: usize = 10_000;
+/// huddle 2.1.2 (audit NSR-4): GLOBAL ceiling on total membership rows across ALL
+/// identities. The per-fp cap (L-17) bounds rooms-per-identity but not the table
+/// globally — auth mints free Ed25519 identities and membership rows persist past
+/// disconnect (only Unsubscribe deletes), so identity churn grows the table
+/// monotonically. Mirrors the H-2 mailbox ceiling: shed new memberships when full.
+/// Far above any real relay's membership count; operators with more storage may
+/// raise it.
+const MAX_MEMBERSHIPS_TOTAL: usize = 10_000_000;
 /// huddle 1.3.4: cap concurrent sockets a single authenticated fingerprint may
 /// register. Each registered connection is a target in the per-room publish
 /// fan-out (one `ServerMsg` clone + `try_send` apiece), so an identity opening
@@ -278,6 +286,20 @@ async fn main() -> Result<()> {
                     }
                     Ok(_) => {}
                     Err(e) => debug!(error = %e, "mailbox GC failed"),
+                }
+                // huddle 2.1.2 (audit NSR-4): GC orphaned per-room sequence rows.
+                // `room_seq` gains one undeleted row per distinct room ever published
+                // to; drop those whose room no longer has any member so the table
+                // can't grow without bound under room-id churn. Safe: a room with no
+                // members has no delivery order to preserve (and `seq` isn't consumed
+                // client-side yet), so if it re-forms its sequence simply restarts.
+                match db.execute(
+                    "DELETE FROM room_seq WHERE room NOT IN (SELECT room FROM memberships)",
+                    [],
+                ) {
+                    Ok(n) if n > 0 => debug!(removed = n, "room_seq GC: dropped orphaned rows"),
+                    Ok(_) => {}
+                    Err(e) => debug!(error = %e, "room_seq GC failed"),
                 }
             }
         });
@@ -1301,24 +1323,35 @@ fn migrate(c: &Connection) -> Result<()> {
 }
 
 fn add_membership(c: &Connection, fp: &str, room: &str) -> Result<()> {
-    // huddle 2.0.2 (audit L-17): bound distinct rooms per identity. Re-asserting
-    // an existing (fp,room) is always allowed (idempotent); only NEW rooms beyond
-    // the cap are shed. The COUNT uses the memberships(fingerprint,room) primary
-    // key index, so it stays cheap on the hot publish path.
-    let count: i64 = c.query_row(
+    // Fast path: re-asserting an existing (fp,room) is always allowed (idempotent)
+    // and costs only a primary-key-indexed lookup — the common case on the hot
+    // publish path, where the sender's own membership already exists. Doing this
+    // first keeps the heavier cap COUNTs off that path entirely.
+    let exists: i64 = c.query_row(
+        "SELECT COUNT(*) FROM memberships WHERE fingerprint = ?1 AND room = ?2",
+        params![fp, room],
+        |r| r.get(0),
+    )?;
+    if exists > 0 {
+        return Ok(());
+    }
+    // huddle 2.0.2 (audit L-17): bound distinct rooms per identity. Uses the
+    // memberships(fingerprint, …) primary-key index.
+    let per_fp: i64 = c.query_row(
         "SELECT COUNT(*) FROM memberships WHERE fingerprint = ?1",
         params![fp],
         |r| r.get(0),
     )?;
-    if count as usize >= MAX_ROOMS_PER_FP {
-        let exists: i64 = c.query_row(
-            "SELECT COUNT(*) FROM memberships WHERE fingerprint = ?1 AND room = ?2",
-            params![fp, room],
-            |r| r.get(0),
-        )?;
-        if exists == 0 {
-            return Ok(()); // at cap; shed the new membership silently
-        }
+    if per_fp as usize >= MAX_ROOMS_PER_FP {
+        return Ok(()); // at per-identity cap; shed the new membership silently
+    }
+    // huddle 2.1.2 (audit NSR-4): GLOBAL membership ceiling so identity churn can't
+    // grow the table without bound (the per-fp cap above doesn't bound it globally).
+    // The full-table COUNT runs ONLY here, on a genuinely-new insert — never on the
+    // hot path's existing-membership re-assert, which already returned above.
+    let total: i64 = c.query_row("SELECT COUNT(*) FROM memberships", [], |r| r.get(0))?;
+    if total as usize >= MAX_MEMBERSHIPS_TOTAL {
+        return Ok(()); // relay membership table full; shed silently
     }
     c.execute(
         "INSERT OR IGNORE INTO memberships(fingerprint, room) VALUES(?1, ?2)",
@@ -1377,17 +1410,28 @@ fn enqueue(
     if by_sender as usize >= MAX_MAILBOX_PER_SENDER {
         return Ok(false);
     }
+    // huddle 2.1.2 (audit NSR-1): the per-RECIPIENT cap is enforced by SHEDDING the
+    // new row when the recipient is already at MAX_MAILBOX_PER_FP — NOT by the old
+    // trim that kept the NEWEST rows (`DELETE ... ORDER BY id DESC LIMIT 500`). That
+    // newest-wins trim let a peer flood ~500 junk `SendDirect` to an offline
+    // recipient and silently EVICT that recipient's older, legitimately-queued
+    // messages from honest senders (who had already been told `queued:1`), defeating
+    // even at-least-once delivery. Sheicng instead — exactly like the H-2 global
+    // ceiling and the N-H1 per-sender cap above — means a flooder can fill a victim's
+    // mailbox but can no longer push out messages already queued for them; the victim
+    // drains and frees slots on reconnect. Cheap on the hot path via idx_mailbox_fp.
+    let by_fp: i64 = c.query_row(
+        "SELECT COUNT(*) FROM mailbox WHERE fingerprint = ?1",
+        params![fp],
+        |r| r.get(0),
+    )?;
+    if by_fp as usize >= MAX_MAILBOX_PER_FP {
+        return Ok(false);
+    }
     c.execute(
         "INSERT INTO mailbox(fingerprint, room, msg_id, payload_b64, created_at, sender)
          VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
         params![fp, room, id, payload_b64, now_unix(), sender],
-    )?;
-    // Trim to the newest MAX_MAILBOX_PER_FP entries for this recipient.
-    c.execute(
-        "DELETE FROM mailbox WHERE fingerprint = ?1 AND id NOT IN (
-            SELECT id FROM mailbox WHERE fingerprint = ?1 ORDER BY id DESC LIMIT ?2
-        )",
-        params![fp, MAX_MAILBOX_PER_FP as i64],
     )?;
     Ok(true)
 }

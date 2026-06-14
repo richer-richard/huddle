@@ -13,6 +13,7 @@ use sha2::Sha256;
 use x25519_dalek::{PublicKey, StaticSecret};
 
 use crate::crypto::passphrase::KEY_LEN;
+use crate::error::{ProtocolError, Result};
 
 /// HKDF info tag for the code-join wrap key. Part of the wire contract — both
 /// peers must use the same tag or the joiner can't unwrap.
@@ -21,13 +22,24 @@ const CODE_JOIN_INFO: &[u8] = b"huddle-code-join-v1";
 /// Derive the 32-byte wrap key both sides compute: `HKDF-SHA256` over the raw
 /// X25519 ECDH shared secret of `our_secret` and `their_pub`. The owner uses it
 /// to `passphrase::wrap` the session key; the joiner uses it to `unwrap`.
-pub fn derive_wrap_key(our_secret: &StaticSecret, their_pub: &PublicKey) -> [u8; KEY_LEN] {
+pub fn derive_wrap_key(our_secret: &StaticSecret, their_pub: &PublicKey) -> Result<[u8; KEY_LEN]> {
     let shared = our_secret.diffie_hellman(their_pub);
+    // huddle 2.1.2 (audit CR-1): reject a non-contributory (small-order) peer
+    // pubkey, the same defense-in-depth check the DM (`dm.rs`) and SAS
+    // (`sas.rs`) ECDH paths already perform. Two honest peers always produce a
+    // contributory secret, so this never rejects a real code-join.
+    if !shared.was_contributory() {
+        return Err(ProtocolError::Session(
+            "code-join key agreement rejected: peer X25519 pubkey is non-contributory \
+             (small-order point)"
+                .into(),
+        ));
+    }
     let hk = Hkdf::<Sha256>::new(None, shared.as_bytes());
     let mut wrap_key = [0u8; KEY_LEN];
     hk.expand(CODE_JOIN_INFO, &mut wrap_key)
         .expect("32 bytes is within HKDF-SHA256's output limit");
-    wrap_key
+    Ok(wrap_key)
 }
 
 #[cfg(test)]
@@ -42,8 +54,8 @@ mod tests {
         let owner_pub = PublicKey::from(&owner);
         let joiner_pub = PublicKey::from(&joiner);
         // Owner derives against the joiner's pubkey; joiner against the owner's.
-        let k_owner = derive_wrap_key(&owner, &joiner_pub);
-        let k_joiner = derive_wrap_key(&joiner, &owner_pub);
+        let k_owner = derive_wrap_key(&owner, &joiner_pub).unwrap();
+        let k_joiner = derive_wrap_key(&joiner, &owner_pub).unwrap();
         assert_eq!(k_owner, k_joiner, "ECDH is commutative -> same wrap key");
     }
 
@@ -52,6 +64,19 @@ mod tests {
         let owner = StaticSecret::random_from_rng(OsRng);
         let a = PublicKey::from(&StaticSecret::random_from_rng(OsRng));
         let b = PublicKey::from(&StaticSecret::random_from_rng(OsRng));
-        assert_ne!(derive_wrap_key(&owner, &a), derive_wrap_key(&owner, &b));
+        assert_ne!(
+            derive_wrap_key(&owner, &a).unwrap(),
+            derive_wrap_key(&owner, &b).unwrap()
+        );
+    }
+
+    #[test]
+    fn rejects_small_order_peer_pubkey() {
+        // huddle 2.1.2 (audit CR-1): a small-order Montgomery point yields a
+        // non-contributory shared secret and must be rejected.
+        let owner = StaticSecret::random_from_rng(OsRng);
+        // All-zero is the canonical small-order (identity) X25519 point.
+        let small_order = PublicKey::from([0u8; 32]);
+        assert!(derive_wrap_key(&owner, &small_order).is_err());
     }
 }
