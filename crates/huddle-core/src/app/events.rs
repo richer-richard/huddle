@@ -26,6 +26,12 @@ pub struct DiscoveredRoom {
     /// two members don't include us, so a DM never leaks into a third
     /// party's sidebar.
     pub kind: RoomKind,
+    /// huddle 2.2 (M-C4): the announcer's capability bitset
+    /// (`huddle_protocol::capability`), from the (unsigned) `RoomAnnouncement`.
+    /// A best-effort discovery-time hint so a code-joiner can pick the PA-1-safe
+    /// proof form before subscribing; the authoritative source is the signed
+    /// `MemberAnnounce`. `None` = a pre-2.2 announcer.
+    pub capabilities: Option<u32>,
 }
 
 #[derive(Debug, Clone)]

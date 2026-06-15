@@ -68,6 +68,67 @@ impl AppHandle {
             })
     }
 
+    // -------------------------------------------------------------------
+    // huddle 2.2 (M-C4): peer capability tracking
+    // -------------------------------------------------------------------
+
+    /// Remember a peer's advertised capability bitset. Only ever called with
+    /// caps from a SIGNED `MemberAnnounce` (authoritative) or from the
+    /// `creator_fingerprint` of a `RoomAnnouncement` — both let a relay set only
+    /// its own row at worst, never forge another identity's caps. Monotonic
+    /// within a session: we OR in new bits rather than letting a (possibly
+    /// stale or downgrade-attempting) later announce clear a capability we
+    /// already saw a peer prove. `None`/absent caps are a no-op.
+    pub(crate) fn record_peer_capabilities(&self, fingerprint: &str, caps: Option<u32>) {
+        let Some(caps) = caps else { return };
+        if caps == 0 {
+            return;
+        }
+        let mut map = self.peer_capabilities.lock();
+        let entry = map.entry(fingerprint.to_string()).or_insert(0);
+        *entry |= caps;
+    }
+
+    /// True iff EVERY current member of `room_id` other than us is known to
+    /// support `cap`. Used to gate a broadcast (e.g. FILES-2 private file
+    /// metadata) that a single legacy recipient couldn't parse — conservative:
+    /// any member whose caps we haven't learned yet makes this false, so we
+    /// keep the legacy form until the whole room is provably capable.
+    pub(crate) fn room_all_support(&self, room_id: &str, cap: u32) -> bool {
+        let our_fp = self.identity.fingerprint().to_string();
+        let members: Vec<String> = {
+            let rooms = self.active_rooms.lock();
+            match rooms.get(room_id) {
+                Some(r) => r.members.iter().cloned().collect(),
+                None => return false,
+            }
+        };
+        let caps = self.peer_capabilities.lock();
+        members.iter().filter(|fp| **fp != our_fp).all(|fp| {
+            huddle_protocol::capability::supports(caps.get(fp).copied().unwrap_or(0), cap)
+        })
+    }
+
+    /// huddle 2.2 (audit PA-1): sliding-window rate limiter for code-join proof
+    /// verification (each is one memory-hard Argon2id). Returns true and counts
+    /// the attempt when under budget; false to drop without verifying. Caps
+    /// both a forged-request CPU/memory flood and online code guesses.
+    pub(crate) fn allow_code_proof_attempt(&self, room_id: &str) -> bool {
+        const WINDOW_SECS: i64 = 60;
+        const MAX_PER_WINDOW: u32 = 10;
+        let now = now_unix();
+        let mut map = self.code_proof_attempts.lock();
+        let entry = map.entry(room_id.to_string()).or_insert((now, 0));
+        if now - entry.0 >= WINDOW_SECS {
+            *entry = (now, 0);
+        }
+        if entry.1 >= MAX_PER_WINDOW {
+            return false;
+        }
+        entry.1 += 1;
+        true
+    }
+
     pub(crate) async fn announce_room_now(&self, info: &StoredRoom, member_count: u32) {
         let owner_fingerprints = repo::list_room_owners(&self.db, &info.id).unwrap_or_default();
         let verified_only = repo::get_room_verified_only(&self.db, &info.id).unwrap_or(false);
@@ -84,6 +145,9 @@ impl AppHandle {
             verified_only,
             host_addrs,
             kind: info.kind,
+            // huddle 2.2 (M-C4): surface our caps at discovery time so a
+            // prospective code-joiner can pick the PA-1-safe proof form.
+            capabilities: Some(huddle_protocol::capability::OURS),
         };
         self.network.announce_room(ann).await;
     }
@@ -146,6 +210,10 @@ impl AppHandle {
             sender_ed25519_pubkey: Some(B64.encode(self.identity.public_bytes())),
             sender_mlkem_pubkey,
             mlkem_ciphertext,
+            // huddle 2.2 (M-C4): advertise what new wire forms this build speaks,
+            // so peers can retire legacy/cleartext forms only between two
+            // known-capable ends. Inside the signed envelope → unforgeable.
+            capabilities: Some(huddle_protocol::capability::OURS),
         };
         // huddle 0.7.11: MemberAnnounce is now signed end-to-end. On the send
         // path the inner `sender_ed25519_pubkey` equals the envelope's pubkey by

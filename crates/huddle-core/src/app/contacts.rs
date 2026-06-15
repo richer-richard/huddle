@@ -267,6 +267,8 @@ impl AppHandle {
             host_addrs: Vec::new(),
             // Invites are group-scoped — DMs are 1-1 and never invited.
             kind: RoomKind::Group,
+            // The invite carries no capability hint; learned on first announce.
+            capabilities: None,
         };
         self.discovered_rooms
             .lock()

@@ -569,9 +569,22 @@ async fn phase_f_code_join_round_trip() {
         return;
     }
 
-    // A issues a code. Caller is the owner; passes our_fp check.
+    // A issues a code. Caller is the owner; passes our_fp check. huddle 2.2
+    // (audit PA-1): the code is `v2-XXXX-XXXX` — the `v2-` marker (3 chars) plus
+    // the 4-dash-4 body (9 chars) = 12. The marker is the out-of-band capability
+    // anchor that makes B send the proof form instead of the cleartext code.
     let code = handle_a.generate_join_code(&room_id).unwrap();
-    assert_eq!(code.len(), 9, "code is 4-dash-4 = 9 chars: {}", code);
+    assert_eq!(
+        code.len(),
+        12,
+        "code is v2- + 4-dash-4 = 12 chars: {}",
+        code
+    );
+    assert!(
+        code.starts_with("v2-"),
+        "v2 owner issues a marked code: {}",
+        code
+    );
 
     // B joins using the code. Round-trip should establish an inbound
     // Megolm session on B keyed by A's fingerprint.

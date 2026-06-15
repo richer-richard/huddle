@@ -209,7 +209,7 @@ per-OS app directory:
 
 ```
 +----------------------------------------------------------------------+
-| huddle 2.1.3  ·  745e-fe8a-…  ·  relay ●               12:34 UTC     |
+| huddle 2.2.0  ·  745e-fe8a-…  ·  relay ●               12:34 UTC     |
 +------------------------+---------------------------------------------+
 | ▾ Profile              | # general                                   |
 |   alice  HD-AAAA-…  ●  |   4 members · encrypted                     |
@@ -660,6 +660,33 @@ native dialog for a path-entry box.
   rotates on a schedule + on membership change), bounding the exposure
   window; the full fix — a Double Ratchet seeded from the hybrid root key —
   is sequenced in `docs/ROADMAP-2.0-and-beyond.md`.
+
+## What's new in 2.2.0 — closing the two deferred audit findings (PA-1, FILES-2)
+
+The 2.1.1 audit left two findings open because each retires a cleartext wire form,
+which isn't safe to do additively until both ends can negotiate it. 2.2.0 adds that
+negotiation (**M-C4**, a capability handshake carried in announcements) and closes
+both. All changes are **additive** — old peers interoperate unchanged.
+
+- **PA-1 (the serious one) — code-join no longer hands the join code to the relay.**
+  "Join by code" used to broadcast the single-use code *signed but in cleartext* on
+  the relay-readable room topic, so a malicious relay could lift it, forge a request
+  with its own key, and harvest the room's session key. Now a v2 joiner sends a
+  **memory-hard proof of knowledge** of the code (Argon2id, bound to its ephemeral
+  X25519 key + the room) instead of the code itself — the relay never sees the code
+  and can't rebind the proof to a forged key. The decision to use the proof form is
+  anchored in an **out-of-band marker on the code itself** (`v2-…`), so a malicious
+  relay can't strip a network capability bit to force the old cleartext path — it
+  never sees the out-of-band code. Owner-side verification is rate-limited and runs
+  off the hot lock.
+- **FILES-2 — the relay no longer learns `SHA-256(plaintext)` of your attachments.**
+  When every room member supports it, an encrypted file's offer now carries a
+  **keyed MAC** under the per-file key in place of the plaintext hash, so the relay
+  can no longer use the offer as a confirmation oracle for known files.
+- **M-C4 capability negotiation.** Peers advertise which new wire forms they speak
+  via an additive `capabilities` field on member/room announcements (inside the
+  signed envelope, so a relay can't forge it). This is the mechanism future
+  hardening (relay-auth channel-binding, per-room capability tokens) builds on.
 
 ## What's new in 2.1.3 — reliability & hardening quick-wins
 

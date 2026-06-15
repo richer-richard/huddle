@@ -50,6 +50,7 @@ fn hybrid_dm_full_handshake_end_to_end() {
         sender_ed25519_pubkey: Some(B64.encode(responder.public_bytes())),
         sender_mlkem_pubkey: Some(B64.encode(responder.mlkem_public_bytes())),
         mlkem_ciphertext: None,
+        capabilities: None,
     };
     let responder_announce = wire_round_trip(&responder_announce);
 
@@ -79,6 +80,7 @@ fn hybrid_dm_full_handshake_end_to_end() {
         sender_ed25519_pubkey: Some(B64.encode(initiator.public_bytes())),
         sender_mlkem_pubkey: Some(B64.encode(initiator.mlkem_public_bytes())),
         mlkem_ciphertext: Some(B64.encode(&ciphertext)),
+        capabilities: None,
     };
     let initiator_announce = wire_round_trip(&initiator_announce);
 

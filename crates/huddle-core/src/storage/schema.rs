@@ -395,4 +395,11 @@ pub const MIGRATIONS: &[&str] = &[
         kind TEXT NOT NULL,
         detail TEXT NOT NULL DEFAULT ''
     );",
+    // huddle 2.2 (audit FILES-2): the keyed-MAC content commitment for an
+    // encrypted attachment, when the sender used the private metadata form
+    // (`EncryptedFileMeta.content_mac_b64`). NULL for legacy attachments, which
+    // keep their plaintext `content_hash`. Persisted so a v2 attachment can be
+    // re-decrypted from cache across restarts (the MAC is its AEAD AAD).
+    // Additive + local-only; old DBs back-fill NULL, zero wire-format impact.
+    "ALTER TABLE room_attachments ADD COLUMN content_mac_b64 TEXT;",
 ];

@@ -418,6 +418,7 @@ mod tests {
             sender_ed25519_pubkey: Some(B64.encode(id.public_bytes())),
             sender_mlkem_pubkey: None,
             mlkem_ciphertext: None,
+            capabilities: None,
         };
         let env = sign_message_at(&id, &announce, signed_at).unwrap();
         assert!(

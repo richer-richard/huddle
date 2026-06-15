@@ -55,7 +55,22 @@ pub struct EncryptedFileMeta {
     /// SHA-256 of the plaintext, hex-encoded. Bound as AEAD associated
     /// data so the (key, nonce, ciphertext) triple can't be replayed
     /// against different content, and verified after decryption.
+    ///
+    /// huddle 2.2 (audit FILES-2): EMPTY when `content_mac_b64` is set — the
+    /// plaintext hash is exactly the relay-visible confirmation oracle we're
+    /// removing, so a v2 sender carries the keyed MAC instead and leaves this
+    /// blank. A legacy receiver (which requires this field) won't be a
+    /// recipient: the sender only goes private when every member is capable.
     pub content_hash: String,
+    /// huddle 2.2 (audit FILES-2): base64 of `HMAC-SHA256(HKDF(file_key,
+    /// "huddle-file-mac-v2"), plaintext)` — a *keyed* content commitment used
+    /// as AEAD associated data in place of `content_hash`. Only room members
+    /// (who hold the Megolm-wrapped file key) can compute it, so the relay no
+    /// longer learns `SHA256(plaintext)`. `#[serde(default, skip_serializing_if
+    /// = "Option::is_none")]` keeps pre-2.2 `FileOffer`s byte-identical; when
+    /// `None` the legacy `content_hash` path applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_mac_b64: Option<String>,
 }
 
 pub const ROOMS_TOPIC: &str = "huddle-rooms-v1";
@@ -228,6 +243,17 @@ pub struct RoomAnnouncement {
     /// `RoomKind::Group` (`Default` impl) — they keep working unchanged.
     #[serde(default)]
     pub kind: RoomKind,
+    /// huddle 2.2 (M-C4): the announcer's capability bitset
+    /// (`crate::capability`). This announcement is UNSIGNED (global topic), so a
+    /// relay can tamper with it; consumers therefore only ever OR these bits into
+    /// a peer's known caps (never clear), and the PA-1 code-join decision does
+    /// NOT rely on it (that reads the out-of-band `v2-` code marker instead —
+    /// unsuppressable). It feeds best-effort signals like the FILES-2
+    /// `room_all_support` gate, whose worst-case tamper outcome is a more-private
+    /// or failed file, never a key leak. `#[serde(default, skip_serializing_if =
+    /// "Option::is_none")]` keeps pre-2.2 announcements byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<u32>,
 }
 
 /// All messages on a room's per-room topic.
@@ -274,6 +300,15 @@ pub enum RoomMessage {
         /// the initiator sets this; the responder's announces omit it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mlkem_ciphertext: Option<String>,
+        /// huddle 2.2 (M-C4): the announcer's capability bitset
+        /// (`crate::capability`) — which new wire forms it understands, so a
+        /// sender can retire a legacy form only between two known-capable peers.
+        /// Carried inside the *signed* envelope, so a relay can't forge or strip
+        /// it without breaking the signature. `#[serde(default,
+        /// skip_serializing_if = "Option::is_none")]` keeps pre-2.2 announces
+        /// byte-identical; a missing field decodes to `None` = a legacy peer.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        capabilities: Option<u32>,
     },
     /// A request from a recently-joined member: "I need session keys".
     /// Existing members respond with MemberAnnounce.
@@ -420,7 +455,23 @@ pub enum RoomMessage {
     CodeJoinRequest {
         room_id: String,
         joiner_x25519_pubkey_b64: String,
+        /// The cleartext bearer code. huddle 2.2 (audit PA-1): a v2 joiner
+        /// detects a v2 owner from the out-of-band `CODE_JOIN_V2_PREFIX` (`v2-`)
+        /// marker on the code it was handed, leaves this EMPTY, and proves
+        /// knowledge via `code_proof` instead — so the relay never sees the code
+        /// and cannot downgrade the joiner (it never saw the OOB code). Kept as a
+        /// (non-optional) field for wire-compat: only a genuine pre-2.2 joiner
+        /// (which doesn't know the marker) still sends the real code here.
         code: String,
+        /// huddle 2.2 (audit PA-1): base64 of the 32-byte Argon2id proof of
+        /// knowledge of `code`, bound to `room_id` + `joiner_x25519_pubkey_b64`
+        /// (see `crate::crypto::code_join::derive_code_proof`). When present the
+        /// owner verifies this and ignores `code`; a malicious relay can neither
+        /// brute-force the code out of it nor rebind it to a forged ephemeral
+        /// key. `#[serde(default, skip_serializing_if = "Option::is_none")]`
+        /// keeps pre-2.2 requests byte-identical.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code_proof: Option<String>,
     },
     /// Phase F: an issuing owner's response to a valid `CodeJoinRequest`.
     /// Carries the owner's ephemeral X25519 pubkey + the current Megolm
@@ -599,6 +650,7 @@ mod tests {
             verified_only: false,
             host_addrs: vec![],
             kind: RoomKind::Group,
+            capabilities: None,
         };
         let json = serde_json::to_vec(&ann).unwrap();
         let back: RoomAnnouncement = serde_json::from_slice(&json).unwrap();
@@ -621,6 +673,7 @@ mod tests {
             verified_only: false,
             host_addrs: vec![],
             kind: RoomKind::Direct,
+            capabilities: None,
         };
         let json = serde_json::to_vec(&ann).unwrap();
         let back: RoomAnnouncement = serde_json::from_slice(&json).unwrap();
@@ -656,6 +709,7 @@ mod tests {
                 sender_ed25519_pubkey: Some("AAA=".into()),
                 sender_mlkem_pubkey: Some("BBB=".into()),
                 mlkem_ciphertext: Some("CCC=".into()),
+                capabilities: Some(crate::capability::OURS),
             },
             RoomMessage::Plain {
                 sender_fingerprint: "fp".into(),

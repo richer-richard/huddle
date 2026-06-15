@@ -19,6 +19,24 @@ impl AppHandle {
         let mime = crate::files::guess_mime(&name);
         let original_path = path.to_path_buf();
 
+        // huddle 2.2 (audit FILES-2): only use the private (keyed-MAC) file
+        // metadata when EVERY current room member is known to support it — a
+        // single legacy recipient couldn't parse it. Computed before the
+        // `active_rooms` lock below (parking_lot is non-reentrant, and
+        // `room_all_support` locks the same map).
+        //
+        // Known residual (Low): unlike the PA-1 code-join decision, this has no
+        // out-of-band anchor — caps are learned over the network. A malicious
+        // relay can withhold a member's (signed) caps-bearing MemberAnnounce to
+        // keep this `false` and hold the sender on the legacy `content_hash`
+        // form, re-arming the SHA-256(plaintext) confirmation oracle. Caps are
+        // monotonic (a relay can only withhold, never clear a learned bit), and
+        // this is still a strict improvement over pre-2.2 (which always leaked).
+        // Full closure would need persisted caps (sticky like `pq_capable`) or a
+        // room-level "require private metadata" policy — deferred, low severity.
+        let private_meta =
+            self.room_all_support(room_id, huddle_protocol::capability::FILE_META_PRIVATE);
+
         let (room_encrypted, mut maybe_session_id, encrypted_meta_opt, wire_bytes) = {
             let mut rooms = self.active_rooms.lock();
             let room = rooms
@@ -38,7 +56,8 @@ impl AppHandle {
                     .crypto
                     .as_mut()
                     .ok_or_else(|| HuddleError::Session("missing room crypto".into()))?;
-                let (ciphertext, meta) = file_encryption::encrypt_file(&bytes, crypto)?;
+                let (ciphertext, meta) =
+                    file_encryption::encrypt_file(&bytes, crypto, private_meta)?;
                 (
                     true,
                     Some(meta.megolm_session_id.clone()),
@@ -85,6 +104,9 @@ impl AppHandle {
                 .as_ref()
                 .map(|m| m.megolm_session_id.clone()),
             content_hash: encrypted_meta_opt.as_ref().map(|m| m.content_hash.clone()),
+            content_mac_b64: encrypted_meta_opt
+                .as_ref()
+                .and_then(|m| m.content_mac_b64.clone()),
             created_at: now_unix(),
         };
         repo::upsert_attachment(&self.db, &attachment)?;
@@ -196,10 +218,8 @@ impl AppHandle {
                         .nonce
                         .clone()
                         .ok_or_else(|| HuddleError::Other("missing nonce".into()))?,
-                    content_hash: attachment
-                        .content_hash
-                        .clone()
-                        .ok_or_else(|| HuddleError::Other("missing content_hash".into()))?,
+                    content_hash: attachment.content_hash.clone().unwrap_or_default(),
+                    content_mac_b64: attachment.content_mac_b64.clone(),
                 };
                 self.decrypt_attachment(room_id, &attachment.sender_fingerprint, &cached, &meta)?
             } else {

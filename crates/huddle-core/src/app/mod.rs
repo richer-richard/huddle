@@ -435,6 +435,21 @@ pub struct AppHandle {
     /// re-announcing in response to an inbound `SessionKeyRequest`, throttling
     /// the amplification/reflection vector.
     announce_on_request_cooldown: Arc<Mutex<HashMap<String, i64>>>,
+    /// huddle 2.2 (M-C4): per-fingerprint capability bitset
+    /// (`huddle_protocol::capability`), learned from a peer's SIGNED
+    /// `MemberAnnounce` (authoritative — a relay can't forge it) and from the
+    /// `creator_fingerprint` of a `RoomAnnouncement` (so a code-joiner knows the
+    /// owner's caps before it subscribes). Drives whether we send the PA-1-safe
+    /// code-join proof and the FILES-2 private file metadata. In-memory only;
+    /// re-populated as peers re-announce after a restart.
+    peer_capabilities: Arc<Mutex<HashMap<String, u32>>>,
+    /// huddle 2.2 (audit PA-1): per-room sliding-window counter
+    /// (room_id → (window_start_unix, attempts)) bounding how many code-join
+    /// *proof* verifications the owner will perform per minute. Each proof costs
+    /// one memory-hard Argon2id, so this caps a malicious peer's ability to
+    /// amplify CPU/memory via a flood of forged `CodeJoinRequest`s — and
+    /// doubles as the online-guess limiter against the ~40-bit code.
+    code_proof_attempts: Arc<Mutex<HashMap<String, (i64, u32)>>>,
     /// huddle 0.5: per-peer last-broadcast timestamp (ms) for our own
     /// `ProfileUpdate`. The `PeerIdentified` handler re-broadcasts our
     /// current username to a newly-identified peer so they learn it
@@ -809,6 +824,8 @@ impl AppHandle {
             host_addr_dial_attempts: Arc::new(Mutex::new(HashMap::new())),
             key_request_cooldown: Arc::new(Mutex::new(HashMap::new())),
             announce_on_request_cooldown: Arc::new(Mutex::new(HashMap::new())),
+            peer_capabilities: Arc::new(Mutex::new(HashMap::new())),
+            code_proof_attempts: Arc::new(Mutex::new(HashMap::new())),
             last_profile_broadcast_at_ms: Arc::new(Mutex::new(HashMap::new())),
             pending_auto_dm_addrs: Arc::new(Mutex::new(HashSet::new())),
             app_event_tx,
@@ -994,6 +1011,8 @@ impl AppHandle {
                 restorable: false,
                 host_addrs: Vec::new(),
                 kind: room.info.kind,
+                // Our own room: we are the announcer, so advertise our caps.
+                capabilities: Some(huddle_protocol::capability::OURS),
             };
             by_id
                 .entry(room.info.id.clone())
@@ -1027,6 +1046,8 @@ impl AppHandle {
                     restorable: true,
                     host_addrs: Vec::new(),
                     kind: stored.kind,
+                    // Parked on disk; caps unknown until a fresh announce lands.
+                    capabilities: None,
                 },
             );
         }
@@ -1589,6 +1610,9 @@ impl AppHandle {
             nonce: encrypted_meta.as_ref().map(|m| m.nonce_b64.clone()),
             megolm_session_id: encrypted_meta.as_ref().map(|m| m.megolm_session_id.clone()),
             content_hash: encrypted_meta.as_ref().map(|m| m.content_hash.clone()),
+            content_mac_b64: encrypted_meta
+                .as_ref()
+                .and_then(|m| m.content_mac_b64.clone()),
             created_at: now_unix(),
         };
         if let Err(e) = repo::upsert_attachment(&self.db, &attachment) {

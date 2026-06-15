@@ -102,10 +102,16 @@ impl AppHandle {
         Ok(new_passphrase)
     }
 
-    /// Phase F: generate an 8-char alphanumeric join code for `room_id`,
-    /// good for 10 minutes. Stored in memory only on the issuing owner's
-    /// machine — a single use clears it. Caller is responsible for
-    /// sharing the code OOB with the prospective joiner.
+    /// Phase F: generate a join code for `room_id`, good for 10 minutes. Stored
+    /// in memory only on the issuing owner's machine — a single use clears it.
+    /// Caller is responsible for sharing the code OOB with the prospective joiner.
+    ///
+    /// huddle 2.2 (audit PA-1): the code carries the `CODE_JOIN_V2_PREFIX` marker
+    /// (`v2-XXXX-XXXX`). The joiner detects the marker in the code we handed it
+    /// out-of-band and sends a proof-of-knowledge instead of the cleartext code,
+    /// so a malicious relay never learns it. The marker travels OOB, so the relay
+    /// cannot strip it to force the legacy cleartext path (it could strip a
+    /// network-advertised capability bit).
     ///
     /// Owner-only. Errors if `room_id` isn't active or we're not an owner.
     pub fn generate_join_code(&self, room_id: &str) -> Result<String> {
@@ -115,7 +121,11 @@ impl AppHandle {
                 "only an owner can issue join codes".into(),
             ));
         }
-        let code = generate_alphanumeric_code(8);
+        let code = format!(
+            "{}{}",
+            crate::crypto::code_join::CODE_JOIN_V2_PREFIX,
+            generate_alphanumeric_code(8)
+        );
         let expires_at = now_unix() + 10 * 60;
         let mut rooms = self.active_rooms.lock();
         let room = rooms
@@ -228,11 +238,30 @@ impl AppHandle {
             },
         );
         self.network.subscribe_room(room_id.to_string()).await;
+        // huddle 2.2 (audit PA-1): decide the request form from the OUT-OF-BAND
+        // code itself, not from any relay-mediated capability. A v2 owner's code
+        // carries `CODE_JOIN_V2_PREFIX`; seeing it, we prove knowledge of the
+        // code (bound to this ephemeral pubkey + room) and never put the code on
+        // the wire — so a malicious relay can neither read it nor rebind the
+        // proof to a forged key, AND cannot downgrade us, because it never saw
+        // the OOB code and so cannot strip the marker. A code WITHOUT the marker
+        // can only have come from a genuine pre-2.2 owner (the legacy alphabet is
+        // uppercase-only and never produces the marker), so we fall back to the
+        // cleartext code purely for interop with such owners.
+        let code_is_v2 = code.starts_with(crate::crypto::code_join::CODE_JOIN_V2_PREFIX);
+        let (code_field, code_proof_field) = if code_is_v2 {
+            let proof =
+                crate::crypto::code_join::derive_code_proof(code, room_id, our_pub.as_bytes())?;
+            (String::new(), Some(B64.encode(proof)))
+        } else {
+            (code.to_string(), None)
+        };
         // Broadcast the request.
         let req = RoomMessage::CodeJoinRequest {
             room_id: room_id.to_string(),
             joiner_x25519_pubkey_b64: B64.encode(our_pub.as_bytes()),
-            code: code.to_string(),
+            code: code_field,
+            code_proof: code_proof_field,
         };
         let env = crate::crypto::sign_message(&self.identity, &req)?;
         let bytes = crate::network::protocol::encode_wire_signed(&env)?;

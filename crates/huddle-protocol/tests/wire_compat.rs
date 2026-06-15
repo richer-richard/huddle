@@ -176,10 +176,57 @@ fn encrypted_file_meta_round_trips() {
         wrapped_key_b64: "wk".into(),
         nonce_b64: "n".into(),
         content_hash: "h".into(),
+        content_mac_b64: None,
     };
     let s = serde_json::to_string(&meta).unwrap();
     let back: EncryptedFileMeta = serde_json::from_str(&s).unwrap();
     assert_eq!(meta, back);
+}
+
+#[test]
+fn mc4_new_fields_are_additive_both_directions() {
+    // huddle 2.2 (M-C4 / PA-1 / FILES-2): prove the new optional fields are
+    // additive in BOTH directions.
+    //
+    // (a) Forward compat — a NEW peer reading an OLD message: a pre-2.2
+    //     CodeJoinRequest (no `code_proof`) / EncryptedFileMeta (no
+    //     `content_mac_b64`) / MemberAnnounce (no `capabilities`) decodes, with
+    //     the new field defaulting to None.
+    let legacy_req: RoomMessage = serde_json::from_value(json!({
+        "CodeJoinRequest": {"room_id": "r", "joiner_x25519_pubkey_b64": "ek", "code": "c"}
+    }))
+    .unwrap();
+    match legacy_req {
+        RoomMessage::CodeJoinRequest {
+            code_proof, code, ..
+        } => {
+            assert!(code_proof.is_none());
+            assert_eq!(code, "c");
+        }
+        _ => panic!("expected CodeJoinRequest"),
+    }
+    let legacy_meta: EncryptedFileMeta = serde_json::from_value(json!({
+        "megolm_session_id": "s", "wrapped_key_b64": "w", "nonce_b64": "n", "content_hash": "h"
+    }))
+    .unwrap();
+    assert!(legacy_meta.content_mac_b64.is_none());
+
+    // (b) Backward compat — an OLD peer reading a NEW message: serde ignores
+    //     unknown fields (no `deny_unknown_fields` anywhere), so a v2 message
+    //     with the extra field decodes cleanly on a peer that doesn't know it.
+    let v2_with_unknown: RoomMessage = serde_json::from_value(json!({
+        "CodeJoinRequest": {
+            "room_id": "r", "joiner_x25519_pubkey_b64": "ek", "code": "",
+            "code_proof": "pf", "a_field_from_an_even_newer_peer": 1234
+        }
+    }))
+    .unwrap();
+    match v2_with_unknown {
+        RoomMessage::CodeJoinRequest { code_proof, .. } => {
+            assert_eq!(code_proof.as_deref(), Some("pf"));
+        }
+        _ => panic!("expected CodeJoinRequest"),
+    }
 }
 
 #[test]
@@ -251,7 +298,8 @@ fn wire_golden_bytes_are_frozen() {
             display_name: None,
             sender_ed25519_pubkey: None,
             sender_mlkem_pubkey: None,
-            mlkem_ciphertext: None
+            mlkem_ciphertext: None,
+            capabilities: None
         }
     );
     pin!(
@@ -262,7 +310,22 @@ fn wire_golden_bytes_are_frozen() {
             display_name: Some("dn".into()),
             sender_ed25519_pubkey: Some("ek".into()),
             sender_mlkem_pubkey: Some("mk".into()),
-            mlkem_ciphertext: Some("ct".into())
+            mlkem_ciphertext: Some("ct".into()),
+            capabilities: None
+        }
+    );
+    // huddle 2.2 (M-C4): the new capability field serializes when Some — pinned
+    // on its own line so the existing two stay byte-frozen (additivity proof).
+    pin!(
+        "MemberAnnounce.caps",
+        RoomMessage::MemberAnnounce {
+            sender_fingerprint: "fp".into(),
+            wrapped_session_key: None,
+            display_name: None,
+            sender_ed25519_pubkey: None,
+            sender_mlkem_pubkey: None,
+            mlkem_ciphertext: None,
+            capabilities: Some(3)
         }
     );
     pin!(
@@ -382,7 +445,18 @@ fn wire_golden_bytes_are_frozen() {
         RoomMessage::CodeJoinRequest {
             room_id: "r".into(),
             joiner_x25519_pubkey_b64: "ek".into(),
-            code: "c".into()
+            code: "c".into(),
+            code_proof: None
+        }
+    );
+    // huddle 2.2 (audit PA-1): the v2 form carries an empty code + the proof.
+    pin!(
+        "CodeJoinRequest.proof",
+        RoomMessage::CodeJoinRequest {
+            room_id: "r".into(),
+            joiner_x25519_pubkey_b64: "ek".into(),
+            code: "".into(),
+            code_proof: Some("pf".into())
         }
     );
     pin!(
@@ -513,7 +587,19 @@ fn wire_golden_bytes_are_frozen() {
             megolm_session_id: "sid".into(),
             wrapped_key_b64: "wk".into(),
             nonce_b64: "n".into(),
-            content_hash: "h".into()
+            content_hash: "h".into(),
+            content_mac_b64: None
+        }
+    );
+    // huddle 2.2 (audit FILES-2): v2 form carries the keyed MAC + empty hash.
+    pin!(
+        "EncryptedFileMeta.mac",
+        EncryptedFileMeta {
+            megolm_session_id: "sid".into(),
+            wrapped_key_b64: "wk".into(),
+            nonce_b64: "n".into(),
+            content_hash: "".into(),
+            content_mac_b64: Some("mac".into())
         }
     );
     pin!(
@@ -529,7 +615,26 @@ fn wire_golden_bytes_are_frozen() {
             owner_fingerprints: vec!["fp".into()],
             verified_only: false,
             host_addrs: vec![],
-            kind: RoomKind::Group
+            kind: RoomKind::Group,
+            capabilities: None
+        }
+    );
+    // huddle 2.2 (M-C4): announcer caps surface at discovery time when Some.
+    pin!(
+        "RoomAnnouncement.caps",
+        RoomAnnouncement {
+            room_id: "r".into(),
+            name: "n".into(),
+            encrypted: true,
+            passphrase_salt: Some(vec![1, 2]),
+            member_count: 2,
+            creator_fingerprint: "fp".into(),
+            announced_at: 7,
+            owner_fingerprints: vec!["fp".into()],
+            verified_only: false,
+            host_addrs: vec![],
+            kind: RoomKind::Group,
+            capabilities: Some(3)
         }
     );
 
@@ -657,6 +762,7 @@ fn wire_golden_bytes_are_frozen() {
 
 const EXPECTED: &str = r#"MemberAnnounce = {"MemberAnnounce":{"sender_fingerprint":"fp","wrapped_session_key":null,"display_name":null,"sender_ed25519_pubkey":null}}
 MemberAnnounce.full = {"MemberAnnounce":{"sender_fingerprint":"fp","wrapped_session_key":"wsk","display_name":"dn","sender_ed25519_pubkey":"ek","sender_mlkem_pubkey":"mk","mlkem_ciphertext":"ct"}}
+MemberAnnounce.caps = {"MemberAnnounce":{"sender_fingerprint":"fp","wrapped_session_key":null,"display_name":null,"sender_ed25519_pubkey":null,"capabilities":3}}
 SessionKeyRequest = {"SessionKeyRequest":{"requester_fingerprint":"fp"}}
 Encrypted = {"Encrypted":{"sender_fingerprint":"fp","session_id":"sid","ciphertext_b64":"ct"}}
 Plain = {"Plain":{"sender_fingerprint":"fp","body":"hi"}}
@@ -672,6 +778,7 @@ SasResponse = {"SasResponse":{"tx_id":"tx","ephemeral_x25519_pubkey_b64":"ek"}}
 SasConfirm = {"SasConfirm":{"tx_id":"tx","matched":true}}
 JoinRefused = {"JoinRefused":{"room_id":"r","target_fingerprint":"fp","reason":"no"}}
 CodeJoinRequest = {"CodeJoinRequest":{"room_id":"r","joiner_x25519_pubkey_b64":"ek","code":"c"}}
+CodeJoinRequest.proof = {"CodeJoinRequest":{"room_id":"r","joiner_x25519_pubkey_b64":"ek","code":"","code_proof":"pf"}}
 CodeJoinResponse = {"CodeJoinResponse":{"room_id":"r","target_fingerprint":"fp","owner_x25519_pubkey_b64":"ek","owner_session_id":"sid","wrapped_session_key_b64":"wsk","nonce_b64":"n"}}
 ProfileUpdate = {"ProfileUpdate":{"sender_fingerprint":"fp","username":null,"updated_at":5}}
 ContactRequest = {"ContactRequest":{"requester_fingerprint":"fp","display_name":null,"note":null,"sender_ed25519_pubkey":null}}
@@ -687,7 +794,9 @@ WireMessage::Plain = {"type":"plain","data":{"Typing":{"sender_fingerprint":"fp"
 SignedRoomMessage = {"fingerprint":"fp","ed25519_pubkey_b64":"pk","payload_b64":"pl","signature_b64":"sig","signed_at_ms":1234}
 SignedRoomMessage.pq = {"fingerprint":"fp","ed25519_pubkey_b64":"pk","payload_b64":"pl","signature_b64":"sig","signed_at_ms":1234,"mldsa_pubkey_b64":"mk","mldsa_signature_b64":"ms"}
 EncryptedFileMeta = {"megolm_session_id":"sid","wrapped_key_b64":"wk","nonce_b64":"n","content_hash":"h"}
+EncryptedFileMeta.mac = {"megolm_session_id":"sid","wrapped_key_b64":"wk","nonce_b64":"n","content_hash":"","content_mac_b64":"mac"}
 RoomAnnouncement = {"room_id":"r","name":"n","encrypted":true,"passphrase_salt":[1,2],"member_count":2,"creator_fingerprint":"fp","announced_at":7,"owner_fingerprints":["fp"],"verified_only":false,"host_addrs":[],"kind":"group"}
+RoomAnnouncement.caps = {"room_id":"r","name":"n","encrypted":true,"passphrase_salt":[1,2],"member_count":2,"creator_fingerprint":"fp","announced_at":7,"owner_fingerprints":["fp"],"verified_only":false,"host_addrs":[],"kind":"group","capabilities":3}
 ClientMsg::Hello = {"type":"hello","fingerprint":"fp","pubkey_b64":"pk","signature_b64":"sig","rooms":["r"],"acks":true}
 ClientMsg::Subscribe = {"type":"subscribe","room":"r"}
 ClientMsg::Unsubscribe = {"type":"unsubscribe","room":"r"}

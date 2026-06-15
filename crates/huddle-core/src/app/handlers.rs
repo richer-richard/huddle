@@ -107,6 +107,14 @@ impl AppHandle {
                         }
                     }
                 }
+                // huddle 2.2 (M-C4): best-effort discovery-time capability hint.
+                // RoomAnnouncement is unsigned, so `record_peer_capabilities`
+                // only OR-s bits in (a relay can add, never clear) and the
+                // authoritative caps still come from the signed MemberAnnounce;
+                // keyed by creator_fingerprint since the creator overwhelmingly
+                // announces their own room. A wrong guess only costs a code-join
+                // retry, never a key leak.
+                self.record_peer_capabilities(&ann.creator_fingerprint, ann.capabilities);
                 let discovered = DiscoveredRoom {
                     room_id: ann.room_id.clone(),
                     name: ann.name.clone(),
@@ -117,6 +125,7 @@ impl AppHandle {
                     restorable: false,
                     host_addrs: ann.host_addrs.clone(),
                     kind: ann.kind,
+                    capabilities: ann.capabilities,
                 };
                 // If we're already in this room, cache the announcement so
                 // others can still discover it through us, but don't emit
@@ -724,6 +733,7 @@ impl AppHandle {
                 sender_ed25519_pubkey,
                 sender_mlkem_pubkey,
                 mlkem_ciphertext,
+                capabilities,
             } => {
                 if sender_fingerprint == our_fp {
                     return;
@@ -754,6 +764,10 @@ impl AppHandle {
                     warn!(%signer, %sender_fingerprint, %room_id, "MemberAnnounce signer mismatch; dropping");
                     return;
                 }
+                // huddle 2.2 (M-C4): record the announcer's advertised caps now
+                // that the signature + signer==sender checks have authenticated
+                // them. Used to gate the PA-1 proof and FILES-2 private metadata.
+                self.record_peer_capabilities(&sender_fingerprint, capabilities);
                 // Drop announcements from banned fingerprints — they
                 // can't rejoin until an owner unbans them (Phase B).
                 if repo::is_member_banned(&self.db, room_id, &sender_fingerprint).unwrap_or(false) {
@@ -1516,6 +1530,7 @@ impl AppHandle {
                 room_id: announced_room_id,
                 joiner_x25519_pubkey_b64,
                 code,
+                code_proof,
             } => {
                 if announced_room_id != room_id {
                     return;
@@ -1534,9 +1549,51 @@ impl AppHandle {
                 if !self.is_owner(room_id, &our_fp) {
                     return;
                 }
-                // Match + consume the code. Single use.
+                // huddle 2.2 (audit PA-1): the joiner's ephemeral pubkey bytes —
+                // bound into the proof so a relay can't rebind it to a forged key.
+                let joiner_pub_bytes: [u8; 32] = match B64
+                    .decode(&joiner_x25519_pubkey_b64)
+                    .ok()
+                    .and_then(|v| <[u8; 32]>::try_from(v.as_slice()).ok())
+                {
+                    Some(b) => b,
+                    None => {
+                        warn!("CodeJoinRequest: bad joiner pubkey; dropping");
+                        return;
+                    }
+                };
+                // Decode the proof (v2 path) once, rate-limited so a flood of
+                // forged requests can't amplify into unbounded Argon2id work.
+                let proof_bytes: Option<[u8; 32]> = match &code_proof {
+                    Some(p) => {
+                        if !self.allow_code_proof_attempt(room_id) {
+                            info!(%joiner_fp, %room_id, "CodeJoinRequest: proof rate limit; dropping");
+                            return;
+                        }
+                        match B64
+                            .decode(p)
+                            .ok()
+                            .and_then(|v| <[u8; 32]>::try_from(v.as_slice()).ok())
+                        {
+                            Some(b) => Some(b),
+                            None => {
+                                warn!("CodeJoinRequest: bad code_proof; dropping");
+                                return;
+                            }
+                        }
+                    }
+                    None => None,
+                };
+                // Match + consume an unexpired issued code. Single use; strict
+                // expiry is enforced by pruning so a code can never be honored
+                // past its 10-minute life.
                 let now = now_unix();
-                let (code_ok, our_session_id, wrap_input) = {
+                // Snapshot the unexpired codes under the lock (cheap), then verify
+                // OUTSIDE it: each v2 proof check is one memory-hard Argon2id, and
+                // `active_rooms` is the central map locked on every send/receive/
+                // announce — running the loop under the lock would let a (rate-
+                // limited) flood of forged proofs stall all room operations.
+                let snapshot: Vec<String> = {
                     let mut rooms = self.active_rooms.lock();
                     let room = match rooms.get_mut(room_id) {
                         Some(r) => r,
@@ -1546,18 +1603,56 @@ impl AppHandle {
                         warn!("CodeJoinRequest: no passphrase key locally; can't respond");
                         return;
                     }
-                    let original_len = room.issued_codes.len();
-                    room.issued_codes
-                        .retain(|(c, exp)| !(c == &code && *exp > now));
-                    let matched = room.issued_codes.len() < original_len;
-                    if !matched {
+                    room.issued_codes.retain(|(_, exp)| *exp > now);
+                    room.issued_codes.iter().map(|(c, _)| c.clone()).collect()
+                };
+                let matched_code = match &proof_bytes {
+                    // v2: the cleartext code never arrived — verify the memory-hard
+                    // proof against each unexpired issued code (no lock held).
+                    Some(proof) => snapshot.into_iter().find(|c| {
+                        crate::crypto::code_join::verify_code_proof(
+                            c,
+                            room_id,
+                            &joiner_pub_bytes,
+                            proof,
+                        )
+                        .unwrap_or(false)
+                    }),
+                    // legacy (pre-2.2 joiner): exact cleartext match.
+                    None => snapshot.into_iter().find(|c| c == &code),
+                };
+                let matched_code = match matched_code {
+                    Some(c) => c,
+                    None => {
                         info!(%joiner_fp, "CodeJoinRequest: code invalid or expired; ignoring");
                         return;
                     }
-                    let crypto = room.crypto.as_ref().unwrap();
-                    (true, crypto.our_session_id(), crypto.our_session_key_b64())
                 };
-                let _ = code_ok;
+                // Re-acquire the lock to consume the matched code (single-use) and
+                // read the session. Re-check presence+expiry: a concurrent request
+                // may have already consumed this code while we verified unlocked.
+                let (our_session_id, wrap_input) = {
+                    let mut rooms = self.active_rooms.lock();
+                    let room = match rooms.get_mut(room_id) {
+                        Some(r) => r,
+                        None => return,
+                    };
+                    let now = now_unix();
+                    let pos = room
+                        .issued_codes
+                        .iter()
+                        .position(|(c, exp)| c == &matched_code && *exp > now);
+                    let idx = match pos {
+                        Some(i) => i,
+                        None => {
+                            info!(%joiner_fp, "CodeJoinRequest: code already consumed/expired; ignoring");
+                            return;
+                        }
+                    };
+                    room.issued_codes.remove(idx);
+                    let crypto = room.crypto.as_ref().unwrap();
+                    (crypto.our_session_id(), crypto.our_session_key_b64())
+                };
                 // ECDH with the joiner's ephemeral pubkey.
                 let their_pub = match crate::crypto::sas::parse_pubkey(&joiner_x25519_pubkey_b64) {
                     Ok(pk) => pk,

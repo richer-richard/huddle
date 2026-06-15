@@ -1937,6 +1937,10 @@ pub struct StoredAttachment {
     /// as AEAD associated data so the wrapped key + nonce + ciphertext
     /// can't be replayed against different content.
     pub content_hash: Option<String>,
+    /// huddle 2.2 (audit FILES-2): the keyed-MAC content commitment when the
+    /// sender used the private metadata form. `Some` ⟹ the AEAD AAD is this MAC
+    /// (and `content_hash` is empty); `None` ⟹ legacy `content_hash` path.
+    pub content_mac_b64: Option<String>,
     pub created_at: i64,
 }
 
@@ -1948,8 +1952,8 @@ pub fn upsert_attachment(db: &Db, a: &StoredAttachment) -> Result<()> {
             (room_id, message_id, sender_fingerprint, file_id, name, mime,
              size_bytes, status, cache_path, saved_path, error,
              encrypted, wrapped_key, nonce, megolm_session_id, created_at,
-             content_hash)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+             content_hash, content_mac_b64)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
          ON CONFLICT(room_id, file_id) DO UPDATE SET
             name = excluded.name,
             mime = excluded.mime,
@@ -1967,7 +1971,8 @@ pub fn upsert_attachment(db: &Db, a: &StoredAttachment) -> Result<()> {
             wrapped_key = COALESCE(excluded.wrapped_key, room_attachments.wrapped_key),
             nonce       = COALESCE(excluded.nonce, room_attachments.nonce),
             megolm_session_id = COALESCE(excluded.megolm_session_id, room_attachments.megolm_session_id),
-            content_hash = COALESCE(excluded.content_hash, room_attachments.content_hash)",
+            content_hash = COALESCE(excluded.content_hash, room_attachments.content_hash),
+            content_mac_b64 = COALESCE(excluded.content_mac_b64, room_attachments.content_mac_b64)",
         params![
             a.room_id,
             a.message_id,
@@ -1986,6 +1991,7 @@ pub fn upsert_attachment(db: &Db, a: &StoredAttachment) -> Result<()> {
             a.megolm_session_id,
             a.created_at,
             a.content_hash,
+            a.content_mac_b64,
         ],
     )?;
     Ok(())
@@ -2013,6 +2019,7 @@ fn row_to_attachment(row: &rusqlite::Row) -> rusqlite::Result<StoredAttachment> 
         megolm_session_id: row.get(15)?,
         created_at: row.get(16)?,
         content_hash: row.get(17)?,
+        content_mac_b64: row.get(18)?,
     })
 }
 
@@ -2022,7 +2029,7 @@ pub fn get_attachment(db: &Db, room_id: &str, file_id: &str) -> Result<Option<St
         "SELECT id, room_id, message_id, sender_fingerprint, file_id, name, mime,
                 size_bytes, status, cache_path, saved_path, error,
                 encrypted, wrapped_key, nonce, megolm_session_id, created_at,
-                content_hash
+                content_hash, content_mac_b64
          FROM room_attachments WHERE room_id = ?1 AND file_id = ?2",
     )?;
     let mut rows = stmt.query_map(params![room_id, file_id], row_to_attachment)?;
@@ -2043,7 +2050,7 @@ pub fn list_room_attachments(db: &Db, room_id: &str) -> Result<Vec<StoredAttachm
         "SELECT id, room_id, message_id, sender_fingerprint, file_id, name, mime,
                 size_bytes, status, cache_path, saved_path, error,
                 encrypted, wrapped_key, nonce, megolm_session_id, created_at,
-                content_hash
+                content_hash, content_mac_b64
          FROM (
              SELECT * FROM room_attachments WHERE room_id = ?1
              ORDER BY created_at DESC LIMIT ?2
@@ -2404,6 +2411,7 @@ mod tests {
             nonce: None,
             megolm_session_id: None,
             content_hash: None,
+            content_mac_b64: None,
             created_at: 100,
         }
     }

@@ -17,6 +17,7 @@
 //! unaffected). New optional fields use `#[serde(default, skip_serializing_if
 //! = "...")]` so they stay off the wire when unset.
 
+pub mod capability;
 pub mod crypto;
 pub mod error;
 pub mod identity;
