@@ -24,7 +24,7 @@ jobs:
       # huddle 2.1.2 (audit SCB-1): third-party actions pinned to commit SHAs;
       # dtolnay/rust-toolchain pinned to its master commit with the channel passed
       # via the `toolchain:` input.
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
         with:
           toolchain: nightly
