@@ -10,6 +10,22 @@ updates:
     groups:
       patch-and-minor:
         update-types: [minor, patch]
+    ignore:
+      # rand 0.9 moved ThreadRng onto rand_core 0.9, but ed25519-dalek 2.x,
+      # argon2, and chacha20poly1305's aead still depend on rand_core 0.6 — so a
+      # 0.9 bump fails to compile (the `CryptoRngCore` bound is on the other
+      # rand_core). Stay on 0.8.x until the crypto stack moves; revisit by hand.
+      - dependency-name: "rand"
+        update-types:
+          - "version-update:semver-minor"
+          - "version-update:semver-major"
+      # tokio-tungstenite 0.25+ is an API-breaking jump (for 0.x, minor = breaking)
+      # the relay's WebSocket code doesn't build against yet. Adopt deliberately
+      # rather than via an auto-PR that only reds-out CI.
+      - dependency-name: "tokio-tungstenite"
+        update-types:
+          - "version-update:semver-minor"
+          - "version-update:semver-major"
   # Keep the GitHub Actions in these workflows current.
   - package-ecosystem: github-actions
     directory: "/"

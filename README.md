@@ -81,7 +81,7 @@ huddle ships three binaries — install whichever you need:
 
 ### From crates.io
 
-With a stable [Rust toolchain](https://rustup.rs) (edition 2021, 1.75+):
+With a stable [Rust toolchain](https://rustup.rs) (edition 2021, 1.92+):
 
 ```bash
 cargo install huddle-gui      # native desktop GUI
@@ -209,7 +209,7 @@ per-OS app directory:
 
 ```
 +----------------------------------------------------------------------+
-| huddle 2.2.0  ·  745e-fe8a-…  ·  relay ●               12:34 UTC     |
+| huddle 2.2.1  ·  745e-fe8a-…  ·  relay ●               12:34 UTC     |
 +------------------------+---------------------------------------------+
 | ▾ Profile              | # general                                   |
 |   alice  HD-AAAA-…  ●  |   4 members · encrypted                     |
@@ -660,6 +660,21 @@ native dialog for a path-entry box.
   rotates on a schedule + on membership change), bounding the exposure
   window; the full fix — a Double Ratchet seeded from the hybrid root key —
   is sequenced in `docs/ROADMAP-2.0-and-beyond.md`.
+
+## What's new in 2.2.1 — CI / toolchain hygiene (no functional changes)
+
+A maintenance patch with **no client, relay, or wire changes** — 2.2.1 installs and
+interoperates exactly like 2.2.0.
+
+- **MSRV is declared honestly as Rust 1.92.** The informational "MSRV" CI gate still
+  claimed 1.75, but `Cargo.lock` is now lockfile format v4 (parseable only by cargo
+  ≥ 1.78) and the `egui`/`eframe` 0.34 stack the GUI builds on requires 1.92 — so the
+  job had been red on every PR. The floor is now 1.92, the true workspace minimum.
+- **Two incompatible dependency bumps are pinned.** `rand 0.9` (moves `ThreadRng` onto
+  a `rand_core` newer than the one `ed25519-dalek` / `argon2` / `chacha20poly1305` use)
+  and `tokio-tungstenite 0.25+` don't build against the current crypto / WebSocket code,
+  so Dependabot no longer re-proposes them — dependency PRs stop reddening CI until those
+  upgrades are made deliberately.
 
 ## What's new in 2.2.0 — closing the two deferred audit findings (PA-1, FILES-2)
 
